@@ -11,11 +11,13 @@ name: Dependabot auto-merge
 # Title formats Dependabot emits:
 #   - "deps: bump the npm-patches group with 5 updates"
 #   - "deps: bump the npm-minor-major group with 2 updates"
+#   - "deps: bump the npm-minor-major group across 1 directory with 4 updates"
 #   - "deps: bump express from 7.5.1 to 8.5.1 in the npm-minor-major group"
 #   - "deps: bump playwright from 1.57.0 to 1.60.0"
 #   - "deps(pip): update fastapi requirement from ==0.137.* to ==0.138.*"
 #   - "deps(pip): update pytest requirement from >=9.1.0 to >=9.1.1"
 #   - "deps(pip): bump sphinxcontrib-programoutput from 0.19 to 0.20"
+#   - "deps(pip): update click requirement from <9,>=8.4.1 to >=8.4.2,<9"
 
 on:
   workflow_run:
@@ -88,48 +90,87 @@ jobs:
           # ------------------------------------------------------------------
           # Classify the bump. Policy: patch AND minor bumps ship automatically;
           # only major version bumps need a human to review.
+          #
+          # Anything this cannot classify with confidence is left open rather
+          # than merged. A stuck PR costs a week; a wrong merge costs an outage
+          # (express 4→5, stripe 14→15, typescript 6→7).
           # ------------------------------------------------------------------
           TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
           BODY=$(echo "$PR_DATA"  | jq -r '.body  // ""')
           REASON=""
           SKIP_REASON=""
 
-          # 1. Grouped patch PRs ("in the X-patches group" / "bump the X-patches group")
-          if echo "$TITLE" | grep -qiE '(the |in the )[a-z0-9-]+-patches group'; then
-            REASON="grouped patches"
-
-          # 2. Grouped minor / minor-major PRs: auto-merge only when every
-          #    bump in the group stays on the same major version.
-          #    Dependabot body lines: "Updates X from 1.2.3 to 1.3.0"
-          elif echo "$TITLE" | grep -qiE '(the |in the )[a-z0-9-]+-minor(-major)? group'; then
-            HAS_MAJOR=$(echo "$BODY" \
-              | grep -oE 'from [0-9][0-9.]+ to [0-9][0-9.]+' \
-              | sed -E 's/from ([0-9]+)[^ ]* to ([0-9]+).*/\1 \2/' \
-              | awk '$1 != $2 {print "MAJOR"; exit}')
-            if [ -n "$HAS_MAJOR" ]; then
-              SKIP_REASON="grouped PR contains a major version bump"
-            else
-              REASON="grouped minors (no major bumps)"
+          # Major version number of one side of a "from … to …" pair.
+          #
+          # Dependabot writes a two-sided pip range with its bounds in the
+          # opposite order on each side:
+          #     "from <9,>=8.4.1 to >=8.4.2,<9"
+          # so reading the first number on each side compares the upper bound
+          # (9) against the lower one (8) and invents a phantom "9 → 8" major.
+          # That is why patch-level pip PRs used to sit open forever. Prefer
+          # the ">=" lower bound; fall back to the first version token so
+          # "==1.2.*", "~=1.2.3", "1.2.3" and "0.19" still classify.
+          major_of() {
+            local side="$1" maj
+            maj=$(printf '%s' "$side" | grep -oE '>=[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+            if [ -z "$maj" ]; then
+              maj=$(printf '%s' "$side" | grep -oE '[0-9]+' | head -1 || true)
             fi
+            printf '%s' "$maj"
+          }
 
-          else
-            # 3. Single-package PR: extract the major version number from the
-            #    "from … to …" pair in the title. Handles full semver (1.2.3),
-            #    two-part (0.19), pip pinned (==1.2.*), and pip range (>=1.2.0).
-            FROM_MAJ=$(echo " $TITLE " | grep -oE ' from [^0-9]*[0-9]+' | grep -oE '[0-9]+$' | head -1)
-            TO_MAJ=$(echo " $TITLE "   | grep -oE ' to [^0-9]*[0-9]+'   | grep -oE '[0-9]+$' | head -1)
+          # "<from-major> <to-major>" for every bump listed in a grouped PR
+          # body. Anchored on Dependabot's own "Updates `pkg` from A to B"
+          # line so changelog prose ("migrated from 2 to 3 phases") cannot be
+          # misread as a version bump.
+          body_pairs() {
+            printf '%s' "$BODY" \
+              | grep -oE 'Updates `[^`]+` from [0-9][0-9.]* to [0-9][0-9.]*' \
+              | sed -E 's/.* from ([0-9]+)[^ ]* to ([0-9]+).*/\1 \2/' || true
+          }
 
-            if [ -z "$FROM_MAJ" ] || [ -z "$TO_MAJ" ]; then
+          case "$TITLE" in
+            # 1. Single-package PR — the title names both versions, which is
+            #    the most precise evidence available, so it wins over the group
+            #    name. A major filed into a "-patches" group is still a major.
+            *" from "*" to "*)
+              FROM_SIDE=${TITLE#* from }; FROM_SIDE=${FROM_SIDE%% to *}
+              TO_SIDE=${TITLE#* to }
+              FROM_MAJ=$(major_of "$FROM_SIDE")
+              TO_MAJ=$(major_of "$TO_SIDE")
+
+              if [ -z "$FROM_MAJ" ] || [ -z "$TO_MAJ" ]; then
+                echo "Cannot classify PR title — leaving open for review: $TITLE"
+                exit 0
+              elif [ "$FROM_MAJ" = "$TO_MAJ" ]; then
+                REASON="single non-major (major stays at $FROM_MAJ)"
+              else
+                SKIP_REASON="single major bump ($FROM_MAJ → $TO_MAJ)"
+              fi
+              ;;
+
+            # 2. Grouped PR — the title only names the group, so read every
+            #    bump out of the body. Checked for ALL groups including
+            #    "-patches": the group name is a Dependabot routing hint, not
+            #    a guarantee, and a major hiding in any group must not merge.
+            *"-patches group"*|*"-minor group"*|*"-minor-major group"*|*"-major group"*)
+              PAIRS=$(body_pairs)
+              if [ -z "$PAIRS" ]; then
+                echo "Grouped PR body has no parseable version pairs — leaving open for review: $TITLE"
+                exit 0
+              fi
+              if [ -n "$(printf '%s\n' "$PAIRS" | awk '$1 != $2 {print "MAJOR"; exit}')" ]; then
+                SKIP_REASON="grouped PR contains a major version bump"
+              else
+                REASON="grouped non-major bumps ($(printf '%s\n' "$PAIRS" | wc -l | tr -d ' ') updates)"
+              fi
+              ;;
+
+            *)
               echo "Cannot classify PR title — leaving open for review: $TITLE"
               exit 0
-            fi
-
-            if [ "$FROM_MAJ" = "$TO_MAJ" ]; then
-              REASON="single non-major (major stays at $FROM_MAJ)"
-            else
-              SKIP_REASON="single major bump ($FROM_MAJ → $TO_MAJ)"
-            fi
-          fi
+              ;;
+          esac
 
           case "$REASON" in
             "")
