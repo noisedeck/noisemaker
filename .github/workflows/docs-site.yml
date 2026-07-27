@@ -1,5 +1,16 @@
 name: Docs site
 
+# Scaffold is the sole authority for docs.noisemaker.app deploys. This
+# workflow just fires the workflow_dispatch at scaffold's
+# static-site-release, which clones this repo at the pushed SHA, builds
+# the Noisemaker bundles and the Sphinx HTML, writes
+# deployment-meta.json, and rsyncs docs/_build/html/ to
+# ~/sites/docs.noisemaker.app/content on nf-toronto.
+#
+# Keeping the SSH key + server IP on the scaffold side means this
+# public repo carries no deploy secrets — only the EHSRE app private
+# key, which is scoped to dispatching scaffold workflows.
+
 on:
   workflow_dispatch:
   push:
@@ -17,80 +28,33 @@ on:
       - 'scripts/bundle-effects.js'
       - 'shaders/**'
 
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  deploy-docs:
-    name: Deploy docs
+  trigger-scaffold-release:
+    name: Dispatch scaffold static-site-release
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
     steps:
-    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-    - name: Set up Python
-      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+    - name: Mint scaffold GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
       with:
-        python-version: '3.12'
-        cache: 'pip'
+        app-id: 2959521
+        private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+        owner: noisefactorllc
+        repositories: scaffold
 
-    - name: Set up Node.js
-      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-      with:
-        node-version: '22'
-        cache: 'npm'
-
-    - name: Install Python docs dependencies
+    - name: Dispatch scaffold static-site-release for docs.noisemaker.app
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
       run: |
-        python -m pip install --upgrade pip
-        python -m pip install -r docs/sphinx-requirements.txt
-        python -m pip install -e . --no-deps
-
-    - name: Install Node dependencies
-      run: npm install --include=dev
-
-    - name: Build Noisemaker bundles for docs
-      run: |
-        npm run bundle
-        cp dist/noisemaker.min.js docs/_static/
-        npm run bundle:shaders -- --minify-shaders
-        cp dist/shaders/noisemaker-shaders-core.min.js docs/_static/
-        cp -r dist/effects docs/_static/
-        cp shaders/effects/manifest.json docs/_static/effects/
-
-    - name: Build Sphinx HTML
-      run: sphinx-build -b dirhtml docs docs/_build/html
-
-    - name: Generate deployment metadata
-      run: |
-        DEPLOY_DATE=$(date -u +"%s")
-        printf '{\n  "git_hash": "%s",\n  "date": %s\n}\n' "$GITHUB_SHA" "$DEPLOY_DATE" \
-          > docs/_build/html/deployment-meta.json
-        cat docs/_build/html/deployment-meta.json
-
-    - name: Set up SSH
-      run: |
-        mkdir -p ~/.ssh
-        chmod 700 ~/.ssh
-        echo "${{ secrets.SCAFFOLD_SSH_KEY }}" | base64 -d > ~/.ssh/id_ed25519
-        chmod 600 ~/.ssh/id_ed25519
-        ssh-keyscan ${{ secrets.SCAFFOLD_SERVER_IP }} >> ~/.ssh/known_hosts 2>/dev/null
-
-    - name: Deploy to scaffold
-      run: |
-        ssh deploy@${{ secrets.SCAFFOLD_SERVER_IP }} "mkdir -p ~/sites/docs.noisemaker.app/content"
-        rsync -avz --delete \
-          docs/_build/html/ \
-          deploy@${{ secrets.SCAFFOLD_SERVER_IP }}:~/sites/docs.noisemaker.app/content/
-
-    - name: Verify deployment
-      run: |
-        for try in $(seq 1 12); do
-          body=$(curl -sf --max-time 10 "https://docs.noisemaker.app/deployment-meta.json" || true)
-          case "$body" in
-            *"$GITHUB_SHA"*)
-              echo "OK: https://docs.noisemaker.app/deployment-meta.json reports $GITHUB_SHA (try $try)"
-              exit 0
-              ;;
-          esac
-          sleep 5
-        done
-        echo "::error::deployment-meta.json on https://docs.noisemaker.app did not report $GITHUB_SHA after ~60s"
-        exit 1
+        gh workflow run static-site-release.yml \
+          --repo noisefactorllc/scaffold \
+          --ref main \
+          -f site=noisemaker-docs \
+          -f sha=${{ github.sha }}
+        echo "Dispatched scaffold static-site-release for noisemaker-docs @ ${{ github.sha }}"
