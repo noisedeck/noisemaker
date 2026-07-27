@@ -60,8 +60,22 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -e
-          PR_DATA=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" --jq '.[0] // empty')
+          # HEAD_SHA is the triggering CI run's head — for a pull_request run
+          # that is the PR's head commit, so this normally returns exactly one
+          # PR. Prefer the PR whose head actually matches before falling back
+          # to the first, so an ambiguous association can never silently
+          # evaluate (and merge) a different PR than the one CI ran against.
+          PR_LIST=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls")
+          PR_DATA=$(echo "$PR_LIST" | jq --arg s "$HEAD_SHA" '[.[] | select(.head.sha == $s)] | .[0] // empty')
+          if [ -z "$PR_DATA" ]; then
+            PR_DATA=$(echo "$PR_LIST" | jq '.[0] // empty')
+          fi
           if [ -z "$PR_DATA" ]; then echo "No PR for $HEAD_SHA"; exit 0; fi
+
+          PR_COUNT=$(echo "$PR_LIST" | jq 'length')
+          if [ "$PR_COUNT" -gt 1 ]; then
+            echo "note: $PR_COUNT PRs associated with $HEAD_SHA; selected #$(echo "$PR_DATA" | jq -r '.number')"
+          fi
 
           PR_NUM=$(echo "$PR_DATA" | jq -r '.number')
           PR_USER=$(echo "$PR_DATA" | jq -r '.user.login')
@@ -194,4 +208,50 @@ jobs:
         if: steps.eval.outputs.pr_num != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: gh pr merge --squash --delete-branch "${{ steps.eval.outputs.pr_num }}" -R "${{ github.repository }}"
+          REPO: ${{ github.repository }}
+          PR_NUM: ${{ steps.eval.outputs.pr_num }}
+        run: |
+          # Two PRs that become mergeable together race here: whichever merges
+          # first moves the base, and the other is rejected with "Base branch
+          # was modified". That PR is still green and still correct — it just
+          # lost the race — and nothing re-triggers this workflow for it, so
+          # without a retry it sits until its next CI run (up to a week).
+          # Observed on noisemaker#271, 2026-07-27.
+          #
+          # Retry only that race (and GitHub's "mergeability still computing"
+          # state). A conflict, a missing approval, or a closed PR is a real
+          # answer, not a race — fail fast on those instead of hammering.
+          for attempt in 1 2 3 4 5; do
+            if OUT=$(gh pr merge --squash --delete-branch "$PR_NUM" -R "$REPO" 2>&1); then
+              echo "merged PR #$PR_NUM on attempt $attempt"
+              exit 0
+            fi
+            echo "attempt $attempt failed: $OUT"
+
+            case "$OUT" in
+              *"Base branch was modified"*|*"try the merge again"*|*"not mergeable"*|*"Merge already in progress"*) ;;
+              *)
+                echo "non-retryable merge failure — leaving PR #$PR_NUM open"
+                exit 1
+                ;;
+            esac
+
+            STATE=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '"\(.state) \(.mergeable_state)"' 2>/dev/null || echo "unknown unknown")
+            case "$STATE" in
+              "open clean"|"open unstable"|"open has_hooks"|"open unknown"|"open behind")
+                echo "PR #$PR_NUM still mergeable ($STATE) — retrying"
+                sleep $((attempt * 10))
+                ;;
+              "closed "*)
+                echo "PR #$PR_NUM already closed/merged by another run — nothing to do"
+                exit 0
+                ;;
+              *)
+                echo "PR #$PR_NUM no longer mergeable ($STATE) — leaving it for review"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "could not merge PR #$PR_NUM after 5 attempts — leaving it open"
+          exit 1
