@@ -25,14 +25,11 @@ Use this file as the short public map. For a fuller agent-oriented overview, rea
 - [shade-mcp](https://github.com/noisefactorllc/shade-mcp): MCP server for effect search, source search, compile, render, metrics, parity, and structure checks.
 - [portable](https://github.com/noisefactorllc/portable): Portable effect package format with definition JSON, help docs, GLSL, WGSL, and viewer.
 
-## Ports and source adapters
+## Demos
 
-- [Noisemaker for Unity](https://github.com/noisefactorllc/noisemaker-for-unity): Unity package and shader port.
-- [Noisemaker for Blender](https://github.com/noisefactorllc/noisemaker-for-blender): Blender GPU port for compositor-feeding workflows.
-- [Noisemaker for Godot](https://github.com/noisefactorllc/noisemaker-for-godot): RenderingDevice addon with in-engine DSL compiler.
-- [Noisemaker for TouchDesigner](https://github.com/noisefactorllc/noisemaker-for-touchdesigner): TOP port for realtime creative patches.
-- [Noisemaker for Three.js](https://github.com/noisefactorllc/noisemaker-for-threejs): Thin backend adapter using the published engine.
-- [Noisemaker for Babylon.js](https://github.com/noisefactorllc/noisemaker-for-babylonjs): Backend adapter for Babylon primitives.
+- [Noisedeck.app](https://noisedeck.app): A comprehensive UI that fully exercises Noisemaker.
+- [Layers](https://layers.noisefactor.io): A non-destructive layer-based image and video clip editor built on Noisemaker.
+- [Demos](https://demos.noisemaker.app): Noisemaker demos, ports, and source adapters.
 
 ## Notes For Agents
 
