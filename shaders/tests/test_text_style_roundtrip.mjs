@@ -19,10 +19,11 @@ const textDef = new Text()
 
 assert.ok(textDef.globals.style, 'filter/text must declare a `style` global')
 assert.equal(textDef.globals.style.type, 'string', '`style` must be a string')
-assert.equal(textDef.globals.style.ui?.control, false,
-    '`style` gets no generic control — valid labels depend on the font, so hosts render their own picker')
 assert.equal(textDef.globals.style.ui?.hidden, true,
     '`style` must be hidden so hosts do not render a stray generic control for it')
+assert.notEqual(textDef.globals.style.ui?.control, false,
+    '`control: false` marks a value as runtime-computed, and a host program state will then ' +
+    'refuse to write it to the DSL — which is exactly the round trip this parameter exists for')
 console.log('✓ filter/text declares a `style` global')
 
 const STYLE = 'Argon Medium Italic'

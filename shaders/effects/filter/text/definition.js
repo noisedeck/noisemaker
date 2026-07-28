@@ -151,10 +151,15 @@ export default class Text extends Effect {
             // first cut.
             //
             // Which labels are valid depends on the font, so there is no static
-            // choices map and no generic control; hosts render their own picker.
+            // choices map; hosts render their own picker and filter this out of
+            // their generic control builders via `hidden`.
+            //
+            // Deliberately NOT `control: false` — a host's program state treats
+            // that as "runtime-computed, never write to the DSL" (it is how
+            // imageSize/textSize are kept out), which would drop the style right
+            // back out of the saved program.
             ui: {
                 label: "style",
-                control: false,
                 hidden: true,
                 category: "general"
             }
