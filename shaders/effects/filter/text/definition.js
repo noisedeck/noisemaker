@@ -138,6 +138,26 @@ export default class Text extends Effect {
                 control: "dropdown",
                 category: "general"
             }
+        },
+        style: {
+            type: "string",
+            default: "",
+            // The named cut within the family — "Bold", "Medium Italic", or a
+            // per-typeface label like "Argon Medium Italic" for a family that
+            // bundles several. Hosts rasterize text on the CPU and pick the
+            // face themselves, so this carries no uniform; it exists so the
+            // choice survives the DSL. Without it the unparser drops the value
+            // and every recompile silently reverts the text to the family's
+            // first cut.
+            //
+            // Which labels are valid depends on the font, so there is no static
+            // choices map and no generic control; hosts render their own picker.
+            ui: {
+                label: "style",
+                control: false,
+                hidden: true,
+                category: "general"
+            }
         }
     }
     defaultProgram = "search filter, synth\n\nperlin(scale: 100)\n  .text()\n  .write(o0)"

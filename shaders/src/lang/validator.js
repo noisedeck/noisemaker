@@ -17,6 +17,13 @@ const ALLOWED_STRING_PARAMS = new Set([
     'text.text',     // Text content for text overlay effect
     'text.font',     // Font family for text overlay effect
     'text.justify',  // Text justification (left/center/right)
+    // Named cut within the family ("Bold Italic", or "Argon Medium Italic" for
+    // a family bundling several typefaces). Same category as text.font above:
+    // the valid values are whatever the host's installed font bundle provides,
+    // so this cannot be an enum or a choices map. It has to reach the DSL or
+    // the unparser drops it and every recompile reverts the text to the
+    // family's first cut.
+    'text.style',
 ])
 
 const stateSurfaces = new Set(['time','frame','mouse','resolution','seed','a'])
