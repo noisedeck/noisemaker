@@ -452,8 +452,16 @@ export class WebGPUBackend extends Backend {
      * @param {HTMLVideoElement|HTMLImageElement|HTMLCanvasElement|ImageBitmap} source - Media source
      * @param {object} [options] - Update options
      * @param {boolean} [options.flipY=true] - Whether to flip the Y axis
+     * @returns {{ width: number, height: number }} Source dimensions
+     *
+     * Must stay synchronous to match WebGL2Backend and the documented
+     * CanvasRenderer contract: callers read `.width`/`.height` off the return
+     * value to publish the source's intrinsic size (e.g. synth/media's
+     * imageSize uniform). Declaring this `async` returned a Promise instead,
+     * so those reads silently yielded undefined on WebGPU. Every write below
+     * is a queue submission, so there is nothing to await.
      */
-    async updateTextureFromSource(id, source, options = {}) {
+    updateTextureFromSource(id, source, options = {}) {
         let tex = this.textures.get(id)
 
         // Get source dimensions
