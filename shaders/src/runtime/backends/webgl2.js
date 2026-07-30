@@ -9,6 +9,15 @@ import {
     FULLSCREEN_TRIANGLE_VERTEX_COUNT
 } from '../default-shaders.js'
 
+// How many frames after a program compile or render-target (re)allocation
+// keep per-pass gl.getError() checks enabled. gl.getError() forces a
+// synchronous CPU/GPU round trip, so calling it per pass on every frame turns
+// GPU load into main-thread stalls (hundreds of ms of event-loop lag under
+// heavy shaders). Real GL errors surface on the first frames after new GLSL
+// or new allocations hit the driver, so checking is armed only for a short
+// window after each compile/allocation and skipped in steady state.
+const GL_ERROR_CHECK_FRAMES = 3
+
 export class WebGL2Backend extends Backend {
     constructor(context, canvas) {
         super(context)
@@ -20,6 +29,15 @@ export class WebGL2Backend extends Backend {
         this.fullscreenVAO = null
         this.presentProgram = null
         this.maxTextureUnits = 16
+        // Frames remaining with per-pass GL error checking armed (see
+        // GL_ERROR_CHECK_FRAMES). Re-armed by compileProgram() and
+        // createTexture(), decremented once per frame in endFrame().
+        this.glErrorCheckFrames = 0
+        // Per-frame snapshot of the armed state, latched in beginFrame() so
+        // executePass() and present() agree within a frame — present() runs
+        // after endFrame()'s decrement in Pipeline.render(), and reading the
+        // live counter there would silently skip the last armed frame.
+        this._glCheckThisFrame = false
 
         // Pre-allocated typed arrays for uniform setting (avoids per-frame allocations)
         this._vec2Buf = new Float32Array(2)
@@ -242,6 +260,14 @@ export class WebGL2Backend extends Backend {
         if (spec.usage && spec.usage.includes('render')) {
             this.createFBO(id, texture)
         }
+
+        // Fresh allocations (initial build, resize, graph changes) are the
+        // other place real GL errors surface (e.g. out-of-memory FBOs), so
+        // they arm the same post-change error-check window as compiles.
+        // Cold path only: per-frame texture updates go through
+        // updateTextureFromSource()/texSubImage2D, never here.
+        this.glErrorCheckFrames = GL_ERROR_CHECK_FRAMES
+        this._glCheckThisFrame = true
 
         return texture
     }
@@ -827,6 +853,14 @@ export class WebGL2Backend extends Backend {
         }
 
         this.programs.set(id, compiledProgram)
+
+        // Freshly compiled programs get their first frames error-checked;
+        // steady-state frames skip the per-pass gl.getError() sync entirely.
+        // The per-frame flag is latched too so draws before the next
+        // beginFrame() (e.g. an immediate post-compile render) are covered.
+        this.glErrorCheckFrames = GL_ERROR_CHECK_FRAMES
+        this._glCheckThisFrame = true
+
         return compiledProgram
     }
 
@@ -958,10 +992,19 @@ export class WebGL2Backend extends Backend {
     executePass(pass, state) {
         const gl = this.gl
 
-        // Clear any pending WebGL errors from previous operations
-        // This ensures we only report errors from THIS pass
-        let maxErrorDrain = 100
-        while (gl.getError() !== gl.NO_ERROR && maxErrorDrain-- > 0) { /* drain */ }
+        // Error checking is armed only for the first frames after a compile
+        // or allocation — gl.getError() is a synchronous pipeline flush, far
+        // too expensive to run per pass in steady state (see
+        // GL_ERROR_CHECK_FRAMES). Reads the frame-latched flag so the whole
+        // frame (including present(), which runs after endFrame()) agrees.
+        const checkGLErrors = this._glCheckThisFrame
+
+        if (checkGLErrors) {
+            // Clear any pending WebGL errors from previous operations
+            // This ensures we only report errors from THIS pass
+            let maxErrorDrain = 100
+            while (gl.getError() !== gl.NO_ERROR && maxErrorDrain-- > 0) { /* drain */ }
+        }
 
         // WebGL2 GPGPU: Convert passes with compute-style conventions to render passes
         // Compute shaders don't exist in WebGL2, so we use fragment shaders
@@ -1250,15 +1293,17 @@ export class WebGL2Backend extends Backend {
             gl.bindVertexArray(null)
         }
 
-        // Check for errors - drain all errors from the queue
-        let error = gl.getError()
-        let maxErrorLog = 100
-        while (error !== gl.NO_ERROR && maxErrorLog-- > 0) {
-            // Build detailed error context
-            const outputId = effectivePass.outputs?.color || Object.values(effectivePass.outputs || {})[0] || 'unknown'
-            const inputIds = effectivePass.inputs ? Object.entries(effectivePass.inputs).map(([k,v]) => `${k}=${v}`).join(', ') : 'none'
-            console.error(`WebGL Error ${error} in pass ${effectivePass.id} (effect: ${effectivePass.effectKey || 'unknown'}, program: ${effectivePass.program}, output: ${outputId}, inputs: ${inputIds})`)
-            error = gl.getError()
+        if (checkGLErrors) {
+            // Check for errors - drain all errors from the queue
+            let error = gl.getError()
+            let maxErrorLog = 100
+            while (error !== gl.NO_ERROR && maxErrorLog-- > 0) {
+                // Build detailed error context
+                const outputId = effectivePass.outputs?.color || Object.values(effectivePass.outputs || {})[0] || 'unknown'
+                const inputIds = effectivePass.inputs ? Object.entries(effectivePass.inputs).map(([k,v]) => `${k}=${v}`).join(', ') : 'none'
+                console.error(`WebGL Error ${error} in pass ${effectivePass.id} (effect: ${effectivePass.effectKey || 'unknown'}, program: ${effectivePass.program}, output: ${outputId}, inputs: ${inputIds})`)
+                error = gl.getError()
+            }
         }
 
         // Unbind
@@ -1577,11 +1622,21 @@ export class WebGL2Backend extends Backend {
     beginFrame() {
         const gl = this.gl
         gl.clearColor(0, 0, 0, 0)
+
+        // Latch the error-check state for this whole frame (see constructor)
+        this._glCheckThisFrame = this.glErrorCheckFrames > 0
     }
 
     endFrame() {
         const gl = this.gl
         gl.flush()
+
+        // Burn down the post-compile/allocation error-check window one frame
+        // at a time. The latched _glCheckThisFrame stays valid until the next
+        // beginFrame(), so present() still checks on the last armed frame.
+        if (this.glErrorCheckFrames > 0) {
+            this.glErrorCheckFrames--
+        }
     }
 
     present(textureId) {
@@ -1608,9 +1663,13 @@ export class WebGL2Backend extends Backend {
         gl.bindVertexArray(this.fullscreenVAO)
         gl.drawArrays(gl.TRIANGLES, 0, FULLSCREEN_TRIANGLE_VERTEX_COUNT)
 
-        const error = gl.getError()
-        if (error !== gl.NO_ERROR) {
-            console.error(`WebGL Error in present: ${error}`)
+        // Same frame-latched policy as executePass: gl.getError() is a
+        // synchronous pipeline flush, unaffordable per frame in steady state.
+        if (this._glCheckThisFrame) {
+            const error = gl.getError()
+            if (error !== gl.NO_ERROR) {
+                console.error(`WebGL Error in present: ${error}`)
+            }
         }
 
         gl.bindVertexArray(null)
