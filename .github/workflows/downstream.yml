@@ -1,0 +1,34 @@
+# Notify the downstream release pipeline of pushes to main.
+name: Downstream
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'shaders/**'
+      - 'docs/**'
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 2959521
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+          repositories: tearoff
+
+      - name: Notify
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh api "repos/noisefactorllc/tearoff/dispatches" \
+            -f event_type=push \
+            -f 'client_payload[repo]=${{ github.repository }}' \
+            -f 'client_payload[ref]=${{ github.ref }}' \
+            -f 'client_payload[before]=${{ github.event.before }}' \
+            -f 'client_payload[after]=${{ github.event.after }}' \
+            -F 'client_payload[forced]=${{ github.event.forced }}'
