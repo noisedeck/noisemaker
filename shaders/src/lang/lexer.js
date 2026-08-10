@@ -212,10 +212,10 @@ export function lex(src) {
         if (ch === '.') { add('DOT', '.', startLine, startCol); i++; col++; continue }
         if (ch === '(') { add('LPAREN', '(', startLine, startCol); i++; col++; continue }
         if (ch === ')') { add('RPAREN', ')', startLine, startCol); i++; col++; continue }
-        if (ch === '{') { add('LBRACE', '{', startLine, startCol); i++; col++; continue }
-        if (ch === '}') { add('RBRACE', '}', startLine, startCol); i++; col++; continue }
         if (ch === '[') { add('LBRACKET', '[', startLine, startCol); i++; col++; continue }
         if (ch === ']') { add('RBRACKET', ']', startLine, startCol); i++; col++; continue }
+        if (ch === '{') { add('LBRACE', '{', startLine, startCol); i++; col++; continue }
+        if (ch === '}') { add('RBRACE', '}', startLine, startCol); i++; col++; continue }
         if (ch === ',') { add('COMMA', ',', startLine, startCol); i++; col++; continue }
         if (ch === ':') { add('COLON', ':', startLine, startCol); i++; col++; continue }
         if (ch === '=') { add('EQUAL', '=', startLine, startCol); i++; col++; continue }

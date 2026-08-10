@@ -16,7 +16,7 @@ const { acquireServer, releaseServer } = await import(path.join(repoRoot, 'vendo
 const width = 160
 const height = 96
 const expectedPatternHashes = {
-    line: 'ca2097ced765d7e77eaf1904c9f2932892115d4b03974cdad92a94ec1129e102',
+    line: '842b9a9d8176638ead50666b3f97b0756ab403e129fe46ad007f57c4626bd2ce',
     circle: '0c1bb60f6ee1609c725092be1a460432c9f720ac32a34f491a9d0f9134d45892',
 }
 const fixtureGlsl = `

@@ -1,6 +1,7 @@
 import { getEffect } from './registry.js'
 import { stdEnums } from '../lang/std_enums.js'
 import { expandPalette } from './palette-expansion.js'
+import { SCENE_COLOR_TEXTURE } from '../rendering/scene-compiler.js'
 
 const SURFACE_REF_PATTERN = /^(?:o|vol|geo|xyz|vel|rgba)[0-7]$/
 const TEXTURE_ARG_KINDS = new Set(['temp', 'output', 'source', 'feedback', 'vol', 'geo', 'xyz', 'vel', 'rgba', 'pipeline'])
@@ -310,6 +311,23 @@ export function expand(compilationResult, options = {}) {
             // When an effect is skipped, we pass through the current input unchanged
             // The step still gets a nodeId for tracking, but no passes are generated
             if (step.args?._skip === true) {
+                registerPassthrough(`node_${step.temp}`, textureMap, currentInput, currentInput3d, currentInputGeo, currentInputXyz, currentInputVel, currentInputRgba)
+                continue
+            }
+
+            // Scene steps expand to no passes: SceneRenderer draws the scene
+            // into SCENE_COLOR_TEXTURE outside the pipeline. Seeding
+            // currentInput lets a trailing .write(oN) blit that result into a
+            // surface like any other source, so 2D effects can consume it.
+            if (step.scene) {
+                if (step.op === '_scene.scene') {
+                    currentInput = SCENE_COLOR_TEXTURE
+                    textureSpecs[SCENE_COLOR_TEXTURE] = {
+                        width: 'screen',
+                        height: 'screen',
+                        format: 'rgba16f'
+                    }
+                }
                 registerPassthrough(`node_${step.temp}`, textureMap, currentInput, currentInput3d, currentInputGeo, currentInputXyz, currentInputVel, currentInputRgba)
                 continue
             }

@@ -60,7 +60,7 @@ render(o0)`
 
 async function install(preferWebGPU, width, height) {
     const page = await browser.newPage({ viewport: { width, height } })
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     const errors = []
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text()) })
     page.on('pageerror', e => errors.push(e.message))

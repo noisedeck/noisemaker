@@ -39,7 +39,6 @@ export default [
         URL: 'readonly',
         global: 'writable',
         NOISEMAKER_PRESETS_DSL: 'readonly',
-        glData: 'readonly',
         None: 'readonly',
       },
     },

@@ -27,6 +27,8 @@ registerOp('filter.bloom', {
 
 registerStarterOps(['synth.noise'])
 
+let failed = 0
+
 function test(name, code, check) {
     try {
         console.log(`Running test: ${name}`)
@@ -38,8 +40,11 @@ function test(name, code, check) {
     } catch (e) {
         console.error(`FAIL: ${name}`)
         console.error(e)
+        failed++
     }
 }
+
+process.on('exit', () => { if (failed > 0) process.exitCode = 1 })
 
 test('Valid Chain', 'search synth, filter\nnoise(10).write(o0)', (result) => {
     if (result.diagnostics.length > 0) {

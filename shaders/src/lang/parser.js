@@ -79,7 +79,7 @@ export function parse(tokens) {
     const exprStartTokens = new Set([
         'PLUS', 'MINUS', 'NUMBER', 'HEX', 'FUNC', 'STRING',
         'IDENT', 'OUTPUT_REF', 'SOURCE_REF', 'VOL_REF', 'GEO_REF', 'MESH_REF',
-        'XYZ_REF', 'VEL_REF', 'RGBA_REF', 'LPAREN', 'LBRACKET',
+        'XYZ_REF', 'VEL_REF', 'RGBA_REF', 'LPAREN', 'LBRACKET', 'LBRACE',
         'TRUE', 'FALSE'
     ])
 
@@ -115,8 +115,8 @@ export function parse(tokens) {
      * All params except 'type' are optional and support kwargs.
      *
      * type: oscKind enum (sine, tri, saw, sawInv, square, noise)
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      * speed: integer multiplier for animation duration (default 1)
      * offset: phase offset 0..1 (default 0)
      * seed: noise seed (default 1, only used for noise type)
@@ -180,8 +180,8 @@ export function parse(tokens) {
      *
      * channel: MIDI channel 1-16 (required)
      * mode: midiMode enum (default midiMode.velocity)
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      * sensitivity: trigger falloff rate (default 1)
      */
     function transformMidiInvocation(call, nameToken) {
@@ -233,8 +233,8 @@ export function parse(tokens) {
      * audio(band, min?, max?)
      *
      * band: audioBand enum (required) - low, mid, high, vol
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      */
     function transformAudioInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -818,30 +818,22 @@ export function parse(tokens) {
         const args = []
         const kwargs = {}
         let keyword = false
-        if (peek().type !== 'RPAREN') {
+
+        function parseNextArg() {
             if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
                 keyword = true
                 parseKwarg(kwargs)
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (!(peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON')) {
-                        const t = peek()
-                        throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
-                    }
-                    parseKwarg(kwargs)
-                }
             } else {
                 args.push(parseArg())
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
-                        const t = peek()
-                        throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
-                    }
-                    args.push(parseArg())
-                }
+            }
+        }
+
+        if (peek().type !== 'RPAREN') {
+            parseNextArg()
+            while (peek().type === 'COMMA') {
+                advance()
+                if (peek().type === 'RPAREN') break
+                parseNextArg()
             }
         }
         expect('RPAREN', "Expect ')'")
@@ -1075,6 +1067,24 @@ export function parse(tokens) {
                 const expr = parseAdditive()
                 expect('RPAREN', "Expect ')'")
                 return expr
+            }
+            case 'LBRACE': {
+                advance()
+                const properties = {}
+                if (peek().type !== 'RBRACE') {
+                    const key = expect('IDENT', 'Expected property name').lexeme
+                    expect('COLON', "Expect ':'")
+                    properties[key] = parseAdditive()
+                    while (peek().type === 'COMMA') {
+                        advance()
+                        if (peek().type === 'RBRACE') break
+                        const nextKey = expect('IDENT', 'Expected property name').lexeme
+                        expect('COLON', "Expect ':'")
+                        properties[nextKey] = parseAdditive()
+                    }
+                }
+                expect('RBRACE', "Expect '}'")
+                return {type: 'Object', properties}
             }
             default:
                 throw new SyntaxError(`Unexpected token ${token.type} at line ${token.line} col ${token.col}`)

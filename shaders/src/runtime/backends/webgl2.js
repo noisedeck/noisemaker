@@ -513,34 +513,57 @@ export class WebGL2Backend extends Backend {
     /**
      * Allocate a cube-map texture (6 faces, all same size).
      * @param {string} id - Texture identifier
-     * @param {{ size: number }} options - Cube face edge length in pixels
+     * @param {{ size: number, format?: string, usage?: string[] }} options - Cube face specification
      */
-    createCubeTexture(id, { size }) {
+    createCubeTexture(id, { size, format = 'rgba8', usage = [] }) {
         const gl = this.gl
         const handle = gl.createTexture()
+        const glFormat = this.resolveFormat(format)
         gl.bindTexture(gl.TEXTURE_CUBE_MAP, handle)
         for (let f = 0; f < 6; f++) {
-            gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, gl.RGBA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+            gl.texImage2D(
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X + f,
+                0,
+                glFormat.internalFormat,
+                size,
+                size,
+                0,
+                glFormat.format,
+                glFormat.type,
+                null
+            )
         }
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-        this.textures.set(id, { handle, width: size, height: size, cube: true })
-        return this.textures.get(id)
-    }
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, null)
 
-    /**
-     * Upload RGBA8 pixel data to one face of a cube-map texture.
-     * @param {string} id - Texture identifier (must have been created with createCubeTexture)
-     * @param {number} face - Face index 0..5 (added to TEXTURE_CUBE_MAP_POSITIVE_X)
-     * @param {{ width: number, height: number, data: Uint8Array }} faceData
-     */
-    uploadCubeFace(id, face, { width, height, data }) {
-        const gl = this.gl
-        const tex = this.textures.get(id)
-        gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex.handle)
-        gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data)
+        this.textures.set(id, {
+            handle,
+            width: size,
+            height: size,
+            format,
+            glFormat,
+            cube: true
+        })
+
+        if (usage.includes('render')) {
+            const fbo = gl.createFramebuffer()
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+            gl.framebufferTexture2D(
+                gl.FRAMEBUFFER,
+                gl.COLOR_ATTACHMENT0,
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X,
+                handle,
+                0
+            )
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+            this.fbos.set(id, fbo)
+        }
+
+        return this.textures.get(id)
     }
 
     /**
@@ -808,56 +831,6 @@ export class WebGL2Backend extends Backend {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     }
 
-    /**
-     * Copy one texture to another (blit operation).
-     * Used for surface copy operations.
-     * @param {string} srcId - Source texture ID
-     * @param {string} dstId - Destination texture ID
-     */
-    copyTexture(srcId, dstId) {
-        const gl = this.gl
-        const srcTex = this.textures.get(srcId)
-        const dstTex = this.textures.get(dstId)
-
-        if (!srcTex || !dstTex) {
-            console.warn(`[copyTexture] Missing texture: src=${srcId} (${!!srcTex}), dst=${dstId} (${!!dstTex})`)
-            return
-        }
-
-        // Use blitFramebuffer for efficient texture copy
-        // Create temporary FBOs if needed
-        let readFbo = this.fbos.get(srcId)
-        if (!readFbo) {
-            readFbo = gl.createFramebuffer()
-            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFbo)
-            gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex.handle, 0)
-        } else {
-            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFbo)
-        }
-
-        let drawFbo = this.fbos.get(dstId)
-        if (!drawFbo) {
-            drawFbo = gl.createFramebuffer()
-            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawFbo)
-            gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dstTex.handle, 0)
-            // Store for future use
-            this.fbos.set(dstId, drawFbo)
-        } else {
-            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawFbo)
-        }
-
-        // Blit the texture
-        gl.blitFramebuffer(
-            0, 0, srcTex.width, srcTex.height,
-            0, 0, dstTex.width, dstTex.height,
-            gl.COLOR_BUFFER_BIT,
-            gl.NEAREST
-        )
-
-        // Unbind
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
-    }
 
     async compileProgram(id, spec) {
         const gl = this.gl
@@ -1160,6 +1133,28 @@ export class WebGL2Backend extends Backend {
 
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo || null)
 
+        // Cube-map render targets share one framebuffer. Select the requested
+        // face immediately after binding it; subsequent mesh depth attachment
+        // setup and fullscreen lighting both operate on this face.
+        if (!isMRT && viewportTex?.cube && fbo) {
+            const face = effectivePass.cubeFace
+            if (!Number.isInteger(face) || face < 0 || face > 5) {
+                throw {
+                    code: 'ERR_INVALID_CUBE_FACE',
+                    pass: effectivePass.id,
+                    texture: outputId,
+                    face
+                }
+            }
+            gl.framebufferTexture2D(
+                gl.FRAMEBUFFER,
+                gl.COLOR_ATTACHMENT0,
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                viewportTex.handle,
+                0
+            )
+        }
+
         // For MRT, we need to call drawBuffers again after binding the FBO
         // Use actual attachment count, not outputKeys.length, in case some textures weren't found
         if (isMRT && fbo && mrtAttachmentCount > 0) {
@@ -1179,9 +1174,11 @@ export class WebGL2Backend extends Backend {
             gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
         }
 
-        // DEBUG: Clear to random color to verify FBO write
-        // gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0)
-        // gl.clear(gl.COLOR_BUFFER_BIT)
+        // Clear color buffer when requested by the pass
+        if (effectivePass.clear) {
+            gl.clearColor(0, 0, 0, 0)
+            gl.clear(gl.COLOR_BUFFER_BIT)
+        }
 
         // Bind input textures
         this.bindTextures(effectivePass, program, state)
@@ -1296,13 +1293,24 @@ export class WebGL2Backend extends Backend {
             gl.depthFunc(gl.LESS)
             gl.depthMask(true)
 
-            // Enable back-face culling (CCW = front, cull back faces)
-            gl.enable(gl.CULL_FACE)
-            gl.frontFace(gl.CCW)
-            gl.cullFace(gl.BACK)
+            // Mirrored cameras reverse winding. Reflection passes request
+            // two-sided rasterization so their geometry remains consistent
+            // with WebGPU's MRT path and closed meshes do not disappear.
+            if (effectivePass.cullMode === 'none') {
+                gl.disable(gl.CULL_FACE)
+            } else {
+                gl.enable(gl.CULL_FACE)
+                gl.frontFace(gl.CCW)
+                gl.cullFace(effectivePass.cullMode === 'front' ? gl.FRONT : gl.BACK)
+            }
 
-            // Clear depth buffer for this pass
-            gl.clear(gl.DEPTH_BUFFER_BIT)
+            // Clear depth unless the pass explicitly opts out. Batched mesh
+            // passes set clear:false for all but the first; passes that say
+            // nothing (e.g. render/meshRender) must still clear each frame,
+            // otherwise stale depth from prior frames breaks occlusion.
+            if (effectivePass.clear !== false) {
+                gl.clear(gl.DEPTH_BUFFER_BIT)
+            }
 
             let count = effectivePass.count || 3  // Default to 1 triangle
 
@@ -1471,11 +1479,15 @@ export class WebGL2Backend extends Backend {
                 texture = this.defaultTexture
             }
 
-            // Check if this is a 3D texture
+            // Select the texture target from the registered texture shape.
             const is3D = texInfo?.is3D
+            const isCube = texInfo?.cube
 
             gl.activeTexture(gl.TEXTURE0 + unit)
-            gl.bindTexture(is3D ? gl.TEXTURE_3D : gl.TEXTURE_2D, texture || null)
+            gl.bindTexture(
+                is3D ? gl.TEXTURE_3D : (isCube ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D),
+                texture || null
+            )
 
             // Bind sampler uniform
             const uniform = program.uniforms[samplerName]
@@ -1650,7 +1662,9 @@ export class WebGL2Backend extends Backend {
                 gl.uniform1i(loc, typeof value === 'boolean' ? (value ? 1 : 0) : value)
                 break
             case gl.FLOAT_VEC2: {
-                const v2 = Array.isArray(value) ? value : [value, value]
+                const v2 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value]
                 const arr2 = this._vec2Buf
                 arr2[0] = v2[0] ?? 0
                 arr2[1] = v2[1] ?? 0
@@ -1658,7 +1672,9 @@ export class WebGL2Backend extends Backend {
                 break
             }
             case gl.FLOAT_VEC3: {
-                const v3 = Array.isArray(value) ? value : [value, value, value]
+                const v3 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value, value]
                 const arr3 = this._vec3Buf
                 arr3[0] = v3[0] ?? 0
                 arr3[1] = v3[1] ?? 0
@@ -1667,7 +1683,9 @@ export class WebGL2Backend extends Backend {
                 break
             }
             case gl.FLOAT_VEC4: {
-                const v4 = Array.isArray(value) ? value : [value, value, value, value]
+                const v4 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value, value, value]
                 const arr4 = this._vec4Buf
                 arr4[0] = v4[0] ?? 0
                 arr4[1] = v4[1] ?? 0
@@ -1702,6 +1720,34 @@ export class WebGL2Backend extends Backend {
         // beginFrame(), so present() still checks on the last armed frame.
         if (this.glErrorCheckFrames > 0) {
             this.glErrorCheckFrames--
+        }
+    }
+
+    /**
+     * Resolve once the GL pipeline has retired all submitted work.
+     *
+     * Polls a fence rather than calling gl.finish(), which would block the
+     * calling thread until the GPU drains.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        const gl = this.gl
+        if (!gl) return
+        const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+        if (!sync) {
+            gl.finish()
+            return
+        }
+        gl.flush()
+        try {
+            for (;;) {
+                const status = gl.clientWaitSync(sync, 0, 0)
+                if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return
+                if (status === gl.WAIT_FAILED) return
+                await new Promise((resolve) => setTimeout(resolve, 1))
+            }
+        } finally {
+            gl.deleteSync(sync)
         }
     }
 

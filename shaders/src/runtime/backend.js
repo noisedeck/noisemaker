@@ -100,16 +100,6 @@ export class Backend {
     }
 
     /**
-     * Copy one texture to another (blit operation)
-     * Used for surface copy operations.
-     * @param {string} srcId - Source texture ID
-     * @param {string} dstId - Destination texture ID
-     */
-    copyTexture(srcId, dstId) {
-        throw new Error('Backend.copyTexture() must be implemented')
-    }
-
-    /**
      * Clear a texture to transparent black.
      * Used to clear surfaces when chains are deleted.
      * @param {string} id - Texture ID
@@ -125,6 +115,18 @@ export class Backend {
      */
     createFrameExportQueue(options) {
         return null
+    }
+
+    /**
+     * Resolve once all submitted GPU work has completed.
+     *
+     * Applies backpressure for callers that drive many frames in a row without
+     * a compositor to pace them (offline renders, long-running tests); without
+     * it they queue work faster than the GPU retires it.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        // Optional - concrete backends may implement this
     }
 
     /**

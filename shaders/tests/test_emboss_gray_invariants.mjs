@@ -233,7 +233,7 @@ async function assertTileParity(browser, baseUrl, fullPage, preferWebGPU,
     const tilePage = await browser.newPage({ viewport: { width: tileWidth, height: tileHeight } })
     // Bootstrap WebGPU's trustworthy origin before attaching diagnostics so a
     // navigation-only favicon request cannot hide or pollute shader messages.
-    if (preferWebGPU) await tilePage.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await tilePage.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     tilePage.on('console', (message) => {
         if (!['error', 'warning'].includes(message.type())) return
         const text = message.text()
@@ -359,7 +359,7 @@ async function main() {
         // this second backend catch uniform-layout and constant-vector errors
         // that compile-only harness gates cannot see.
         const webgpuPage = await browser.newPage({ viewport: { width, height } })
-        await webgpuPage.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+        await webgpuPage.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
         webgpuPage.on('console', (message) => {
             if (!['error', 'warning'].includes(message.type())) return
             const text = message.text()

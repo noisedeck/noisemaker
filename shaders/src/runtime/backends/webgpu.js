@@ -61,9 +61,11 @@ export class WebGPUBackend extends Backend {
             ? navigator.gpu.getPreferredCanvasFormat()
             : null
 
-        // Depth texture for 3D mesh rendering (created lazily)
-        this.depthTexture = null
-        this.depthTextureSize = { width: 0, height: 0 }
+        // Depth textures for 3D mesh rendering, cached by viewport size.
+        // A frame may encode probe and screen passes at different sizes into
+        // one command buffer; destroying the first depth target while those
+        // commands are pending invalidates the entire submission.
+        this.depthTextures = new Map()
 
         // Uniform buffer pool for efficient buffer reuse
         this.uniformBufferPool = []
@@ -283,52 +285,41 @@ export class WebGPUBackend extends Backend {
     /**
      * Allocate a cube-map texture (6 faces, all same size).
      * @param {string} id - Texture identifier
-     * @param {{ size: number }} options - Cube face edge length in pixels
+     * @param {{ size: number, format?: string, usage?: string[] }} options - Cube face specification
      */
-    createCubeTexture(id, { size }) {
+    createCubeTexture(id, { size, format = 'rgba8', usage: requestedUsage = [] }) {
         const device = this.device
+        const gpuFormat = this.resolveFormat(format)
+        let usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        if (requestedUsage.includes('render')) usage |= GPUTextureUsage.RENDER_ATTACHMENT
         const handle = device.createTexture({
             size: [size, size, 6],
-            format: 'rgba8unorm',
+            format: gpuFormat,
             dimension: '2d',
-            usage: GPUTextureUsage.TEXTURE_BINDING |
-                   GPUTextureUsage.COPY_DST |
-                   GPUTextureUsage.RENDER_ATTACHMENT
+            usage
         })
         const view = handle.createView({ dimension: 'cube' })
-        this.textures.set(id, { handle, view, width: size, height: size, cube: true })
-        return this.textures.get(id)
-    }
-
-    /**
-     * Upload RGBA8 pixel data to one face of a cube-map texture.
-     * Mirrors uploadDataTexture's writeTexture + 256-byte row-alignment pattern.
-     * @param {string} id - Texture identifier (must have been created with createCubeTexture)
-     * @param {number} face - Face index 0..5 (array layer)
-     * @param {{ width: number, height: number, data: Uint8Array }} faceData
-     */
-    uploadCubeFace(id, face, { width, height, data }) {
-        const device = this.device
-        const tex = this.textures.get(id)
-        // RGBA8: 4 bytes per pixel; rows must be aligned to 256 bytes for WebGPU
-        const unalignedBytesPerRow = width * 4
-        const bytesPerRow = Math.ceil(unalignedBytesPerRow / 256) * 256
-
-        let uploadData = data
-        if (bytesPerRow !== unalignedBytesPerRow) {
-            const paddedData = new Uint8Array(bytesPerRow * height)
-            for (let y = 0; y < height; y++) {
-                paddedData.set(data.subarray(y * unalignedBytesPerRow, (y + 1) * unalignedBytesPerRow), y * bytesPerRow)
+        const faceViews = []
+        if (requestedUsage.includes('render')) {
+            for (let face = 0; face < 6; face++) {
+                faceViews.push(handle.createView({
+                    dimension: '2d',
+                    baseArrayLayer: face,
+                    arrayLayerCount: 1
+                }))
             }
-            uploadData = paddedData
         }
-
-        device.queue.writeTexture(
-            { texture: tex.handle, origin: [0, 0, face] },
-            uploadData,
-            { bytesPerRow, rowsPerImage: height },
-            { width, height, depthOrArrayLayers: 1 }
-        )
+        this.textures.set(id, {
+            handle,
+            view,
+            faceViews,
+            width: size,
+            height: size,
+            format,
+            gpuFormat,
+            cube: true
+        })
+        return this.textures.get(id)
     }
 
     /**
@@ -537,33 +528,6 @@ export class WebGPUBackend extends Backend {
         return { width, height }
     }
 
-    /**
-     * Copy one texture to another (blit operation).
-     * Used for surface copy operations.
-     * @param {string} srcId - Source texture ID
-     * @param {string} dstId - Destination texture ID
-     */
-    copyTexture(srcId, dstId) {
-        const srcTex = this.textures.get(srcId)
-        const dstTex = this.textures.get(dstId)
-
-        if (!srcTex || !dstTex) {
-            console.warn(`[copyTexture] Missing texture: src=${srcId} (${!!srcTex}), dst=${dstId} (${!!dstTex})`)
-            return
-        }
-
-        // Create a command encoder for the copy operation
-        const commandEncoder = this.device.createCommandEncoder()
-
-        commandEncoder.copyTextureToTexture(
-            { texture: srcTex.handle },
-            { texture: dstTex.handle },
-            [srcTex.width, srcTex.height, 1]
-        )
-
-        // Submit immediately
-        this.device.queue.submit([commandEncoder.finish()])
-    }
 
     /**
      * Clear a texture to transparent black.
@@ -927,6 +891,16 @@ export class WebGPUBackend extends Backend {
             outputFormat,
             pipelineCache,
             bindings, // Store parsed bindings for bind group creation
+            // Per-binding uniform packing (opt-in via spec.perBindingUniforms).
+            // The default path packs ONE program-wide uniform buffer and binds
+            // it to every struct binding — fine for 2D effects, which declare a
+            // single struct, but wrong for scene programs whose vertex and
+            // fragment stages declare different structs, or whose structs
+            // contain arrays of structs (lights). Scene programs opt in; the
+            // 203 effect programs keep the existing path untouched.
+            perBindingUniforms: spec.perBindingUniforms === true,
+            _wgslSources: [source, spec.vertexWGSL || spec.vertexWgsl || null],
+            _bindingLayoutCache: new Map(),
             // See compileComputeProgram for what this flag is for.
             _sourceHasBindings: sourceHasBindings,
             // Use definition-provided uniformLayout if available, fall back to shader parsing
@@ -970,6 +944,169 @@ export class WebGPUBackend extends Backend {
             if (size > largestSize) largestSize = size
         }
         return largestSize
+    }
+
+    /**
+     * Build a byte layout for ONE binding's struct type, resolving nested
+     * structs and arrays of structs against the program's own sources.
+     * Returns { entries: [{name, offset, kind: 'f32'|'i32'|'floats', count}],
+     * structSize } or null when the type can't be resolved.
+     *
+     * Array-of-struct fields flatten to `field[i].member` entry names, which
+     * is exactly how scene passes address them (`u_lights[0].position`).
+     * Fields prefixed `_` or `pad` advance the offset but produce no entry.
+     */
+    getBindingStructLayout(program, typeDecl) {
+        if (program._bindingLayoutCache?.has(typeDecl)) {
+            return program._bindingLayoutCache.get(typeDecl)
+        }
+        const sources = (program._wgslSources || []).filter(Boolean)
+        let structBody = null
+        let structSource = null
+        for (const src of sources) {
+            const m = new RegExp(`struct\\s+${typeDecl}\\s*\\{([^}]+)\\}`).exec(src)
+            if (m) { structBody = m[1]; structSource = src; break }
+        }
+        if (!structBody) return null
+
+        const layout = this._layoutStructBody(structBody, structSource, '')
+        program._bindingLayoutCache?.set(typeDecl, layout)
+        return layout
+    }
+
+    /** @private Recursive worker for getBindingStructLayout. */
+    _layoutStructBody(body, source, prefix) {
+        const cleaned = body.replace(/\/\/[^\n]*/g, '')
+        // Split fields at top-level commas (commas inside <> must not split)
+        const fields = []
+        let depth = 0, start = 0
+        for (let i = 0; i < cleaned.length; i++) {
+            const c = cleaned[i]
+            if (c === '<') depth++
+            else if (c === '>') depth--
+            else if ((c === ',' || c === ';') && depth === 0) {
+                const piece = cleaned.slice(start, i).trim()
+                if (piece) fields.push(piece)
+                start = i + 1
+            }
+        }
+        const tail = cleaned.slice(start).trim()
+        if (tail) fields.push(tail)
+
+        const SCALARS = { f32: ['f32', 4, 4], i32: ['i32', 4, 4], u32: ['i32', 4, 4], bool: ['i32', 4, 4] }
+        const VECS = { vec2: [8, 8, 2], vec3: [12, 16, 3], vec4: [16, 16, 4] }
+        const MATS = { mat3x3: [48, 16, 12], mat4x4: [64, 16, 16] }
+
+        const entries = []
+        let offset = 0
+        let maxAlign = 4
+
+        for (const field of fields) {
+            const colonIdx = field.indexOf(':')
+            if (colonIdx < 0) continue
+            const name = field.slice(0, colonIdx).trim().replace(/^@[^ ]+\s+/, '')
+            const typeExpr = field.slice(colonIdx + 1).trim().replace(/\s+/g, '')
+            const isPad = name.startsWith('_') || name.toLowerCase().startsWith('pad')
+
+            const arrayMatch = /^array<(.+),(\d+)>$/.exec(typeExpr)
+            if (arrayMatch) {
+                const elemType = arrayMatch[1]
+                const count = parseInt(arrayMatch[2], 10)
+                // Resolve element: scalar/vec stride 16, or a nested struct
+                const structMatch = new RegExp(`struct\\s+${elemType}\\s*\\{([^}]+)\\}`).exec(source)
+                if (structMatch) {
+                    const elemLayout = this._layoutStructBody(structMatch[1], source, '')
+                    if (!elemLayout) return null
+                    // Array element stride rounds up to 16
+                    const stride = Math.ceil(elemLayout.structSize / 16) * 16
+                    offset = Math.ceil(offset / 16) * 16
+                    if (!isPad) {
+                        for (let i = 0; i < count; i++) {
+                            for (const e of elemLayout.entries) {
+                                entries.push({
+                                    name: `${prefix}${name}[${i}].${e.name}`,
+                                    offset: offset + i * stride + e.offset,
+                                    kind: e.kind,
+                                    count: e.count
+                                })
+                            }
+                        }
+                    }
+                    offset += stride * count
+                    maxAlign = Math.max(maxAlign, 16)
+                    continue
+                }
+                // Array of scalars/vectors: stride 16 per uniform rules
+                offset = Math.ceil(offset / 16) * 16
+                if (!isPad) {
+                    for (let i = 0; i < count; i++) {
+                        entries.push({ name: `${prefix}${name}[${i}]`, offset: offset + i * 16, kind: 'floats', count: 4 })
+                    }
+                }
+                offset += 16 * count
+                maxAlign = Math.max(maxAlign, 16)
+                continue
+            }
+
+            let size, align, kind, count
+            if (SCALARS[typeExpr]) {
+                ;[kind, size, align] = SCALARS[typeExpr]
+                count = 1
+            } else {
+                const vecMatch = /^(vec[234])(?:<(?:f32|i32|u32)>|f|i|u)$/.exec(typeExpr)
+                const matMatch = /^(mat[34]x[34])(?:<f32>|f)$/.exec(typeExpr)
+                if (vecMatch && VECS[vecMatch[1]]) {
+                    ;[size, align, count] = VECS[vecMatch[1]]
+                    kind = 'floats'
+                } else if (matMatch && MATS[matMatch[1]]) {
+                    ;[size, align, count] = MATS[matMatch[1]]
+                    kind = 'floats'
+                } else {
+                    // Unresolvable member type — bail so callers fall back
+                    return null
+                }
+            }
+
+            offset = Math.ceil(offset / align) * align
+            if (!isPad) {
+                entries.push({ name: `${prefix}${name}`, offset, kind, count })
+            }
+            offset += size
+            maxAlign = Math.max(maxAlign, align)
+        }
+
+        return { entries, structSize: Math.ceil(offset / maxAlign) * maxAlign }
+    }
+
+    /**
+     * Pack pass+global uniforms into a zero-filled buffer per a
+     * getBindingStructLayout result, writing by field name. mat3x3 values
+     * arriving as 9 floats are expanded to WGSL's column-padded 12-float form.
+     */
+    packBindingStruct(layout, uniforms) {
+        const buffer = new ArrayBuffer(Math.max(layout.structSize, 16))
+        const view = new DataView(buffer)
+        for (const entry of layout.entries) {
+            const value = uniforms[entry.name]
+            if (value === undefined || value === null) continue
+            if (entry.kind === 'i32') {
+                view.setInt32(entry.offset, typeof value === 'boolean' ? (value ? 1 : 0) : (value | 0), true)
+            } else if (entry.kind === 'f32') {
+                view.setFloat32(entry.offset, +value, true)
+            } else {
+                let arr = value
+                if (typeof value === 'number') arr = [value]
+                if (entry.count === 12 && arr.length === 9) {
+                    // mat3x3: three vec3 columns, each padded to 16 bytes
+                    arr = [arr[0], arr[1], arr[2], 0, arr[3], arr[4], arr[5], 0, arr[6], arr[7], arr[8], 0]
+                }
+                const n = Math.min(entry.count, arr.length)
+                for (let i = 0; i < n; i++) {
+                    view.setFloat32(entry.offset + i * 4, arr[i], true)
+                }
+            }
+        }
+        return new Uint8Array(buffer)
     }
 
     /**
@@ -1456,7 +1593,11 @@ export class WebGPUBackend extends Backend {
             let bindingType = 'unknown'
             if (typeDecl.includes('texture_storage_2d')) {
                 bindingType = 'storage_texture'
-            } else if (typeDecl.includes('texture_2d') || typeDecl.includes('texture_3d')) {
+            } else if (
+                typeDecl.includes('texture_2d') ||
+                typeDecl.includes('texture_3d') ||
+                typeDecl.includes('texture_cube')
+            ) {
                 bindingType = 'texture'
             } else if (typeDecl === 'sampler') {
                 bindingType = 'sampler'
@@ -1629,6 +1770,19 @@ export class WebGPUBackend extends Backend {
         let outputTex = this.textures.get(outputId) || state.surfaces?.[outputId]
         let targetView = outputTex?.view
 
+        if (outputTex?.cube) {
+            const face = pass.cubeFace
+            if (!Number.isInteger(face) || face < 0 || face > 5 || !outputTex.faceViews?.[face]) {
+                throw {
+                    code: 'ERR_INVALID_CUBE_FACE',
+                    pass: pass.id,
+                    texture: outputId,
+                    face
+                }
+            }
+            targetView = outputTex.faceViews[face]
+        }
+
         // Handle screen output (direct to canvas)
         if (!outputTex && outputId === 'screen' && this.context) {
             const currentTexture = this.context.getCurrentTexture()
@@ -1780,16 +1934,32 @@ export class WebGPUBackend extends Backend {
         }
 
         // Get or create MRT pipeline
+        // 3D mesh MRT passes (scene G-buffer) need a depth test like the
+        // single-output 3D path; without it fragments paint in submission
+        // order and far surfaces overwrite near ones.
+        const isMRT3D = pass.drawMode === 'triangles'
+
         const pipeline = this.resolveMRTRenderPipeline(program, {
             blend: pass.blend,
             topology: (pass.drawMode === 'points') ? 'point-list' : 'triangle-list',
-            formats
+            formats,
+            depth: isMRT3D
         })
 
         // Begin render pass with multiple color attachments
-        const passEncoder = this.commandEncoder.beginRenderPass({
-            colorAttachments
-        })
+        const mrtDescriptor = { colorAttachments }
+        if (isMRT3D && viewportTex) {
+            const depthTex = this.getDepthTexture(viewportTex.width, viewportTex.height)
+            mrtDescriptor.depthStencilAttachment = {
+                view: depthTex.createView(),
+                depthClearValue: 1.0,
+                // Batched mesh passes set clear:false after the first mesh and
+                // must keep the accumulated depth (mirrors the WebGL2 backend).
+                depthLoadOp: pass.clear !== false ? 'clear' : 'load',
+                depthStoreOp: 'store'
+            }
+        }
+        const passEncoder = this.commandEncoder.beginRenderPass(mrtDescriptor)
 
         // Set viewport from first output texture
         if (viewportTex) {
@@ -1824,8 +1994,8 @@ export class WebGPUBackend extends Backend {
     /**
      * Get or create a render pipeline with multiple render targets
      */
-    resolveMRTRenderPipeline(program, { blend, topology, formats }) {
-        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}`
+    resolveMRTRenderPipeline(program, { blend, topology, formats, depth = false }) {
+        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}_${depth ? 'depth' : 'nodepth'}`
 
         if (!program.pipelineCache.has(key)) {
             // Build targets array for all outputs
@@ -1834,7 +2004,7 @@ export class WebGPUBackend extends Backend {
                 blend: this.resolveBlendState(blend)
             }))
 
-            const pipeline = this.device.createRenderPipeline({
+            const descriptor = {
                 layout: 'auto',
                 vertex: {
                     module: program.vertexModule || this.getDefaultVertexModule(),
@@ -1848,7 +2018,15 @@ export class WebGPUBackend extends Backend {
                 primitive: {
                     topology: topology || 'triangle-list'
                 }
-            })
+            }
+            if (depth) {
+                descriptor.depthStencil = {
+                    format: 'depth24plus',
+                    depthWriteEnabled: true,
+                    depthCompare: 'less'
+                }
+            }
+            const pipeline = this.device.createRenderPipeline(descriptor)
 
             program.pipelineCache.set(key, pipeline)
         }
@@ -1863,24 +2041,18 @@ export class WebGPUBackend extends Backend {
      * @returns {GPUTexture} - Depth texture for mesh rendering
      */
     getDepthTexture(width, height) {
-        // Create or resize depth texture if needed
-        if (!this.depthTexture ||
-            this.depthTextureSize.width !== width ||
-            this.depthTextureSize.height !== height) {
-
-            if (this.depthTexture) {
-                this.depthTexture.destroy()
-            }
-
-            this.depthTexture = this.device.createTexture({
+        if (!this.depthTextures) this.depthTextures = new Map()
+        const key = `${width}x${height}`
+        let depthTexture = this.depthTextures.get(key)
+        if (!depthTexture) {
+            depthTexture = this.device.createTexture({
                 size: { width, height, depthOrArrayLayers: 1 },
                 format: 'depth24plus',
                 usage: GPUTextureUsage.RENDER_ATTACHMENT
             })
-            this.depthTextureSize = { width, height }
+            this.depthTextures.set(key, depthTexture)
         }
-
-        return this.depthTexture
+        return depthTexture
     }
 
     /**
@@ -2373,9 +2545,35 @@ export class WebGPUBackend extends Backend {
 
 
                 if (isStruct) {
-                    // This looks like a struct - create full uniform buffer
-                    // Pass program to access packedUniformLayout
-                    const uniformBuffer = this.createUniformBuffer(pass, state, program)
+                    // Scene programs opt in to per-binding struct packing: each
+                    // struct binding gets its own buffer laid out from its own
+                    // declaration (the vertex and fragment stages declare
+                    // different structs, and lights are an array of structs —
+                    // neither is representable by the shared program-wide
+                    // buffer below).
+                    let uniformBuffer = null
+                    if (program.perBindingUniforms) {
+                        const layout = this.getBindingStructLayout(program, binding.typeDecl)
+                        if (layout) {
+                            const merged = {}
+                            if (state.globalUniforms) Object.assign(merged, state.globalUniforms)
+                            if (pass.uniforms) Object.assign(merged, pass.uniforms)
+                            const data = this.packBindingStruct(layout, merged)
+                            uniformBuffer = this.getBufferFromPool(data.byteLength)
+                            if (!uniformBuffer) {
+                                uniformBuffer = this.device.createBuffer({
+                                    size: data.byteLength,
+                                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                                })
+                            }
+                            this.queue.writeBuffer(uniformBuffer, 0, data.buffer, 0, data.byteLength)
+                            this.activeUniformBuffers.push(uniformBuffer)
+                        }
+                    }
+                    // Default: one program-wide uniform buffer (2D effect path)
+                    if (!uniformBuffer) {
+                        uniformBuffer = this.createUniformBuffer(pass, state, program)
+                    }
                     if (uniformBuffer) {
                         entry.resource = { buffer: uniformBuffer }
                         entries.push(entry)
@@ -3282,6 +3480,15 @@ export class WebGPUBackend extends Backend {
         }
     }
 
+    /**
+     * Resolve once the queue has retired all submitted work.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        if (!this.queue) return
+        await this.queue.onSubmittedWorkDone()
+    }
+
     present(textureId) {
         if (!this.context) return
 
@@ -3323,13 +3530,14 @@ export class WebGPUBackend extends Backend {
             this.textures.clear()
         }
 
-        // The depth texture is owned by the backend but lives outside
+        // Depth textures are owned by the backend but live outside
         // this.textures, so free it explicitly regardless of skipTextures —
         // neither teardown path reaches it through the texture registry.
-        if (this.depthTexture) {
-            this.depthTexture.destroy()
-            this.depthTexture = null
-            this.depthTextureSize = { width: 0, height: 0 }
+        if (this.depthTextures) {
+            for (const depthTexture of this.depthTextures.values()) {
+                depthTexture.destroy()
+            }
+            this.depthTextures.clear()
         }
 
         this.programs.clear()

@@ -7,6 +7,7 @@ import { compile } from '../lang/index.js'
 import { expand } from './expander.js'
 import { allocateResources } from './resources.js'
 import { createPipeline } from './pipeline.js'
+import { compileScene } from '../rendering/scene-compiler.js'
 
 /**
  * Compile DSL source into an executable graph
@@ -33,6 +34,10 @@ export function compileGraph(source, options = {}) {
         }
     }
 
+    // Stage 1b: Compile any scene() program into scene IR. Null for ordinary
+    // effect programs, which are unaffected.
+    const sceneIR = compileScene(compilationResult)
+
     // Stage 2: Expand logical graph into render passes
     const { passes, errors: expandErrors, programs, textureSpecs, renderSurface } = expand(
         compilationResult,
@@ -58,6 +63,8 @@ export function compileGraph(source, options = {}) {
         allocations,
         textures: extractTextureSpecs(passes, options, textureSpecs),
         renderSurface, // Which surface to present to screen (e.g., 'o0', 'o2')
+        _isScene: sceneIR !== null,
+        sceneIR,
         compiledAt: Date.now()
     }
 

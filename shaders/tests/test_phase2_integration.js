@@ -6,16 +6,16 @@ import { registerEffect } from '../src/runtime/registry.js'
 import { expand } from '../src/runtime/expander.js'
 import { allocateResources } from '../src/runtime/resources.js'
 
-// Setup
-registerOp('osc', { name: 'osc', args: [{ name: 'freq', type: 'float', default: 60 }] })
-registerOp('kaleid', { name: 'kaleid', args: [{ name: 'n', type: 'float', default: 4 }] })
-registerStarterOps(['osc'])
+// Setup. Ops must be registered under the namespaces the program searches.
+registerOp('synth.osc', { name: 'osc', args: [{ name: 'freq', type: 'float', default: 60 }] })
+registerOp('filter.kaleid', { name: 'kaleid', args: [{ name: 'n', type: 'float', default: 4 }] })
+registerStarterOps(['synth.osc'])
 
-registerEffect('osc', {
+registerEffect('synth.osc', {
     name: 'osc',
     passes: [{ type: 'render', program: 'osc', outputs: { color: 'outputTex' } }]
 })
-registerEffect('kaleid', {
+registerEffect('filter.kaleid', {
     name: 'kaleid',
     passes: [{ type: 'render', program: 'kaleid', inputs: { tex: 'inputColor' }, outputs: { color: 'outputTex' } }]
 })
@@ -66,4 +66,5 @@ try {
 } catch (e) {
     console.error('FAIL: Phase 2 Integration')
     console.error(e)
+    process.exitCode = 1
 }

@@ -390,11 +390,32 @@ function mirrorRatio(png, axis) {
     return meanSquaredError(first, mirrored) / meanSquaredError(first, direct)
 }
 
+// A blank frame makes both mean-squared-error terms zero, so every ratio comes
+// out NaN and every `< 0.49` comparison is false -- i.e. a dead render would
+// report "not mirrored" and pass. Carry the variance so the caller can reject
+// that case explicitly.
+function frameVariance(png) {
+    let sum = 0
+    let sumSq = 0
+    let n = 0
+    for (let i = 0; i < png.data.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+            const v = png.data[i + c]
+            sum += v
+            sumSq += v * v
+            n++
+        }
+    }
+    if (n === 0) return 0
+    const mean = sum / n
+    return sumSq / n - mean * mean
+}
+
 function mirrorStats(png) {
     const horizontalRatio = mirrorRatio(png, 'horizontal')
     const verticalRatio = mirrorRatio(png, 'vertical')
     const mirrored = horizontalRatio < 0.49 && (verticalRatio - horizontalRatio) > 0.05
-    return { horizontalRatio, verticalRatio, mirrored }
+    return { horizontalRatio, verticalRatio, mirrored, variance: frameVariance(png) }
 }
 
 function mirrorMessage(stats, source) {
@@ -443,6 +464,10 @@ async function main() {
 
     const server = await startServer()
     const port = server.address().port
+    // Headed: the headless adapter exposes the default
+    // maxColorAttachmentBytesPerSample of 32, and this pipeline's G-buffer
+    // needs 40 (RGBA32F + RGBA32F + RGBA8). Running headless fails validation
+    // rather than exercising the mirror behaviour under test.
     const browser = await chromium.launch({
         headless: false,
         args: ['--enable-unsafe-webgpu', '--enable-webgpu-developer-features']
@@ -508,6 +533,14 @@ async function main() {
             }, null, 2))
             return
         }
+
+        // A device-lost or crashed render during the frame loop would otherwise
+        // reach the mirror check as a blank frame and silently pass.
+        assert.deepEqual(errors, [], `browser errors during render: ${errors.join('\n')}`)
+        assert.ok(
+            stats.variance > 1,
+            `render produced a blank frame (variance ${stats.variance.toFixed(4)}); ${file}`
+        )
 
         assert.equal(
             stats.mirrored,

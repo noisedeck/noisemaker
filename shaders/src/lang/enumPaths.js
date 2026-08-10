@@ -39,26 +39,8 @@ export function applyEnumPrefix(path, prefix) {
     return prefix.concat(path)
 }
 
-export function stripEnumPrefix(path, prefix) {
-    const normalizedPath = normalizeMemberPath(path)
-    const normalizedPrefix = normalizeMemberPath(prefix)
-    if (!normalizedPath || !normalizedPath.length) { return normalizedPath }
-    if (!normalizedPrefix || !normalizedPrefix.length) { return normalizedPath }
-    if (pathStartsWith(normalizedPath, normalizedPrefix)) {
-        return normalizedPath.slice(normalizedPrefix.length)
-    }
-    for (let i = normalizedPrefix.length - 1; i > 0; i--) {
-        const suffix = normalizedPrefix.slice(i)
-        if (pathStartsWith(normalizedPath, suffix)) {
-            return normalizedPath.slice(suffix.length)
-        }
-    }
-    return normalizedPath
-}
-
 export default {
     normalizeMemberPath,
     pathStartsWith,
     applyEnumPrefix,
-    stripEnumPrefix,
 }

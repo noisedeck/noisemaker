@@ -44,6 +44,8 @@ function compile(code) {
     return validate(ast)
 }
 
+let failed = 0
+
 function test(name, code, check) {
     try {
         console.log(`Running test: ${name}`)
@@ -57,31 +59,47 @@ function test(name, code, check) {
     } catch (e) {
         console.error(`FAIL: ${name}`)
         console.error(e)
+        failed++
     }
 }
 
+process.on('exit', () => { if (failed > 0) process.exitCode = 1 })
+
+// Effects render into their own internal texture; the terminal write() becomes
+// a trailing blit into the user surface (o0..o7 are user-only).
 test('Expand Simple Chain', 'search synth, filter\nosc(10).write(o0)', (result) => {
     if (result.errors.length > 0) throw new Error(result.errors[0].message)
-    if (result.passes.length !== 1) throw new Error(`Expected 1 pass, got ${result.passes.length}`)
-    const pass = result.passes[0]
-    if (pass.program !== 'osc') throw new Error('Expected osc program')
-    if (pass.outputs.color !== 'global_o0') throw new Error(`Expected output global_o0, got ${pass.outputs.color}`)
+    if (result.passes.length !== 2) throw new Error(`Expected 2 passes, got ${result.passes.length}`)
+
+    const oscPass = result.passes[0]
+    if (oscPass.program !== 'node_0_osc') throw new Error(`Expected node_0_osc program, got ${oscPass.program}`)
+    if (oscPass.outputs.color !== 'node_0_out') throw new Error(`Expected output node_0_out, got ${oscPass.outputs.color}`)
+
+    const blitPass = result.passes[1]
+    if (blitPass.program !== 'blit') throw new Error(`Expected blit program, got ${blitPass.program}`)
+    if (blitPass.outputs.color !== 'global_o0') throw new Error(`Expected output global_o0, got ${blitPass.outputs.color}`)
 })
 
 test('Expand Blend Chain', 'search synth, filter\nosc(10).blend(read(o0)).write(o1)', (result) => {
     if (result.errors.length > 0) throw new Error(result.errors[0].message)
-    // osc -> blend
-    // osc is node_0. blend is node_1.
-    // osc pass: outputs node_0_out
-    // blend pass: inputs src=node_0_out, tex=global_o0
-
-    if (result.passes.length !== 2) throw new Error(`Expected 2 passes, got ${result.passes.length}`)
+    // osc -> blend -> blit
+    // osc is node_0, blend is node_1; the write(o1) terminal becomes a blit.
+    if (result.passes.length !== 3) throw new Error(`Expected 3 passes, got ${result.passes.length}`)
 
     const oscPass = result.passes[0]
-    if (oscPass.program !== 'osc') throw new Error('Expected osc first')
+    if (oscPass.program !== 'node_0_osc') throw new Error(`Expected node_0_osc first, got ${oscPass.program}`)
+
+    if (oscPass.outputs.color !== 'node_0_out') throw new Error(`Expected osc output node_0_out, got ${oscPass.outputs.color}`)
 
     const blendPass = result.passes[1]
-    if (blendPass.program !== 'blend') throw new Error('Expected blend second')
-    if (blendPass.inputs.src !== 'node_0_out') throw new Error(`Expected src=node_0_out, got ${blendPass.inputs.src}`)
+    if (blendPass.program !== 'node_1_blend') throw new Error(`Expected node_1_blend second, got ${blendPass.program}`)
+    // The upstream chain value arrives through node_1's own input binding
+    if (blendPass.inputs.src !== 'node_1_inputColor') throw new Error(`Expected src=node_1_inputColor, got ${blendPass.inputs.src}`)
     if (blendPass.inputs.tex !== 'global_o0') throw new Error(`Expected tex=global_o0, got ${blendPass.inputs.tex}`)
+    if (blendPass.outputs.color !== 'node_1_out') throw new Error(`Expected blend output node_1_out, got ${blendPass.outputs.color}`)
+
+    const blitPass = result.passes[2]
+    if (blitPass.program !== 'blit') throw new Error(`Expected blit last, got ${blitPass.program}`)
+    if (blitPass.inputs.src !== 'node_1_out') throw new Error(`Expected blit src=node_1_out, got ${blitPass.inputs.src}`)
+    if (blitPass.outputs.color !== 'global_o1') throw new Error(`Expected output global_o1, got ${blitPass.outputs.color}`)
 })

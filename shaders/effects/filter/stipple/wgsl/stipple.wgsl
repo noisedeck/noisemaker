@@ -42,10 +42,16 @@ fn hash12(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-fn hash22(p: vec2<f32>) -> vec2<f32> {
-    var p3 = fract(vec3<f32>(p.xyx) * vec3<f32>(0.1031, 0.1030, 0.0973));
-    p3 = p3 + dot(p3, p3.yzx + vec3<f32>(33.33));
-    return fract((p3.xx + p3.yz) * p3.zy);
+// Jitter hash for the Voronoi grid. Integer-only for cross-compiler
+// determinism; see stipple.glsl for why the fract-based form diverged.
+fn hash22(p: vec2<i32>, sd: i32) -> vec2<f32> {
+    var v = bitcast<vec2<u32>>(p + vec2<i32>(32767)) ^ vec2<u32>(bitcast<u32>(sd) * 2654435761u);
+    v = v * 1664525u + vec2<u32>(1013904223u);
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= (v >> vec2<u32>(16u));
+    return vec2<f32>(v) * (1.0 / 4294967296.0);
 }
 
 // luminance - luminance.
@@ -84,7 +90,7 @@ fn voronoiCell(p: vec2<f32>, jitter: f32, seedVal: f32) -> vec4<f32> {
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let cell = vec2<f32>(f32(x), f32(y));
-            let pt = cell + 0.5 + (hash22(g + cell + seedVal * 101.7) - 0.5) * jitter;
+            let pt = cell + 0.5 + (hash22(vec2<i32>(g + cell), i32(seedVal)) - 0.5) * jitter;
             let d = dot(pt - f, pt - f);
             if (d < best) {
                 best = d;

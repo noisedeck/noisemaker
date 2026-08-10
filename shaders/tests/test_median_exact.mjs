@@ -182,7 +182,7 @@ function assertStaticContract() {
 }
 
 async function installHarness(page, baseUrl, preferWebGPU) {
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     await page.setContent(`<!doctype html>
 <meta charset="utf-8">
 <style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden}canvas{display:block;width:${width}px;height:${height}px}</style>

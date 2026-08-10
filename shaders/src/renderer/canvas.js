@@ -23,12 +23,37 @@ import { registerOp } from '../lang/ops.js'
 import { registerParamAliases } from '../lang/paramAliases.js'
 import { registerEffectAlias } from '../lang/effectAliases.js'
 import { registerStarterOps } from '../lang/validator.js'
-import { createRuntime, recompile } from '../runtime/compiler.js'
+import { createRuntime, recompile, compileGraph } from '../runtime/compiler.js'
 import { registerEffect, getEffect } from '../runtime/registry.js'
 import { mergeIntoEnums } from '../lang/enums.js'
 import { stdEnums } from '../lang/std_enums.js'
 import { MidiState, AudioState, MidiInputManager, AudioInputManager, ExternalInputManager } from '../runtime/external-input.js'
 import { expandPalette } from '../runtime/palette-expansion.js'
+import { SCENE_COLOR_TEXTURE } from '../rendering/scene-compiler.js'
+
+// Scene modules depend on gl-matrix, a bare module specifier that only
+// resolves where an import map provides it. Loading them lazily keeps
+// ordinary 2D effect programs — and the pages that host them — free of that
+// requirement; they are pulled in only when a scene() program compiles.
+let sceneModules = null
+async function loadSceneModules() {
+    if (!sceneModules) {
+        const [tree, renderer, clock, bindings] = await Promise.all([
+            import('../scene/tree.js'),
+            import('../rendering/scene-renderer.js'),
+            import('../scene/clock.js'),
+            import('../scene/bindings.js')
+        ])
+        sceneModules = {
+            SceneTree: tree.SceneTree,
+            SceneRenderer: renderer.SceneRenderer,
+            Clock: clock.Clock,
+            collectBindings: bindings.collectBindings,
+            evaluateBindings: bindings.evaluateBindings
+        }
+    }
+    return sceneModules
+}
 
 // Re-export for convenience
 export { MidiState, AudioState, MidiInputManager, AudioInputManager, ExternalInputManager }
@@ -259,12 +284,6 @@ export class CanvasRenderer {
         this._fpsLastUpdateTime = performance.now()
         this._currentFPS = 0
 
-        // Frame time tracking for jitter measurement (circular buffer)
-        this._frameTimeBufferSize = 120  // Track last ~2 seconds at 60fps
-        this._frameTimeBuffer = new Float32Array(this._frameTimeBufferSize)
-        this._frameTimeIndex = 0
-        this._frameTimeCount = 0
-        this._lastRenderTime = 0
         this._lastPassCount = 0
 
         // Lazy loading infrastructure
@@ -286,6 +305,13 @@ export class CanvasRenderer {
         // Cached mesh data for re-upload after backend switch
         // Map<meshId, {positionData, normalData, uvData, width, height, vertexCount}>
         this._meshCache = new Map()
+
+        // Scene rendering state (for scene() DSL programs)
+        this._isScene = false
+        this._sceneTree = null
+        this._sceneRenderer = null
+        this._sceneBackend = null
+        this._clock = null
 
         // Bound render loop for proper `this` context
         this._boundRenderLoop = this._renderLoop.bind(this)
@@ -530,62 +556,34 @@ export class CanvasRenderer {
         return this._isRunning
     }
 
+    /** @returns {boolean} Whether current program is a scene() program */
+    get isScene() {
+        return this._isScene
+    }
+
+    /** @returns {SceneTree|null} Current scene tree (if scene program) */
+    get sceneTree() {
+        return this._sceneTree
+    }
+
+    /** @returns {SceneRenderer|null} Current scene renderer (if scene program) */
+    get sceneRenderer() {
+        return this._sceneRenderer
+    }
+
+    /** @returns {Clock|null} Scene clock (if scene program) */
+    get clock() {
+        return this._clock
+    }
+
     /** @returns {number} Loop duration in seconds */
     get loopDuration() {
         return this._loopDuration
     }
 
-    /** @returns {number} Last frame render time in ms */
-    get lastRenderTime() {
-        return this._lastRenderTime
-    }
-
     /** @returns {number} Number of render passes in last frame */
     get lastPassCount() {
         return this._lastPassCount
-    }
-
-    /**
-     * Get frame time statistics for jitter measurement
-     * @returns {{mean: number, std: number, min: number, max: number, count: number}}
-     */
-    getFrameTimeStats() {
-        if (this._frameTimeCount === 0) {
-            return { mean: 0, std: 0, min: 0, max: 0, count: 0 }
-        }
-
-        const count = this._frameTimeCount
-        let sum = 0
-        let min = Infinity
-        let max = -Infinity
-
-        for (let i = 0; i < count; i++) {
-            const t = this._frameTimeBuffer[i]
-            sum += t
-            if (t < min) min = t
-            if (t > max) max = t
-        }
-
-        const mean = sum / count
-
-        // Calculate standard deviation (jitter)
-        let sumSq = 0
-        for (let i = 0; i < count; i++) {
-            const diff = this._frameTimeBuffer[i] - mean
-            sumSq += diff * diff
-        }
-        const std = Math.sqrt(sumSq / count)
-
-        return { mean, std, min, max, count }
-    }
-
-    /**
-     * Reset frame time tracking buffer
-     */
-    resetFrameTimeStats() {
-        this._frameTimeIndex = 0
-        this._frameTimeCount = 0
-        this._lastRenderTime = 0
     }
 
     /** @returns {string} Current DSL source */
@@ -725,6 +723,9 @@ export class CanvasRenderer {
     resize(width, height) {
         this._width = width
         this._height = height
+        if (this._sceneRenderer) {
+            this._sceneRenderer.resize(width, height)
+        }
         if (this._pipeline && this._pipeline.resize) {
             this._pipeline.resize(width, height)
         }
@@ -815,6 +816,10 @@ export class CanvasRenderer {
      * @param {number} normalizedTime - Time value 0-1
      */
     render(normalizedTime) {
+        // Scene programs draw into SCENE_COLOR_TEXTURE first; the pipeline
+        // below then blits that into its surface and runs any 2D effects.
+        this._renderScene(normalizedTime * this._loopDuration * 1000, normalizedTime)
+
         if (this._pipeline && !this._isContextLost) {
             try {
                 this._pipeline.render(normalizedTime)
@@ -829,28 +834,60 @@ export class CanvasRenderer {
         }
     }
 
+    /**
+     * Draw the scene tree into SCENE_COLOR_TEXTURE, if this is a scene
+     * program. No-op otherwise. Runs before pipeline execution so the
+     * pipeline's blit carries the result into its surface the same frame.
+     * @private
+     * @param {number} timeMs - Timestamp to advance the scene clock with
+     * @param {number} normalizedTime - Shared animation loop position in [0, 1]
+     */
+    _renderScene(timeMs, normalizedTime) {
+        if (!this._isScene || !this._sceneRenderer || !this._sceneTree) return
+        try {
+            if (this._clock) {
+                this._clock.tick(timeMs)
+            }
+            if (this._sceneBindings && this._sceneBindings.length > 0 && sceneModules) {
+                sceneModules.evaluateBindings(this._sceneBindings, normalizedTime)
+            }
+            this._sceneTree.updateWorldMatrices()
+            // render() is async (shader compilation on light-count change);
+            // an async throw surfaces as a rejected promise, not a sync
+            // throw, so route it explicitly or it becomes an invisible
+            // unhandled rejection.
+            this._sceneRenderer.render(this._sceneTree, this._clock, SCENE_COLOR_TEXTURE)
+                .catch(err => {
+                    console.error('Scene render error:', err)
+                    if (this._onError) {
+                        this._onError(err)
+                    }
+                })
+        } catch (err) {
+            console.error('Scene render error:', err)
+            if (this._onError) {
+                this._onError(err)
+            }
+        }
+    }
+
     /** @private Main render loop */
     _renderLoop(time) {
         if (!this._isRunning) return
 
         this._animationFrameId = requestAnimationFrame(this._boundRenderLoop)
 
-        if (this._pipeline) {
-            try {
-                const renderStart = performance.now()
-                const elapsedSeconds = (time - this._loopStartTime) / 1000
-                const normalizedTime = (elapsedSeconds % this._loopDuration) / this._loopDuration
-                this._pipeline.render(normalizedTime)
-                const renderEnd = performance.now()
+        const elapsedSeconds = (time - this._loopStartTime) / 1000
+        const normalizedTime = (elapsedSeconds % this._loopDuration) / this._loopDuration
 
-                // Track frame time for jitter measurement
-                const frameTime = renderEnd - renderStart
-                this._frameTimeBuffer[this._frameTimeIndex] = frameTime
-                this._frameTimeIndex = (this._frameTimeIndex + 1) % this._frameTimeBufferSize
-                if (this._frameTimeCount < this._frameTimeBufferSize) {
-                    this._frameTimeCount++
-                }
-                this._lastRenderTime = frameTime
+        // Scene programs draw into SCENE_COLOR_TEXTURE before the pipeline
+        // runs, so the pipeline's blit picks the result up this frame.
+        this._renderScene(time, normalizedTime)
+
+        if (this._pipeline) {
+            // Normal effect pipeline rendering path
+            try {
+                this._pipeline.render(normalizedTime)
                 this._lastPassCount = this._pipeline.lastPassCount
 
                 this._frameCount++
@@ -950,6 +987,23 @@ export class CanvasRenderer {
         const { loseContext = false, resetCanvas = false } = options
         this._advanceLifecycle({ backendLost: loseContext || resetCanvas })
 
+        // Clean up scene rendering state
+        this._isScene = false
+        this._sceneTree = null
+        this._sceneRenderer = null
+        if (this._sceneBackend) {
+            try {
+                this._sceneBackend.destroy({ loseContext })
+            } catch (_) {
+                // Ignore cleanup errors for scene backend
+            }
+            this._sceneBackend = null
+        }
+        if (this._clock) {
+            this._clock.reset()
+            this._clock = null
+        }
+
         if (!this._pipeline) {
             if (resetCanvas) {
                 this.resetCanvas()
@@ -989,6 +1043,28 @@ export class CanvasRenderer {
         const lifecycleGeneration = this._lifecycleGeneration ?? 0
 
         this._currentDsl = dsl
+
+        // Check if this is a scene program by compiling the graph first
+        const graph = compileGraph(dsl, { shaderOverrides })
+
+        // A scene program still builds a normal pipeline: the scene renders
+        // into SCENE_COLOR_TEXTURE, and the pipeline's blit carries it into a
+        // surface where 2D effects can consume it. Only the scene objects are
+        // set up here; the renderer needs the pipeline's backend and is built
+        // once that exists.
+        if (graph._isScene) {
+            const { SceneTree, Clock, collectBindings } = await loadSceneModules()
+            this._isScene = true
+            this._sceneTree = SceneTree.fromIR(graph.sceneIR)
+            this._sceneBindings = collectBindings(this._sceneTree)
+            this._clock = new Clock()
+        } else {
+            this._isScene = false
+            this._sceneTree = null
+            this._sceneRenderer = null
+            this._sceneBindings = null
+            this._clock = null
+        }
 
         if (!this._pipeline) {
             let initialPipeline
@@ -1077,6 +1153,17 @@ export class CanvasRenderer {
         if (!this._isLifecycleCurrent(lifecycleGeneration) ||
             this._pipeline !== compiledPipeline) {
             return null
+        }
+
+        // The scene renderer needs the pipeline's backend, so it is built (or
+        // rebuilt, after a backend swap) once the pipeline is in place.
+        if (this._isScene && this._pipeline?.backend) {
+            const { SceneRenderer } = await loadSceneModules()
+            if (this._sceneRenderer?.backend !== this._pipeline.backend) {
+                this._sceneRenderer?.dispose?.()
+                this._sceneRenderer = new SceneRenderer(this._pipeline.backend, this._pipeline)
+                await this._sceneRenderer.initialize(this._width, this._height)
+            }
         }
 
         // A context loss stops the render loop. When the loss was resolved by

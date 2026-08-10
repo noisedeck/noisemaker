@@ -1367,13 +1367,14 @@ type StepInfo = {
 and are skipped by these mutation helpers. `listSteps()` does not filter for
 effect nodes: it returns every member of `plan.chain`, including the terminal
 `write` builtin. A two-effect chain ending in `.write(o0)` therefore returns
-three entries. `getCompatibleReplacements()` enumerates the currently
-registered `ops` and partitions them by starter state.
+three entries. Use `kind` to tell them apart: compiler builtins report
+`kind: 'builtin'` with both `canReplaceWith*` flags false, so
+`steps.filter(s => s.kind === 'effect')` yields the user effects.
+`getCompatibleReplacements()` enumerates the currently registered `ops` and
+partitions them by starter state.
 
 Sources: `shaders/src/lang/transform.js` - `listSteps()`,
-`getCompatibleReplacements()`; `shaders/src/lang/ops.js` - `ops`;
-`shaders/tests/test_transform.js` - stale effect-only length assertions
-(GAP-022).
+`getCompatibleReplacements()`; `shaders/src/lang/ops.js` - `ops`.
 
 ### Act
 
@@ -1457,9 +1458,11 @@ Parameter names/types/ranges, required textures, pass shape, shader availability
 and backend support are absent from compatibility preflight. This missing
 queryable shape contract is GAP-008.
 
-The same unfiltered-chain behavior exposes terminal `write` as a replaceable
-nonstarter step. Callers must exclude builtin names themselves because
-`StepInfo` has no node-kind discriminator. This is GAP-022.
+The chain is still unfiltered, but builtins are no longer targetable:
+`StepInfo` carries `kind` (`'effect'` or `'builtin'`), builtins report both
+`canReplaceWith*` flags as false, and `replaceEffect()` /
+`getCompatibleReplacements()` reject a builtin `stepIndex` with
+`Cannot replace builtin '<op>'`.
 
 Sources: `shaders/src/lang/transform.js` - all `success:false` paths.
 
@@ -3320,7 +3323,7 @@ contract without an engine/tool change.
 | GAP-019 | `testNoPassthrough` varies time/color rather than injecting and comparing an input texture | Shade `src/tools/browser/passthrough.ts` - `testNoPassthrough()` | its name overstates what is measured; true input passthrough is not tested |
 | GAP-020 | MCP tools have a shared whole-call `isError` marker but no shared domain error envelope | Shade `src/tools/tool-result.ts` marks top-level object failures; all 18 handlers use it for ordinary returns, while batch arrays retain per-entry incompatible unions | partial batch failures and verb-specific payload success/failure still cannot be handled uniformly, and callers must not assume every error text is JSON |
 | GAP-021 | `renderEffectFrame` requested resolution can differ from returned canvas dimensions without a warning | Shade `src/tools/browser/render.ts` sets viewport but reads canvas dimensions; exact transcript requested `256x256` and returned `90x90` | thresholds run on an unexpected sample size unless the caller checks `frame.width/height` |
-| GAP-022 | Mutation introspection includes terminal `write` as a replaceable nonstarter and exposes no node-kind field | `shaders/src/lang/transform.js` - `listSteps()`/`findStepByIndex()`; current `test_transform.js` and `test_compiler_phase2.js` still expect effect-only lengths | callers can target a builtin accidentally and cannot distinguish it structurally without string matching |
+| GAP-022 | RESOLVED. `StepInfo` now carries `kind` (`'effect'`/`'builtin'`); builtins report `canReplaceWith*` false, and `replaceEffect()`/`getCompatibleReplacements()` reject a builtin `stepIndex` | `shaders/src/lang/transform.js` - `isBuiltinOp()`, `listSteps()`, `replaceEffect()`, `getCompatibleReplacements()`; covered by `shaders/tests/test_transform.js` | none |
 | GAP-023 | `test_compiler_phase2.js` catches assertion failures without setting a nonzero process exit code | `shaders/tests/test_compiler_phase2.js` - `test()` catch only writes `console.error` | automation can report process success while the suite prints `FAIL`; callers must scan output until the harness is fixed |
 | GAP-024 | Browser MCP readiness and backend switching are not bound to requested effect, compiled graph, and actual backend identity | Shade `src/tools/browser/compile.ts`, `render.ts`, `benchmark.ts`, `uniforms.ts`, `passthrough.ts`, and `dsl.ts` poll status text; `describe.ts` delegates to `renderEffectFrame`; `src/tools/browser/parity.ts` waits only for a noncompiling nonempty graph; `src/harness/browser-session.ts` dispatches selection without awaiting the Noisemaker asynchronous load and `setBackend()` silently exits after its poll timeout | any browser `ok` result, including parity, can describe a previously ready graph or unintended backend; configured backend labels do not prove page state, and no current result field makes those identity mismatches uniformly diagnosable |
 | GAP-026 | `onInit`, `onUpdate`, and `onDestroy` are copied into `Effect` wrappers but are not invoked by the production renderer | `shaders/src/runtime/effect.js` defines the wrappers; only `shaders/tests/harness_effect.js` calls them; `shaders/src/runtime/pipeline.js` calls `asyncInit` only | an authored config callback can look valid but never run in production; use only `asyncInit` as a production lifecycle hook until callers exist |

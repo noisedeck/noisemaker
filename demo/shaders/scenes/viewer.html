@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Scene Viewer</title>
+    <script type="importmap">
+    {
+        "imports": {
+            "gl-matrix": "../../../node_modules/gl-matrix/esm/index.js"
+        }
+    }
+    </script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111; color: #ccc; font-family: monospace; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #info {
+            position: fixed; top: 8px; left: 8px;
+            background: rgba(0,0,0,0.7); padding: 6px 10px;
+            font-size: 12px; line-height: 1.5; border-radius: 4px;
+        }
+        #error {
+            position: fixed; bottom: 8px; left: 8px; right: 8px;
+            background: rgba(180,40,40,0.9); padding: 8px 12px;
+            font-size: 12px; border-radius: 4px; display: none;
+            white-space: pre-wrap; max-height: 40vh; overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="info">loading...</div>
+    <div id="error"></div>
+
+    <script type="module">
+        import { CanvasRenderer } from '../../../shaders/src/renderer/canvas.js'
+        import { extractEffectNamesFromDsl } from '../lib/demo-ui.js'
+
+        const canvas = document.getElementById('canvas')
+        const info = document.getElementById('info')
+        const errorEl = document.getElementById('error')
+
+        // Size canvas to window
+        function resize() {
+            canvas.width = window.innerWidth
+            canvas.height = window.innerHeight
+        }
+        resize()
+        window.addEventListener('resize', resize)
+
+        function showError(msg) {
+            errorEl.style.display = 'block'
+            errorEl.textContent = msg
+            console.error(msg)
+        }
+
+        /**
+         * Compilation failures are thrown as plain objects carrying
+         * diagnostics, not Errors, so stringify them readably.
+         */
+        function formatError(err) {
+            if (!err) return 'Unknown error'
+            if (Array.isArray(err.diagnostics)) {
+                return err.diagnostics
+                    .map(d => {
+                        const where = d.location
+                            ? ` (line ${d.location.line}, col ${d.location.column})`
+                            : ''
+                        return `${d.severity || 'error'} ${d.code || ''}: ${d.message}${where}`
+                    })
+                    .join('\n')
+            }
+            if (Array.isArray(err.errors)) {
+                return err.errors.map(e => e.message || String(e)).join('\n')
+            }
+            return err.stack || err.message || err.detail || JSON.stringify(err, null, 2)
+        }
+
+        const params = new URLSearchParams(window.location.search)
+        const sceneFile = params.get('scene') || 'hello-engine.dsl'
+        const preferWebGPU = params.get('backend') === 'webgpu'
+
+        async function main() {
+            info.textContent = 'creating renderer...'
+
+            const renderer = new CanvasRenderer({
+                canvas,
+                width: canvas.width,
+                height: canvas.height,
+                basePath: '../../../shaders',
+                preferWebGPU,
+                onError: (err) => showError(err.message || err),
+                onFrame: (frame) => {
+                    // Signal the first rendered frame so automated checks have
+                    // something to wait on.
+                    if (frame === 1) {
+                        info.dataset.ready = 'true'
+                    }
+                    if (frame % 30 === 0) {
+                        const fps = renderer.currentFPS
+                        info.textContent = `${sceneFile} | frame ${frame} | ${fps?.toFixed(0) || '?'} fps`
+                    }
+                }
+            })
+
+            // The manifest is required whenever the scene composites through
+            // 2D effects, since those load lazily by name.
+            info.textContent = 'loading manifest...'
+            await renderer.loadManifest()
+
+            info.textContent = `fetching ${sceneFile}...`
+            const res = await fetch(sceneFile)
+            if (!res.ok) {
+                showError(`Could not fetch ${sceneFile}: ${res.status} ${res.statusText}`)
+                return
+            }
+            const dsl = await res.text()
+
+            // Effects load lazily by name, so anything the scene composites
+            // with must be fetched before compiling or it resolves as unknown.
+            const needed = extractEffectNamesFromDsl(dsl, renderer.manifest)
+                .map(e => e.effectId)
+                .filter(id => !renderer.loadedEffects.has(id))
+            if (needed.length > 0) {
+                info.textContent = `loading ${needed.length} effect(s)...`
+                await renderer.loadEffects(needed)
+            }
+
+            info.textContent = 'compiling scene...'
+            try {
+                await renderer.compile(dsl)
+            } catch (err) {
+                showError('Compile error:\n' + formatError(err))
+                return
+            }
+
+            info.textContent = 'starting render loop...'
+            renderer.start()
+            info.textContent = 'running'
+        }
+
+        main().catch(err => showError('Init error:\n' + (err.stack || err.message || err)))
+    </script>
+</body>
+</html>

@@ -31,6 +31,19 @@ const stateValues = new Set(['time','frame','mouse','resolution','seed','a','u1'
 const STARTER_OPS = new Set()
 
 const SURFACE_PASSTHROUGH_CALLS = new Set(['read'])
+
+/**
+ * Scene DSL function names.
+ * These are recognized as scene description primitives and pass through
+ * the validator without requiring an ops registration. The scene compiler
+ * (a later pipeline stage) is responsible for interpreting them.
+ */
+const SCENE_FUNCTIONS = new Set([
+    'scene', 'camera', 'mesh', 'light', 'group',
+    'material', 'solid', 'surface', 'pbr', 'emit',
+    'environment'
+])
+
 const validatorHooks = {}
 
 export function registerValidatorHook(name, hook) {
@@ -321,6 +334,30 @@ export function validate(ast) {
                 mappedCall.kwargs = kw
             }
             return resolveCall(mappedCall)
+        }
+        if (node.type === 'ArrayLiteral') {
+            return {
+                ...node,
+                elements: node.elements.map(element => substitute(element))
+            }
+        }
+        if (node.type === 'Object') {
+            const properties = {}
+            for (const [key, value] of Object.entries(node.properties || {})) {
+                properties[key] = substitute(value)
+            }
+            return { ...node, properties }
+        }
+        if (node.type === 'Oscillator') {
+            return {
+                ...node,
+                oscType: substitute(node.oscType),
+                min: substitute(node.min),
+                max: substitute(node.max),
+                speed: substitute(node.speed),
+                offset: substitute(node.offset),
+                seed: substitute(node.seed)
+            }
         }
         return node
     }
@@ -658,6 +695,23 @@ export function validate(ast) {
                     }
                 }
                 if (!spec) {
+                    // Scene DSL functions pass through the validator without ops registration.
+                    // The scene compiler processes them in a later pipeline stage.
+                    if (SCENE_FUNCTIONS.has(call.name)) {
+                        const sceneAst = substitute(clone(original))
+                        const idx = tempIndex++
+                        const step = {
+                            op: `_scene.${call.name}`,
+                            args: { _ast: sceneAst },
+                            from: current,
+                            temp: idx,
+                            scene: true
+                        }
+                        if (original.leadingComments) { step.leadingComments = original.leadingComments }
+                        chain.push(step)
+                        current = idx
+                        continue
+                    }
                     pushDiag('S001', original, `Unknown effect: '${call.name}'`)
                     continue
                 }

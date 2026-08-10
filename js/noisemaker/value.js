@@ -19,16 +19,9 @@ import {
 } from './simplex.js'
 import { rgbToOklab } from './oklab.js'
 
-let _seed = 0x12345678
-
 export function setSeed(s) {
-  _seed = s >>> 0
   setRNGSeed(s)
   setSimplexSeed(s)
-}
-
-export function getSeedValue() {
-  return _seed >>> 0
 }
 
 const TAU = Math.PI * 2

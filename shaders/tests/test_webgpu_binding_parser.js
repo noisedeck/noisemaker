@@ -17,6 +17,23 @@ function parseBindings(source) {
     return backend.parseShaderBindings(source)
 }
 
+test('WebGPU binding parser classifies cube textures as sampled textures', () => {
+    const source = `
+@group(0) @binding(0) var reflectionProbe: texture_cube<f32>;
+@group(0) @binding(1) var samp: sampler;
+
+@fragment
+fn main() -> @location(0) vec4<f32> {
+    return textureSampleLevel(reflectionProbe, samp, vec3f(0.0, 1.0, 0.0), 0.0);
+}
+`
+    const bindings = parseBindings(source)
+    const probe = bindings.find((binding) => binding.name === 'reflectionProbe')
+    if (!probe || probe.type !== 'texture') {
+        throw new Error(`cube binding was not classified as a texture: ${JSON.stringify(probe)}`)
+    }
+})
+
 test('WebGPU binding parser ignores dead bindings mentioned only in block comments', () => {
     const source = `
 @group(0) @binding(0) var liveTex: texture_2d<f32>;

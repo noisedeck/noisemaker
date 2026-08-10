@@ -33,7 +33,7 @@ render(o0)`
 
 async function install(preferWebGPU, width, height) {
     const page = await browser.newPage({ viewport: { width, height } })
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     await page.setContent(`<!doctype html>
 <style>html,body{margin:0;width:${width}px;height:${height}px;overflow:hidden}canvas{display:block;width:${width}px;height:${height}px}</style>
 <canvas id="canvas" width="${width}" height="${height}"></canvas>

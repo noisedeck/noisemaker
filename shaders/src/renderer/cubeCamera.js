@@ -6,8 +6,6 @@
 //     dir = normalize(forward + u*right + v*up)        // 90-degree frustum
 // Adjacent faces share identical edge directions — the source of cube seamlessness.
 
-export const FACE_PX = 0, FACE_NX = 1, FACE_PY = 2, FACE_NY = 3, FACE_PZ = 4, FACE_NZ = 5
-
 // forward = view direction; up = face "up". Order: +X,-X,+Y,-Y,+Z,-Z (GL cubemap order).
 export const CUBE_FACES = [
   { name: 'px', forward: [1, 0, 0], up: [0, -1, 0] },
