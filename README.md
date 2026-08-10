@@ -26,7 +26,7 @@ Installation, CLI usage, API walkthroughs, and advanced workflows are covered in
 
 ## Bring your coding agent
 
-Noisemaker is easy for coding agents to pick up: the docs ship in machine-readable form ([llms.txt](https://noisemaker.app/llms.txt), [llms-full.txt](https://noisemaker.app/llms-full.txt)), every effect carries a structured definition and a manifest entry, and [shade-mcp](https://github.com/noisefactorllc/shade-mcp) gives agents an MCP server for effect search, compile, render, and validation. If your agent can read the reference, it can write the DSL.
+Noisemaker is easy for coding agents to pick up: the docs ship in machine-readable form ([llms.txt](https://noisemaker.app/llms.txt), [llms-full.txt](https://noisemaker.app/llms-full.txt)), every effect carries a structured definition and a manifest entry, and [shade-mcp](https://github.com/noisefactorllc/shade-mcp) gives agents an MCP server for effect search, compile, render, and validation. If your agent can read the reference, it can write the DSL — see [Building with coding agents](https://docs.noisemaker.app/coding-agents/) for the full workflow.
 
 ## Contributing
 

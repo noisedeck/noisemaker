@@ -74,7 +74,7 @@ Drive the engine over MCP
 
 `shade-mcp <https://github.com/noisefactorllc/shade-mcp>`_ is an MCP
 server that lets a coding agent operate the engine rather than just write
-code for it. Its sixteen tools cover the whole loop:
+code for it. Its tools cover the whole loop:
 
 - **Search and knowledge** — ``searchEffects`` finds effects by concept,
   tag, algorithm, or visual style; ``searchShaderKnowledge`` searches

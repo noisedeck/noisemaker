@@ -114,4 +114,4 @@ Noisemaker is the open source engine behind `Noisedeck <https://noisedeck.app/>`
 `Layers <https://layers.noisefactor.io/>`_, and other
 `Noise Factor <https://noisefactor.io/>`_ tools.
 
-.. _`Noisemaker`: https://github.com/noisedeck/noisemaker
+.. _`Noisemaker`: https://github.com/noisefactorllc/noisemaker
