@@ -1,6 +1,6 @@
 # Noisemaker
 
-Noisemaker is a collection of creative coding effects for Python or JavaScript. It provides tools for composing layers of noise, applying image effects, and rendering generative art.
+Noisemaker is a friendly, extendable shader art engine for the browser. It renders real-time generative art and visual effects on WebGL2 and WebGPU — 100+ composable effects, a compact declarative DSL for wiring them together, and no required build step or dependencies.
 
 ## Noisedeck
 
@@ -12,15 +12,21 @@ Full documentation, including the complete API reference and preset guide, is av
 
 ## Features
 
-- Unified noise and effects pipeline powered by preset-driven compositions
-- Command-line interface for generating images, animations, and post-processing workflows
-- Programmatic APIs for Python and vanilla JavaScript consumers
-- Modular generator and effect building blocks for custom compositions
-- Dockerfile for containerized workflows and an interactive Colab notebook
+- 100+ shader effects — generators, filters, mixers, particles, and simulations — composable into free-form chains
+- Polymorphic DSL: compact, declarative programs that compile to a GPU render graph
+- Dual rendering backends: WebGL2 and WebGPU
+- Runs straight from a CDN bundle and embeds in any page, no frontend framework required
+- External media, audio, and MIDI inputs
+- Portable effect packages carrying definitions, help docs, and shaders for both backends
+- Python and JavaScript pipelines for offline CPU workflows (CLI, Docker, Colab notebook)
 
 ## Getting Started
 
 Installation, CLI usage, API walkthroughs, and advanced workflows are covered in the documentation index. Platform-specific quick-start guides for Python, browser modules, and Docker live there as well as in the dedicated READMEs linked below.
+
+## Bring your coding agent
+
+Noisemaker is easy for coding agents to pick up: the docs ship in machine-readable form ([llms.txt](https://noisemaker.app/llms.txt), [llms-full.txt](https://noisemaker.app/llms-full.txt)), every effect carries a structured definition and a manifest entry, and [shade-mcp](https://github.com/noisefactorllc/shade-mcp) gives agents an MCP server for effect search, compile, render, and validation. If your agent can read the reference, it can write the DSL.
 
 ## Contributing
 
