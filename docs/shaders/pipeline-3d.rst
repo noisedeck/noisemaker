@@ -1,3 +1,5 @@
+.. _shader-3d-pipeline:
+
 The 3D Pipeline
 ===============
 
@@ -7,6 +9,14 @@ Generate, filter, and render volumetric fields — a true 3D counterpart to the
 A 3D chain has the same shape as a 2D one: a generator produces a field, zero
 or more filters transform it, and a renderer turns it into pixels. The
 difference is that every intermediate value is a volume rather than an image.
+
+.. note::
+
+   This is volumetric rendering: chains of density fields carried in ``vol``
+   and ``geo`` surfaces. It is a separate subsystem from :ref:`shader-scene`,
+   which describes cameras, meshes and PBR materials and is drawn by the
+   :ref:`deferred renderer <shader-deferred-rendering>`. The two can be
+   composited together, since both terminate in ordinary surfaces.
 
 .. code-block:: dsl
 

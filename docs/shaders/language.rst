@@ -28,10 +28,21 @@ Grammar
    SubchainCall   ::= 'subchain' '(' ArgList? ')' '{' ( '.' Call )+ '}'
    WriteCall      ::= 'write' '(' OutputRef ')'
    Write3DCall    ::= 'write3d' '(' ( VolRef | Ident ) ',' ( GeoRef | Ident ) ')'
+   SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'
+   SceneArg       ::= Kwarg | CameraCall | LightCall | EnvironmentCall | NodeChain
+   NodeChain      ::= ( MeshCall | GroupCall ) ( '.' NodeLink )*
+   NodeLink       ::= MaterialCall | 'reflector' '(' ')'
+   MaterialCall   ::= 'material' '(' MaterialSpec ')'
+   MaterialSpec   ::= ( 'solid' | 'surface' ) '(' ArgList? ')' ( '.' MaterialTerm )*
+   MaterialTerm   ::= ( 'pbr' | 'emit' ) '(' ArgList? ')'
    Expr           ::= Chain | NumberExpr | String | Boolean | Color | Ident | Member | OutputRef | SourceRef | VolRef | GeoRef | XyzRef | VelRef | RgbaRef | MeshRef | Func | '(' Expr ')'
    Call           ::= Ident '(' ArgList? ')'
    ArgList        ::= Arg ( ',' Arg )* ','?
-   Arg            ::= NumberExpr | String | Boolean | Color | Ident | Member | OutputRef | VolRef | GeoRef | XyzRef | VelRef | RgbaRef | MeshRef | Func
+   Arg            ::= Kwarg | Positional
+   Kwarg          ::= Ident ':' Positional
+   Positional     ::= NumberExpr | String | Boolean | Color | Ident | Member | OutputRef | VolRef | GeoRef | XyzRef | VelRef | RgbaRef | MeshRef | Func | ArrayLiteral | ObjectLiteral | Chain
+   ArrayLiteral   ::= '[' ( Positional ( ',' Positional )* ','? )? ']'
+   ObjectLiteral  ::= '{' ( Ident ':' Positional ( ',' Ident ':' Positional )* ','? )? '}'
    NumberExpr     ::= Number | 'Math.PI' | '(' NumberExpr ')' | NumberExpr ( '+' | '-' | '*' | '/' ) NumberExpr
    Member         ::= Ident ( '.' Ident )+
    Func           ::= '(' ')' '=>' Expr
@@ -101,7 +112,7 @@ Language Features
 Functions & Arguments
 ^^^^^^^^^^^^^^^^^^^^^
 
-Functions accept arguments either positionally or as named keywords. The two forms are mutually exclusive within a single call.
+Functions accept arguments positionally, as named keywords, or as a mix of both within a single call.
 
 **Positional arguments:**
 
@@ -114,6 +125,16 @@ Functions accept arguments either positionally or as named keywords. The two for
 .. code-block:: none
 
   noise(freq: 10, sync: 0.1, amp: 1)
+
+**Mixed arguments:**
+
+Positional and keyword arguments may be interleaved in any order. This is what
+lets :ref:`scene() <shader-scene>` carry renderer settings as keywords alongside
+its child nodes as positional arguments.
+
+.. code-block:: none
+
+  scene(ambient: 0.15, camera(fov: 60), background: [0, 0, 0]).write(o0)
 
 Numeric arguments support inline arithmetic (``+``, ``-``, ``*``, ``/``) and constants like ``Math.PI``. Color arguments accept unquoted ``#RGB`` or ``#RRGGBB`` hex codes.
 
@@ -248,6 +269,45 @@ Both arguments can be omitted, or ``name`` can be passed as a positional argumen
 * Marking effect groups for UI controls or programmatic manipulation.
 * Defining reusable patterns within complex compositions.
 * Enabling downstream tools to identify and operate on logical effect groups.
+
+Scenes
+^^^^^^
+
+``scene()`` describes a 3D scene — a camera, lights, and a hierarchy of meshes
+with PBR materials — which the deferred renderer resolves into a surface. It
+behaves like any other generator and must terminate in ``.write(oN)``, so its
+output composes with the 2D effect library.
+
+.. code-block:: none
+
+  scene(
+    ambient: 0.15,
+    camera(fov: 60, pos: [0, 3, -8], target: [0, 0, 0]),
+    light(type: "directional", dir: [1, -1, 1], intensity: 2),
+    mesh("sphere", radius: 1.5, pos: [0, 1, 0])
+      .material(solid(color: [0.9, 0.9, 0.95]).pbr(metallic: 0.1, roughness: 0.6))
+  ).write(o0)
+
+The scene vocabulary is ``scene``, ``camera``, ``light``, ``environment``,
+``mesh``, ``group``, ``material``, ``solid``, ``surface``, ``pbr``, ``emit`` and
+``reflector``.
+
+These names are a **fallback, not a reservation**. Every call is first resolved
+against the registered effects in the active search order; only when no effect
+matches does a name fall through to the scene layer. ``solid`` is both a scene
+material source and the ``synth/solid`` generator, and a top-level ``solid()``
+under ``search synth`` still compiles to the 2D effect.
+
+Arguments inside ``scene()`` are preserved as AST and handed to the scene
+compiler rather than validated against the effect registry, which is why terms
+like ``reflector()`` need no registration and why scene errors surface as
+``SyntaxError`` with a line and column rather than as validator diagnostics.
+
+Transform components and light intensity accept ``osc()`` descriptors in place
+of numbers, evaluated against the same normalized loop time as effect uniforms.
+
+See :ref:`shader-scene` for the full node, material and settings reference, and
+:ref:`shader-deferred-rendering` for how the scene is drawn.
 
 Namespaces
 ----------

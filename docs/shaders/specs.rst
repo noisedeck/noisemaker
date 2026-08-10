@@ -6,6 +6,8 @@ Specs
 
    effects
    language
+   scene
+   deferred-rendering
    pipeline
    compiler
    effect-reference
