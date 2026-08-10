@@ -10,6 +10,7 @@ Noisemaker
 
    shaders
    composer-api
+   coding-agents
    releases
 
 
