@@ -70,7 +70,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `45a34489` (2026-07-10)
+- **Checkpoint:** noisemaker `7cdf2b6d` (2026-08-09)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -84,6 +84,11 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-08-10 — caught up through `7cdf2b6d`: verified `help.md`
+    coverage for all 210 effects (including 25 effects added since the
+    checkpoint), corrected four stale pre-move noisemaker repository links,
+    and audited the in-band coding-agents guide plus runtime fixes; no
+    additional shader feature guides needed.
   - 2026-07-10 — initial catch-up: added `help.md` for
     `mixer/channelCombine` and `filter/temporalAberration`; added feature
     guides for parallax, the 3D pipeline, and mashup.

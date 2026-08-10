@@ -572,7 +572,7 @@ Custom Effect Pipeline
 Further Reading
 ---------------
 
-* `JavaScript README <https://github.com/noisedeck/noisemaker/blob/main/js/README-JS.md>`_
-* `Vanilla JS Port Specification <https://github.com/noisedeck/noisemaker/blob/main/js/doc/VANILLA_JS_PORT_SPEC.md>`_
-* `Python/JS Parity Requirements <https://github.com/noisedeck/noisemaker/blob/main/js/doc/PY_JS_PARITY_SPEC.md>`_
-* `Browser Demos <https://github.com/noisedeck/noisemaker/tree/main/demo>`_
+* `JavaScript README <https://github.com/noisefactorllc/noisemaker/blob/main/js/README-JS.md>`_
+* `Vanilla JS Port Specification <https://github.com/noisefactorllc/noisemaker/blob/main/js/doc/VANILLA_JS_PORT_SPEC.md>`_
+* `Python/JS Parity Requirements <https://github.com/noisefactorllc/noisemaker/blob/main/js/doc/PY_JS_PARITY_SPEC.md>`_
+* `Browser Demos <https://github.com/noisefactorllc/noisemaker/tree/main/demo>`_
