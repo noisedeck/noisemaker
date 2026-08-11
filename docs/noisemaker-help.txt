@@ -2,7 +2,7 @@ Usage: noisemaker [OPTIONS] COMMAND [ARGS]...
 
   Noisemaker - Let's make generative art with noise
 
-  https://github.com/noisedeck/noisemaker
+  https://github.com/noisefactorllc/noisemaker
 
 Options:
   -h, --help  Show this message and exit.

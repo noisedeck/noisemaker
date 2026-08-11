@@ -70,7 +70,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `7cdf2b6d` (2026-08-09)
+- **Checkpoint:** noisemaker `7cc4894b` (2026-08-10)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -84,6 +84,10 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-08-11 — caught up through `7cc4894b`: verified `help.md`
+    coverage for all 210 effects, corrected the remaining stale pre-move
+    repository URL in the CLI help snapshot, and audited the Playwright and
+    Ruff dependency bumps; no additional shader feature guides needed.
   - 2026-08-10 — caught up through `7cdf2b6d`: verified `help.md`
     coverage for all 210 effects (including 25 effects added since the
     checkpoint), corrected four stale pre-move noisemaker repository links,
