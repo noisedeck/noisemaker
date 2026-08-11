@@ -17,8 +17,8 @@ and WebGPU backends and must not be cited as evidence for an external port.
 
 Source snapshots used for this contract:
 
-- Noisemaker: `7cc4894baf65470e889c31cf42197bad0975abe1`.
-- Shade MCP: `3e531fc60dd679d9bb1c3151a0c8e4fe48d38337`.
+- Noisemaker: `e1feefa0a1188e70aae0169fdc1e7901cc8cc939`.
+- Shade MCP: `346ee022361ce382b55f1ab0abc0000ab6dde37b`.
 - Shade MCP protocol: server name `shade-mcp`, server version `0.1.4`, protocol
   `2025-06-18`, with 18 tools returned by `tools/list`.
 - The repository config runs `npx -y github:noisedeck/shade-mcp`; it does not pin
@@ -33,7 +33,7 @@ Primary source roots:
 - backend behavior: `shaders/src/runtime/backends/webgl2.js` and `webgpu.js`.
 - repository validation policy: `shaders/tests/test-harness.js`.
 - Shade MCP source for the pinned snapshot:
-  `https://github.com/noisefactorllc/shade-mcp/tree/3e531fc60dd679d9bb1c3151a0c8e4fe48d38337/src`.
+  `https://github.com/noisefactorllc/shade-mcp/tree/346ee022361ce382b55f1ab0abc0000ab6dde37b/src`.
 
 ## Freshness and maintenance
 
@@ -123,8 +123,10 @@ The browser integration path is:
    computes a liveness allocation map, and returns a graph.
 5. `Pipeline.compilePrograms()` compiles every referenced program for the active
    backend.
-6. `Pipeline.render(time)` executes expanded passes in array order, presents the
-   selected surface, then advances double-buffer bindings.
+6. `Pipeline.render(time, presentationTimestamp?)` executes expanded passes in
+   array order, submits the selected pre-swap surface to every registered sink,
+   then advances double-buffer bindings. A built-in `CanvasSink` preserves
+   normal canvas presentation.
 
 Sources: `shaders/src/renderer/canvas.js` - `loadEffectShaders()`,
 `registerEffectWithRuntime()`; `shaders/src/runtime/compiler.js` -
@@ -1509,6 +1511,50 @@ part of color cardinality.
 Sources: Shade MCP `src/tools/browser/render.ts` -
 `renderEffectFrame()`; `src/harness/types.ts` - `ImageMetrics`, `RenderResult`.
 
+The engine-native output path exposes sinks and bounded asynchronous frame
+export independently of Shade MCP:
+
+```ts
+type FrameDescriptor = {
+  width: number                    // positive safe integer
+  height: number                   // positive safe integer
+  format: "rgba8unorm"
+  colorSpace: "srgb" | "display-p3"
+  alphaMode: "opaque" | "straight" | "premultiplied"
+  fps: number                      // finite and > 0
+}
+
+type PackedFrame = {
+  width: number
+  height: number
+  rowStride: number                // width * 4, with no row padding
+  data: Uint8Array                 // top-down packed RGBA8 rows
+}
+
+type Sink = {
+  configure(descriptor: FrameDescriptor): unknown
+  submit(textureId: string, presentationTimestamp: number): boolean | unknown
+  close(options?: { backendLost?: boolean }): unknown
+}
+
+type SinkStats = { accepted: number, dropped: number, failed: number }
+type FrameExportStats = {
+  accepted: number
+  dropped: number
+  completed: number
+  failed: number
+}
+```
+
+`Pipeline.sinkManager.stats` is a `Map<Sink,SinkStats>` for active sinks.
+`FrameExportQueue.stats` is one stable mutable `FrameExportStats` object, and
+`queue.available` is true exactly when the queue is configured, open, and has a
+free slot. `CanvasSink`, `SinkManager`, and `FrameExportQueue` are exported from
+`shaders/src/index.js`.
+
+Sources: `shaders/src/runtime/sink.js`; `shaders/src/runtime/frame-export.js`;
+`shaders/src/index.js`.
+
 ### Act
 
 Call the MCP verb documented in the tool section, or render through
@@ -1524,6 +1570,71 @@ as shown by the worked call requesting 256x256 and capturing 90x90.
 
 Sources: Shade MCP `src/tools/browser/render.ts` - request handling;
 Noisemaker `shaders/src/runtime/pipeline.js` - `setUniform()`, `getOutput()`.
+
+For engine-native delivery, compile first and then register a sink on that
+concrete pipeline:
+
+```ts
+const queue = renderer.createFrameExportQueue({
+  slots: 3,
+  onError(error) { report(error) }
+})
+
+const remove = renderer.addSink({
+  configure(descriptor) { queue.configure(descriptor) },
+  submit(textureId, timestamp) {
+    return queue.enqueue(textureId, timestamp, consumeFrame)
+  },
+  close(options) { queue.close(options) }
+})
+
+function serviceExports() {
+  queue.poll()
+  requestAnimationFrame(serviceExports)
+}
+serviceExports()
+```
+
+`CanvasRenderer.addSink()` and `createFrameExportQueue()` throw before a
+pipeline exists. `addSink()` returns an idempotent removal function scoped to
+the current pipeline; removing it closes that sink once. Sinks are not migrated
+when recompilation replaces a pipeline. `createFrameExportQueue()` returns null
+when the active backend does not implement export. WebGL2 and WebGPU both do;
+the base `Backend` does not.
+
+`FrameExportQueue` is not itself a `Sink`: it has `configure()`, `enqueue()`,
+`poll()`, and `close()`, so a host supplies the small adapter above. The queue
+owns three slots by default; `slots` must be an integer from 2 through 8.
+`configure()` preallocates every slot. `enqueue(textureId,timestamp,onFrame,
+context?)` starts work only when a slot is free and returns a boolean. The host
+must call `poll()`; there is no internal timer. A successful callback receives
+`(frame,timestamp,context)` with the latter two values unchanged.
+
+Pipeline resize configures all current sinks with exactly
+`{width,height,format:"rgba8unorm",colorSpace:"srgb",
+alphaMode:"premultiplied",fps:60}`. A sink added after resize is configured
+immediately with the same descriptor. Rendering submits the selected pre-swap
+texture ID and the caller's presentation timestamp, or `performance.now()`
+with a `Date.now()` fallback. A graph with no render surface advances the frame
+without submitting to sinks.
+
+Both backend queues produce top-down, tightly packed RGBA8. WebGL2 resolves to
+an RGBA8 texture, flips vertically in the resolve shader, reads into a pixel
+pack buffer, and polls a fence with zero timeout. WebGPU resolves to
+`rgba8unorm`, copies into 256-byte-aligned staging rows, maps asynchronously,
+and removes row padding before delivery. `straight` preserves RGBA, `opaque`
+forces alpha to one, and `premultiplied` multiplies RGB by alpha. `colorSpace`
+and `fps` are validated descriptor metadata; neither backend adapter performs a
+color-space conversion or frame-rate throttle.
+
+Each slot reuses one `PackedFrame` object and `Uint8Array`. A callback that
+retains a frame past later deliveries on the same slot must copy its data.
+
+Sources: `shaders/src/renderer/canvas.js` - `addSink()`,
+`createFrameExportQueue()`; `shaders/src/runtime/pipeline.js` - `resize()`,
+`render()`; `shaders/src/runtime/frame-export.js`;
+`shaders/src/runtime/backends/webgl2-frame-export.js`;
+`shaders/src/runtime/backends/webgpu-frame-export.js`.
 
 ### Validate
 
@@ -1567,9 +1678,29 @@ frames and 100 measured frames and fails when `fps < 30`; equivalently it passes
 when `fps >= 30`. The MCP benchmark instead passes when
 `fps >= target_fps`, where the default target is 60.
 
+For a `SinkManager`, `submit() === true` increments `accepted`, false increments
+`dropped`, and a thrown submit or broadcast-`configure()` error increments
+`failed`. Other return values change no counter. One failing registered sink
+does not stop later sinks. Adding a sink after the manager is configured calls
+that sink's `configure()` before registration; if it throws, `add()` propagates
+the error and creates no stats record. For the pipeline's default manager there
+is no `onError` callback, so inspect its stats when an external sink can throw.
+
+For a `FrameExportQueue`, a successful adapter `begin()` increments `accepted`.
+Unconfigured, closed, or full-queue enqueue attempts increment `dropped` and
+return false. Begin, poll, read, and callback failures increment `failed` and
+invoke `onError` when supplied; a callback increments `completed` only after it
+returns normally. A failed slot is released for reuse. Descriptor validation
+and slot allocation failures from `configure()` throw synchronously.
+
+No accepted-frame terminal result is recorded when reconfiguration or close
+destroys a pending slot. The callback is cleared, but `completed`, `failed`, and
+`dropped` are unchanged. This accounting hole is GAP-028.
+
 Sources: Shade MCP `src/tools/browser/render.ts`, `passthrough.ts`,
 `benchmark.ts`; `shaders/tests/test-harness.js` - metric gates, exemptions, and
-sustained benchmark.
+sustained benchmark; `shaders/src/runtime/sink.js`;
+`shaders/src/runtime/frame-export.js`.
 
 ### Diagnose
 
@@ -1594,9 +1725,44 @@ definition (dark mean plus quantized color cardinality) than the current MCP
 verb's luma-variance predicate. Consumers must use the verb implementation for
 the fields documented here. This implementation drift is GAP-015.
 
+Sink validation rejects anything without callable `configure`, `submit`, and
+`close` methods. A closed manager rejects new sinks, duplicate registration is
+an error, and removing a sink closes it. Manager close attempts every active
+sink, then throws the first close error after clearing all registrations.
+Pipeline disposal closes sinks before backend resources; `backendLost:true`
+propagates to sink close so a frame queue abandons unsafe GPU resources without
+calling its adapter. Normal close destroys each slot.
+
+Frame-export failures are ordinary `TypeError`, `RangeError`, or `Error`
+objects, not a shared code union. Stable validation messages include:
+
+```text
+Sink must implement configure, submit, and close
+Frame export adapter must implement createSlot, begin, poll, read, and destroySlot
+Frame export slots must be an integer from 2 through 8
+Frame export callback must be a function
+Frame export width must be a positive integer
+Frame export height must be a positive integer
+WebGL2 frame export format must be 'rgba8unorm'
+WebGPU frame export format must be 'rgba8unorm'
+WebGL2 frame export colorSpace must be 'srgb' or 'display-p3'
+WebGPU frame export colorSpace must be 'srgb' or 'display-p3'
+WebGL2 frame export alphaMode must be 'opaque', 'straight', or 'premultiplied'
+WebGPU frame export alphaMode must be 'opaque', 'straight', or 'premultiplied'
+Frame export fps must be finite and positive
+```
+
+Adapters additionally report missing textures, source/configured extent
+mismatches, unusable or wrongly sequenced slots, allocation/compile/link/fence
+failures, unavailable WebGPU constants, and map failures. Queue `onError`
+receives those objects but no texture ID, timestamp, slot index, or normalized
+phase field. On reconfigure/close, accepted pending frames disappear without a
+callback or terminal counter; see GAP-028.
+
 Sources: Shade MCP `src/tools/browser/render.ts`; vendored
 `vendor/shade-mcp/harness/pixel-reader.js`; `shaders/tests/test-harness.js` -
-WebGPU render wrapper.
+WebGPU render wrapper; `shaders/src/runtime/sink.js`;
+`shaders/src/runtime/frame-export.js`; backend frame-export adapters.
 
 <!-- SURFACE:PARITY -->
 ## Cross-backend parity
@@ -1811,7 +1977,14 @@ Sources: backend compile/execute methods; Shade MCP
 
 Use MCP `initialize`, send `notifications/initialized`, then call `tools/list`.
 For the snapshot at the top of this document, `tools/list` returned the 18 verb
-names documented below. The transport result for every verb is:
+names documented below. Every tool descriptor declares
+`inputSchema.$schema:"http://json-schema.org/draft-07/schema#"` and
+`execution:{taskSupport:"forbidden"}`. None declares an `outputSchema`.
+`renderEffectFrame.uniforms` and `runDslProgram.uniforms` are object schemas
+with string `propertyNames` and numeric `additionalProperties`; the Zod 4
+upgrade did not change their `Record<string,number>` application contract.
+
+The transport result for every verb is:
 
 ```ts
 type McpTextResult = {
@@ -2449,8 +2622,8 @@ Sources: Shade MCP `src/tools/resolve-effects.ts`; all tool registration files;
 
 This instance is the repository's `synth/testPattern` effect. The three source
 blocks below are complete, not excerpts. The MCP evidence was captured against
-Noisemaker commit `7cc4894baf65470e889c31cf42197bad0975abe1` and Shade MCP
-commit `3e531fc60dd679d9bb1c3151a0c8e4fe48d38337`. MCP request JSON is shown in
+Noisemaker commit `e1feefa0a1188e70aae0169fdc1e7901cc8cc939` and Shade MCP
+commit `346ee022361ce382b55f1ab0abc0000ab6dde37b`. MCP request JSON is shown in
 wire order. Each response is the JSON value decoded from the server's
 `content[0].text` field.
 
@@ -2966,9 +3139,9 @@ program expansion.
 Initialization used protocol `2025-06-18`; the following eight calls then ran
 in a single server session. The response block is preserved literally. The two
 `compileEffect` responses are evidence of GAP-024, not accepted validation:
-their three passes came from the previous viewer graph, while the exact DSL
-above compiles to two. None of these eight successful MCP results set
-`isError`.
+WebGL2 returned three fallback-named passes and WebGPU returned one pass named
+`main`, while the exact DSL above compiles to two. None of these eight
+successful MCP results set `isError`.
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"checkEffectStructure","arguments":{"effect_id":"synth/testPattern"}}}
@@ -2988,21 +3161,21 @@ Responses, in the same order:
 ```json
 {"unusedFiles":[],"namingIssues":[],"nameCollisions":[],"leakedInternalUniforms":[],"missingDescription":false,"structuralParityIssues":[],"requiredUniformIssues":[],"multiPass":false,"passCount":1,"status":"ok"}
 {"effect_id":"synth/testPattern","status":"ok","passes":[{"id":"pass_0","status":"ok"},{"id":"pass_1","status":"ok"},{"id":"pass_2","status":"ok"}],"message":"Compiled successfully","backend":"webgl2"}
-{"effect_id":"synth/testPattern","status":"ok","passes":[{"id":"pass_0","status":"ok"},{"id":"pass_1","status":"ok"},{"id":"pass_2","status":"ok"}],"message":"Compiled successfully","backend":"webgpu"}
+{"effect_id":"synth/testPattern","status":"ok","passes":[{"id":"main","status":"ok"}],"message":"Compiled successfully","backend":"webgpu"}
 {"effect_id":"synth/testPattern","status":"ok","backend":"WebGL2","frame":{"image_uri":null,"width":90,"height":90},"metrics":{"mean_rgb":[0.49851924975320827,0.49851924975320827,0.49851924975320827],"mean_alpha":1,"std_rgb":[0.49999780737389904,0.49999780737389904,0.49999780737389904],"luma_variance":0.2499978073787063,"unique_sampled_colors":2,"is_all_zero":false,"is_all_transparent":false,"is_essentially_blank":false,"is_monochrome":false}}
 {"effect_id":"synth/testPattern","status":"ok","tested_uniforms":["gridSize:pass"],"details":"Uniforms affect output"}
 {"effect_id":"synth/testPattern","status":"skipped","isFilterEffect":false,"similarity":null,"details":"Not a filter effect"}
 {"effect_id":"synth/testPattern","status":"ok","maxDiff":0,"meanDiff":0,"mismatchCount":0,"mismatchPercent":0,"resolution":[1024,1024],"glslSolid":false,"wgslSolid":false,"glslVariance":[16256,16256,16256],"wgslVariance":[16256,16256,16256],"yFlipDetected":false,"yFlipCleanFlip":false,"yFlipMismatchPercent":70.9,"yFlipMeanDiff":180.79,"yFlipRatio":1,"issues":[],"details":"Pixel parity OK (maxDiff=0, meanDiff=0.00)"}
-{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":59.57,"meets_target":true,"stats":{"frame_count":59,"avg_frame_time_ms":16.79,"jitter_ms":3.95,"min_frame_time_ms":6.3,"max_frame_time_ms":43.6}}
+{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":60.18,"meets_target":true,"stats":{"frame_count":60,"avg_frame_time_ms":16.62,"jitter_ms":2.58,"min_frame_time_ms":3.2,"max_frame_time_ms":29.6}}
 ```
 
 Falsifiable interpretation:
 
 - Structure: pass because all issue arrays are empty and description exists.
-- Compilation tool: **indeterminate**. Its three-pass results conflict with the
-  source-derived two-pass graph and are rejected under GAP-024. Its `backend`
-  fields repeat configured session values and do not independently prove the
-  page backend.
+- Compilation tool: **indeterminate**. WebGL2's three fallback-named passes and
+  WebGPU's single `main` pass both conflict with the source-derived two-pass
+  graph and are rejected under GAP-024. Their `backend` fields repeat configured
+  session values and do not independently prove the page backend.
 - Frame metrics: threshold pass because alpha `1 >= 0.01`, luma variance
   `0.2499978073787063 >= 0.0001`, sampled color count `2 > 1`, and no blank,
   transparent, or monochrome flag is set. Freshness is not proved by this verb
@@ -3026,7 +3199,7 @@ Falsifiable interpretation:
   This call does not establish that either buffer came from the worked effect or
   its named backend. See GAP-024.
 - Performance report: threshold pass because
-  `achieved_fps = 59.57 >= target_fps = 30` and the returned `meets_target`
+  `achieved_fps = 60.18 >= target_fps = 30` and the returned `meets_target`
   agrees. The `backend` field is the configured session value; effect and
   actual-backend freshness remain indeterminate under GAP-024.
 
@@ -3060,7 +3233,7 @@ Every cell points to an executable contract or an explicitly identified gap.
 | Passes and render graph | `Effect.passes`, `CompiledGraph.passes`, `CompiledGraph.textures`, `CompiledGraph.allocations` | `PassSpec` typed grammar and sampler/output binding rules | graph analysis and per-pass compile | unresolved inputs and backend compile/resource failures; GAP-005/006 |
 | Textures and surface resources | texture specs plus runtime surface dimensions/formats | `TextureSpec` typed grammar and exact accepted policies | allocation existence, size/format inspection, render metrics | unsupported/missing surface failures and silent fields; GAP-004 |
 | Compatibility and mutation | compiled AST, `listSteps`, `getCompatibleReplacements` | typed `replaceEffect` contract | candidate precheck; post-mutation browser identity is GAP-024 | compatibility and transform errors; GAP-008/022/024 |
-| Rendered output | frame dimensions and `ImageMetrics` | `RenderEffectFrameInput` plus uniform application | exact blank/monochrome/responsiveness/FPS predicates | metric failures, capture errors, exemptions, stale identity; GAP-009/014/015/021/024 |
+| Rendered output | frame dimensions, `ImageMetrics`, sink stats, and `PackedFrame` | `RenderEffectFrameInput`, `Sink`, and `FrameExportQueue` contracts | exact metric predicates plus bounded queue/accounting rules | metric, capture, sink, and export failures; GAP-009/014/015/021/024/028 |
 | Cross-backend parity | source-pair availability and parity report | GLSL ES 3.00/WGSL authoring contracts | buffer diff predicates; requested-effect/backend proof is GAP-024 | compile/readback/divergence/identity reports; GAP-012/016/024 |
 | Shade MCP tool contracts | `tools/list`, effect scanners, all output types | Full signatures for all 18 verbs | verb-specific domain predicates | selector errors and tool-specific unions; GAP-013/017/018/019/020/024 |
 
@@ -3105,7 +3278,8 @@ contract without an engine/tool change.
 | GAP-024 | Browser MCP readiness and backend switching are not bound to requested effect, compiled graph, and actual backend identity | Shade `src/tools/browser/compile.ts`, `render.ts`, `benchmark.ts`, `uniforms.ts`, `passthrough.ts`, and `dsl.ts` poll status text; `describe.ts` delegates to `renderEffectFrame`; `src/tools/browser/parity.ts` waits only for a noncompiling nonempty graph; `src/harness/browser-session.ts` dispatches selection without awaiting the Noisemaker asynchronous load and `setBackend()` silently exits after its poll timeout | any browser `ok` result, including parity, can describe a previously ready graph or unintended backend; configured backend labels do not prove page state, and no current result field makes those identity mismatches uniformly diagnosable |
 | GAP-026 | `onInit`, `onUpdate`, and `onDestroy` are copied into `Effect` wrappers but are not invoked by the production renderer | `shaders/src/runtime/effect.js` defines the wrappers; only `shaders/tests/harness_effect.js` calls them; `shaders/src/runtime/pipeline.js` calls `asyncInit` only | an authored config callback can look valid but never run in production; use only `asyncInit` as a production lifecycle hook until callers exist |
 | GAP-027 | Subchain arguments have no enforced key set, separator rule, duplicate-key diagnostic, or discarded-key report | `shaders/src/lang/parser.js` - `parseSubchainCall()` accepts arbitrary identifier/string pairs, makes commas optional, overwrites duplicates in `kwargs`, and projects only `name`/`id` into the AST | a typo or unknown subchain key can parse successfully and disappear; retry logic receives no machine-readable failure |
+| GAP-028 | Frame export has no terminal result or cancellation counter for accepted frames discarded by reconfigure or close | `shaders/src/runtime/frame-export.js` - `configure()`, `close()`, `_destroySlots()`, `_release()` | accepted work can lose its callback without incrementing `completed`, `failed`, or `dropped`, so a host cannot reconcile or selectively retry canceled frames |
 
 The matrix has 9 surfaces x 4 capabilities = 36 filled cells. Cells that rely
-on behavior absent from code link to the 26 gaps above rather than substituting
+on behavior absent from code link to the 27 gaps above rather than substituting
 an invented contract.

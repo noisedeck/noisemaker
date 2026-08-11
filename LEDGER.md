@@ -104,14 +104,14 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `7cc4894b` / shade-mcp `3e531fc6`, 2026-08-10
+- **Checkpoint:** noisemaker `e1feefa0` / shade-mcp `346ee022`, 2026-08-11
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
   parameters/globals, passes/graph, textures, compatibility/mutation,
   rendered output, cross-backend parity, Shade MCP tool contracts), a fully
   worked validated effect, the surface × capability traceability matrix, and
-  the 26-entry gap register (GAP-001..024 and GAP-026..027). The file pins its
+  the 27-entry gap register (GAP-001..024 and GAP-026..028). The file pins its
   own audited SHAs in the "Source snapshots used for this contract" block at
   its head; that block and this checkpoint are the same two SHAs and must be
   advanced together. There is no generator — every update is a hand edit
@@ -123,7 +123,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline 7cc4894b..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline e1feefa0..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -136,6 +136,13 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-08-11 — caught up through noisemaker `e1feefa0` / shade-mcp
+    `346ee022`: documented the renderer sink and bounded asynchronous frame
+    export contracts across WebGL2/WebGPU, rechecked every changed-source gap,
+    and opened GAP-028 for pending accepted frames canceled without a terminal
+    queue result. Re-resolved the unpinned MCP package; recaptured the
+    `shade-mcp`/`0.1.4`/`2025-06-18` handshake, all 18 tool schemas, and the
+    eight-call worked transcript after the Node 22/SDK/Zod upgrades.
   - 2026-08-10 — caught up through noisemaker `7cc4894b` / shade-mcp
     `3e531fc6`: re-audited Noisemaker runtime drift; re-resolved the unpinned
     MCP package; recaptured the `shade-mcp`/`0.1.4`/`2025-06-18` handshake,
