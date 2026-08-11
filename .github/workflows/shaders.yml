@@ -44,6 +44,9 @@ jobs:
     - name: Run DSL language tests
       run: npm run test:shaders:lang
 
+    - name: Run renderer sink and frame export tests
+      run: npm run test:shaders:runtime
+
     - name: Install Playwright browsers
       run: npx playwright install chromium
 
