@@ -1515,9 +1515,9 @@ The engine-native output path exposes sinks and bounded asynchronous frame
 export independently of Shade MCP:
 
 ```ts
-type FrameDescriptor = {
-  width: number                    // positive safe integer
-  height: number                   // positive safe integer
+type SinkDescriptor = {
+  width: number
+  height: number
   format: "rgba8unorm"
   colorSpace: "srgb" | "display-p3"
   alphaMode: "opaque" | "straight" | "premultiplied"
@@ -1532,7 +1532,7 @@ type PackedFrame = {
 }
 
 type Sink = {
-  configure(descriptor: FrameDescriptor): unknown
+  configure(descriptor: SinkDescriptor): unknown
   submit(textureId: string, presentationTimestamp: number): boolean | unknown
   close(options?: { backendLost?: boolean }): unknown
 }
@@ -1551,6 +1551,13 @@ type FrameExportStats = {
 `queue.available` is true exactly when the queue is configured, open, and has a
 free slot. `CanvasSink`, `SinkManager`, and `FrameExportQueue` are exported from
 `shaders/src/index.js`.
+
+The generic sink boundary does not validate descriptors: `Pipeline.resize()`
+forwards its `width` and `height` arguments, and `SinkManager.configure()`
+stores and broadcasts the supplied value. When a `FrameExportQueue` uses the
+WebGL2 or WebGPU adapter, slot creation instead requires `width` and `height` to
+be positive safe integers, along with the format, color-space, alpha-mode, and
+fps predicates shown above.
 
 Sources: `shaders/src/runtime/sink.js`; `shaders/src/runtime/frame-export.js`;
 `shaders/src/index.js`.
