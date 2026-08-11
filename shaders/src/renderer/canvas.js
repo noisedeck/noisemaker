@@ -293,6 +293,8 @@ export class CanvasRenderer {
         // Context loss state
         this._isContextLost = false
         this._wasRunningBeforeContextLoss = false
+        this._lifecycleGeneration = 0
+        this._lastBackendInvalidationGeneration = -1
 
         // Set up canvas dimension observation for auto-resize
         this._setupCanvasObserver()
@@ -393,17 +395,35 @@ export class CanvasRenderer {
         this._boundContextRestored = async () => {
             console.log('[Canvas] WebGL context restored, rebuilding pipeline...')
 
-            // Dispose the dead pipeline (context is fresh, no GL cleanup needed)
+            const restorationGeneration = this._advanceLifecycle({ backendLost: true })
+
+            // The restored context made resources owned by the old backend
+            // invalid. Close its sinks and cancel CPU work without issuing GPU
+            // cleanup calls against that dead backend.
+            const deadPipeline = this._pipeline
             this._pipeline = null
             this._uniformBindings = new Map()
+            try {
+                deadPipeline?.dispose?.({ backendLost: true })
+            } catch (err) {
+                console.warn('Failed to dispose context-lost pipeline', err)
+            }
 
             this._isContextLost = false
 
             // Recompile current DSL if we had one
             if (this._currentDsl) {
                 try {
-                    await this.compile(this._currentDsl)
+                    const restoredPipeline = await this.compile(this._currentDsl)
+                    if (!this._isLifecycleCurrent(restorationGeneration) ||
+                        !restoredPipeline || this._pipeline !== restoredPipeline) {
+                        return
+                    }
                     await this._reuploadCachedMeshes()
+                    if (!this._isLifecycleCurrent(restorationGeneration) ||
+                        this._pipeline !== restoredPipeline) {
+                        return
+                    }
 
                     if (this._wasRunningBeforeContextLoss) {
                         this.start()
@@ -411,6 +431,7 @@ export class CanvasRenderer {
 
                     console.log('[Canvas] Pipeline rebuilt successfully after context restore')
                 } catch (err) {
+                    if (!this._isLifecycleCurrent(restorationGeneration)) return
                     console.error(`[Canvas] Failed to rebuild pipeline after context restore: ${err.detail || err.message || JSON.stringify(err)}`)
                     if (this._onError) {
                         this._onError(err)
@@ -418,6 +439,7 @@ export class CanvasRenderer {
                 }
             }
 
+            if (!this._isLifecycleCurrent(restorationGeneration)) return
             if (this._onContextRestored) {
                 this._onContextRestored()
             }
@@ -458,6 +480,39 @@ export class CanvasRenderer {
     /** @returns {object|null} Current pipeline object */
     get pipeline() {
         return this._pipeline
+    }
+
+    /**
+     * Register an output sink on the active compiled pipeline.
+     * The returned removal function is scoped to that concrete pipeline.
+     * @param {{configure: Function, submit: Function, close: Function}} sink
+     * @returns {() => void}
+     */
+    addSink(sink) {
+        if (!this._pipeline) {
+            throw new Error('CanvasRenderer has no active pipeline; compile before adding a sink')
+        }
+        if (typeof this._pipeline.addSink !== 'function') {
+            throw new Error('Active Noisemaker pipeline does not support output sinks')
+        }
+        return this._pipeline.addSink(sink)
+    }
+
+    /**
+     * Create an asynchronous frame-export queue for the active backend.
+     * Returns null when the concrete backend does not support frame export.
+     * @param {object} [options]
+     * @returns {object|null}
+     */
+    createFrameExportQueue(options = {}) {
+        if (!this._pipeline) {
+            throw new Error('CanvasRenderer has no active pipeline; compile before creating a frame export queue')
+        }
+        const backend = this._pipeline.backend
+        if (typeof backend?.createFrameExportQueue !== 'function') {
+            return null
+        }
+        return backend.createFrameExportQueue(options)
     }
 
     /** @returns {number} Total frames rendered */
@@ -830,6 +885,31 @@ export class CanvasRenderer {
     // Pipeline Lifecycle
     // =========================================================================
 
+    /** @private Invalidate pending lifecycle work and record unsafe backend generations. */
+    _advanceLifecycle({ backendLost = false } = {}) {
+        this._lifecycleGeneration = (this._lifecycleGeneration ?? 0) + 1
+        if (backendLost) {
+            this._lastBackendInvalidationGeneration = this._lifecycleGeneration
+        }
+        return this._lifecycleGeneration
+    }
+
+    /** @private */
+    _isLifecycleCurrent(generation) {
+        return (this._lifecycleGeneration ?? 0) === generation
+    }
+
+    /** @private Dispose a runtime result that completed after its lifecycle was invalidated. */
+    _disposeStalePipeline(pipeline, generation) {
+        if (!pipeline || pipeline === this._pipeline) return
+        const backendLost = (this._lastBackendInvalidationGeneration ?? -1) > generation
+        try {
+            pipeline.dispose?.(backendLost ? { backendLost: true } : {})
+        } catch (err) {
+            console.warn('Failed to dispose stale pipeline', err)
+        }
+    }
+
     /**
      * Reset the canvas element (for backend switching)
      */
@@ -867,6 +947,7 @@ export class CanvasRenderer {
      */
     async dispose(options = {}) {
         const { loseContext = false, resetCanvas = false } = options
+        this._advanceLifecycle({ backendLost: loseContext || resetCanvas })
 
         if (!this._pipeline) {
             if (resetCanvas) {
@@ -880,14 +961,19 @@ export class CanvasRenderer {
         this._uniformBindings = new Map()
 
         try {
-            oldPipeline.backend?.destroy?.({ loseContext })
+            oldPipeline.dispose({ loseContext })
         } catch (err) {
-            console.warn('Failed to destroy pipeline backend', err)
+            console.warn('Failed to dispose pipeline', err)
         }
 
         if (resetCanvas) {
             this.resetCanvas()
         }
+    }
+
+    /** @private Create a fresh runtime pipeline. */
+    _createRuntime(dsl, options) {
+        return createRuntime(dsl, options)
     }
 
     /**
@@ -899,17 +985,29 @@ export class CanvasRenderer {
      */
     async compile(dsl, options = {}) {
         const shaderOverrides = options.shaderOverrides
+        const lifecycleGeneration = this._lifecycleGeneration ?? 0
 
         this._currentDsl = dsl
 
         if (!this._pipeline) {
-            this._pipeline = await createRuntime(dsl, {
-                canvas: this._canvas,
-                width: this._width,
-                height: this._height,
-                preferWebGPU: this._preferWebGPU,
-                shaderOverrides
-            })
+            let initialPipeline
+            try {
+                initialPipeline = await this._createRuntime(dsl, {
+                    canvas: this._canvas,
+                    width: this._width,
+                    height: this._height,
+                    preferWebGPU: this._preferWebGPU,
+                    shaderOverrides
+                })
+            } catch (err) {
+                if (!this._isLifecycleCurrent(lifecycleGeneration)) return null
+                throw err
+            }
+            if (!this._isLifecycleCurrent(lifecycleGeneration) || this._pipeline) {
+                this._disposeStalePipeline(initialPipeline, lifecycleGeneration)
+                return null
+            }
+            this._pipeline = initialPipeline
             // Apply external input state to new pipeline
             if (this._midiState) {
                 this._pipeline.setMidiState(this._midiState)
@@ -918,42 +1016,55 @@ export class CanvasRenderer {
                 this._pipeline.setAudioState(this._audioState)
             }
         } else {
+            const compilationPipeline = this._pipeline
             // Set isCompiling flag BEFORE recompile swaps the graph
             // This prevents the render loop from trying to execute passes
             // with programs that haven't been compiled yet
-            this._pipeline.isCompiling = true
+            compilationPipeline.isCompiling = true
 
             try {
-                const newGraph = recompile(this._pipeline, dsl, { shaderOverrides })
+                const newGraph = recompile(compilationPipeline, dsl, { shaderOverrides })
                 if (!newGraph) {
                     // Recompile failed, need to create a new pipeline from scratch
-                    this._pipeline.isCompiling = false
-                    const previousPipeline = this._pipeline
-                    this._pipeline = await createRuntime(dsl, {
+                    compilationPipeline.isCompiling = false
+                    const previousPipeline = compilationPipeline
+                    const replacementPipeline = await this._createRuntime(dsl, {
                         canvas: this._canvas,
                         width: this._width,
                         height: this._height,
                         preferWebGPU: this._preferWebGPU,
                         shaderOverrides
                     })
+                    if (!this._isLifecycleCurrent(lifecycleGeneration) ||
+                        this._pipeline !== previousPipeline) {
+                        this._disposeStalePipeline(replacementPipeline, lifecycleGeneration)
+                        return null
+                    }
+                    this._pipeline = replacementPipeline
                     try {
-                        previousPipeline?.backend?.destroy?.()
+                        previousPipeline?.dispose?.()
                     } catch (err) {
-                        console.warn('Failed to release previous pipeline backend', err)
+                        console.warn('Failed to dispose previous pipeline', err)
                     }
                 } else {
                     // Recompile succeeded, now compile the programs
                     // compilePrograms will clear the isCompiling flag when done
-                    await this._pipeline.compilePrograms()
+                    await compilationPipeline.compilePrograms()
+                    if (!this._isLifecycleCurrent(lifecycleGeneration) ||
+                        this._pipeline !== compilationPipeline) {
+                        return null
+                    }
                 }
             } catch (err) {
                 // Ensure flag is cleared on error
-                if (this._pipeline) {
-                    this._pipeline.isCompiling = false
-                }
+                compilationPipeline.isCompiling = false
+                if (!this._isLifecycleCurrent(lifecycleGeneration)) return null
                 throw err
             }
         }
+
+        const compiledPipeline = this._pipeline
+        if (!this._isLifecycleCurrent(lifecycleGeneration) || !compiledPipeline) return null
 
         // Reset frame count on recompile so simulations restart properly
         this._frameCount = 0
@@ -962,6 +1073,10 @@ export class CanvasRenderer {
 
         // Re-upload cached mesh data to new backend
         await this._reuploadCachedMeshes()
+        if (!this._isLifecycleCurrent(lifecycleGeneration) ||
+            this._pipeline !== compiledPipeline) {
+            return null
+        }
 
         // A context loss stops the render loop. When the loss was resolved by
         // replacing the canvas (backend switch) rather than a restore event,
@@ -971,7 +1086,7 @@ export class CanvasRenderer {
             this.start()
         }
 
-        return this._pipeline
+        return compiledPipeline
     }
 
     /**

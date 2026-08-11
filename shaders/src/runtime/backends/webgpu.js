@@ -8,11 +8,13 @@
  */
 
 import { Backend } from '../backend.js'
+import { FrameExportQueue } from '../frame-export.js'
 import {
     DEFAULT_FRAGMENT_ENTRY_POINT,
     DEFAULT_VERTEX_ENTRY_POINT,
     DEFAULT_VERTEX_SHADER_WGSL
 } from '../default-shaders.js'
+import { WebGPUFrameExportAdapter } from './webgpu-frame-export.js'
 
 /**
  * Convert a float16 value (stored as uint16) to float32
@@ -83,6 +85,14 @@ export class WebGPUBackend extends Backend {
         this.device.addEventListener('uncapturederror', (event) => {
             console.error('WebGPU uncaptured error:', event.error?.message || event.error)
         })
+    }
+
+    createFrameExportQueue(options = {}) {
+        const { gpuConstants = globalThis, ...queueOptions } = options
+        return new FrameExportQueue(
+            new WebGPUFrameExportAdapter(this, gpuConstants),
+            queueOptions
+        )
     }
 
     /**

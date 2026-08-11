@@ -5,6 +5,7 @@
 
 import { Pipeline } from '../src/runtime/pipeline.js'
 import { Backend } from '../src/runtime/backend.js'
+import { FrameExportQueue } from '../src/runtime/frame-export.js'
 
 const tests = []
 
@@ -643,6 +644,400 @@ test('Pipeline - No Render Surface Skips Present', async () => {
     // Buffers should still swap
     if (o0.read !== initialWrite || o0.write !== initialRead) {
         throw new Error('Buffers should swap even without renderSurface')
+    }
+})
+
+test('Pipeline - Sinks configure across the lifecycle and submit the pre-swap render texture', async () => {
+    class PresentingBackend extends MockBackend {
+        constructor() {
+            super()
+            this.presented = []
+        }
+
+        present(textureId) {
+            this.presented.push(textureId)
+        }
+    }
+
+    const backend = new PresentingBackend()
+    const pipeline = new Pipeline({ passes: [], textures: new Map(), renderSurface: 'o2' }, backend)
+    const configurations = []
+    const descriptorKeySets = []
+    const frames = []
+    let earlyCloses = 0
+    const earlySink = {
+        configure(descriptor) {
+            configurations.push({ sink: 'early', ...descriptor })
+            descriptorKeySets.push(Object.keys(descriptor).sort())
+        },
+        submit(textureId, timestamp) { frames.push(['early', textureId, timestamp]); return true },
+        close() { earlyCloses++ }
+    }
+
+    const removeEarly = pipeline.addSink(earlySink)
+    if (configurations.length !== 0) {
+        throw new Error('A sink registered before init must wait for the first resize')
+    }
+
+    await pipeline.init(400, 300)
+
+    const lateSink = {
+        configure(descriptor) {
+            configurations.push({ sink: 'late', ...descriptor })
+            descriptorKeySets.push(Object.keys(descriptor).sort())
+        },
+        submit(textureId, timestamp) { frames.push(['late', textureId, timestamp]); return true },
+        close() {}
+    }
+    pipeline.addSink({ configure() {}, submit() { return false }, close() {} })
+    pipeline.addSink({ configure() {}, submit() { throw new Error('sink failure') }, close() {} })
+    pipeline.addSink(lateSink)
+
+    if (configurations.length !== 2 || configurations[0].width !== 400 || configurations[1].height !== 300) {
+        throw new Error('Sinks must configure on first resize and immediate post-init registration')
+    }
+
+    pipeline.resize(640, 480)
+    if (configurations.length !== 4) {
+        throw new Error('Resize must configure every active sink without per-frame configuration')
+    }
+    for (const descriptor of configurations.slice(2)) {
+        if (descriptor.width !== 640 || descriptor.height !== 480 || descriptor.format !== 'rgba8unorm' || descriptor.colorSpace !== 'srgb' || descriptor.alphaMode !== 'premultiplied' || descriptor.fps !== 60) {
+            throw new Error(`Unexpected sink descriptor: ${JSON.stringify(descriptor)}`)
+        }
+    }
+    const expectedDescriptorKeys = JSON.stringify(['alphaMode', 'colorSpace', 'format', 'fps', 'height', 'width'])
+    for (const keys of descriptorKeySets) {
+        if (JSON.stringify(keys) !== expectedDescriptorKeys) {
+            throw new Error(`Unexpected sink descriptor own-key shape: ${JSON.stringify(keys)}`)
+        }
+    }
+
+    const o2 = pipeline.surfaces.get('o2')
+    const preSwapTextureId = o2.read
+    const timestamp = 'literal presentation timestamp'
+    pipeline.render(0, timestamp)
+
+    if (backend.presented.length !== 1 || backend.presented[0] !== preSwapTextureId) {
+        throw new Error('Canvas sink must present the exact pre-swap render texture once')
+    }
+    if (frames.length !== 2 || frames[0][1] !== preSwapTextureId || frames[1][1] !== preSwapTextureId || frames[0][2] !== timestamp || frames[1][2] !== timestamp) {
+        throw new Error('Active sinks after busy or failing sinks must receive the exact texture and timestamp')
+    }
+    if (o2.read === preSwapTextureId) {
+        throw new Error('Render texture must be submitted before buffer swapping')
+    }
+    if (configurations.length !== 4) {
+        throw new Error('Rendering must not reconfigure sinks')
+    }
+
+    removeEarly()
+    removeEarly()
+    if (earlyCloses !== 1) {
+        throw new Error(`Expected idempotent sink removal to close once, got ${earlyCloses}`)
+    }
+})
+
+test('Pipeline - Missing presentation timestamp uses the monotonic clock', async () => {
+    const backend = new MockBackend()
+    const pipeline = new Pipeline({ passes: [], textures: new Map(), renderSurface: 'o0' }, backend)
+    const frames = []
+    pipeline.addSink({
+        configure() {},
+        submit(textureId, timestamp) { frames.push([textureId, timestamp]); return true },
+        close() {}
+    })
+    await pipeline.init(320, 240)
+
+    const performanceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance')
+    Object.defineProperty(globalThis, 'performance', {
+        configurable: true,
+        value: { now() { return 12345.5 } }
+    })
+    const preSwapTextureId = pipeline.surfaces.get('o0').read
+    try {
+        pipeline.render(0)
+    } finally {
+        if (performanceDescriptor) {
+            Object.defineProperty(globalThis, 'performance', performanceDescriptor)
+        } else {
+            delete globalThis.performance
+        }
+    }
+
+    if (frames.length !== 1 || frames[0][0] !== preSwapTextureId || frames[0][1] !== 12345.5) {
+        throw new Error(`Expected monotonic timestamp fallback, got ${JSON.stringify(frames)}`)
+    }
+})
+
+test('Pipeline - Resize completes after a sink configure failure', async () => {
+    class PresentingBackend extends MockBackend {
+        constructor() {
+            super()
+            this.presented = []
+        }
+
+        present(textureId) {
+            this.presented.push(textureId)
+        }
+    }
+
+    const backend = new PresentingBackend()
+    const pipeline = new Pipeline({ passes: [], textures: new Map(), renderSurface: 'o0' }, backend)
+    await pipeline.init(320, 240)
+
+    let shouldThrow = false
+    const failed = {
+        configure() {
+            if (shouldThrow) throw new Error('configure failed')
+        },
+        submit() { return true },
+        close() {}
+    }
+    const observedDescriptors = []
+    const observed = {
+        configure(descriptor) { observedDescriptors.push({ ...descriptor }) },
+        submit() { return true },
+        close() {}
+    }
+    pipeline.addSink(failed)
+    pipeline.addSink(observed)
+    observedDescriptors.length = 0
+    shouldThrow = true
+
+    let resizeError
+    try {
+        pipeline.resize(640, 480)
+    } catch (error) {
+        resizeError = error
+    }
+
+    if (resizeError) {
+        throw new Error(`Resize must contain sink configure failures: ${resizeError.message}`)
+    }
+    if (observedDescriptors.length !== 1 || observedDescriptors[0].width !== 640 || observedDescriptors[0].height !== 480) {
+        throw new Error(`Later sink did not receive resized dimensions: ${JSON.stringify(observedDescriptors)}`)
+    }
+    const resizedTexture = backend.textures.get('global_o0_read')
+    if (!resizedTexture || resizedTexture.width !== 640 || resizedTexture.height !== 480) {
+        throw new Error(`Resize did not complete the surface lifecycle: ${JSON.stringify(resizedTexture)}`)
+    }
+
+    pipeline.render(0, 99)
+    if (backend.presented.length !== 1 || backend.presented[0] !== pipeline.surfaces.get('o0').write) {
+        throw new Error('Default canvas sink must still present after an isolated configure failure')
+    }
+})
+
+test('Pipeline - Sinks remain optional without a callable backend present method', async () => {
+    const backend = new MockBackend()
+    backend.present = true
+    const pipeline = new Pipeline({ passes: [], textures: new Map(), renderSurface: 'o0' }, backend)
+    const frames = []
+    const sink = {
+        configure() {},
+        submit(textureId, timestamp) { frames.push([textureId, timestamp]); return true },
+        close() {}
+    }
+
+    await pipeline.init(320, 240)
+    pipeline.addSink(sink)
+    const preSwapTextureId = pipeline.surfaces.get('o0').read
+    pipeline.render(0, 789)
+
+    if (frames.length !== 1 || frames[0][0] !== preSwapTextureId || frames[0][1] !== 789) {
+        throw new Error('A backend without callable present must render through registered sinks safely')
+    }
+})
+
+test('Pipeline - No render surface skips all sinks while advancing the frame', async () => {
+    const backend = new MockBackend()
+    const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+    let submissions = 0
+    pipeline.addSink({
+        configure() {},
+        submit() { submissions++; return true },
+        close() {}
+    })
+    await pipeline.init(320, 240)
+
+    const o0 = pipeline.surfaces.get('o0')
+    const initialRead = o0.read
+    const initialWrite = o0.write
+    pipeline.render(0, 123)
+
+    if (submissions !== 0 || pipeline.frameIndex !== 1) {
+        throw new Error('No render surface must not submit while the frame advances')
+    }
+    if (o0.read !== initialWrite || o0.write !== initialRead) {
+        throw new Error('No render surface must continue swapping buffers')
+    }
+})
+
+test('Pipeline - Dispose closes sinks before destroying the backend and is idempotent', async () => {
+    const backend = new MockBackend()
+    const events = []
+    backend.destroy = () => { events.push('backend destroy') }
+    const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+    pipeline.addSink({
+        configure() {},
+        submit() { return true },
+        close() { events.push('sink close') }
+    })
+    await pipeline.init(320, 240)
+
+    pipeline.dispose()
+    pipeline.dispose()
+
+    if (events.length !== 2 || events[0] !== 'sink close' || events[1] !== 'backend destroy') {
+        throw new Error(`Expected one sink close before one backend destroy, got ${events.join(', ')}`)
+    }
+})
+
+test('Pipeline - Dispose forwards loseContext while retaining backend texture ownership', async () => {
+    const backend = new MockBackend()
+    const destroyOptions = []
+    backend.destroy = (options) => { destroyOptions.push(options) }
+    const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+    await pipeline.init(32, 24)
+
+    pipeline.dispose({ loseContext: true })
+
+    if (backend.textures.size !== 0) {
+        throw new Error('Pipeline must destroy its registered textures before backend teardown')
+    }
+    const expected = JSON.stringify([{ skipTextures: true, loseContext: true }])
+    if (JSON.stringify(destroyOptions) !== expected) {
+        throw new Error(`Expected loseContext forwarding with skipTextures, got ${JSON.stringify(destroyOptions)}`)
+    }
+})
+
+test('Pipeline - backendLost disposal closes sinks and cancels work without backend resource calls', () => {
+    const backend = new MockBackend()
+    const resourceCalls = []
+    backend.textures.set('lost-texture', {})
+    backend.destroyTexture = (id) => { resourceCalls.push(['destroyTexture', id]) }
+    backend.destroy = (options) => { resourceCalls.push(['destroy', options]) }
+    const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+    const events = []
+    pipeline.addSink({
+        configure() {},
+        submit() { return true },
+        close(options) { events.push(['sink close', options]) }
+    })
+    pipeline._asyncRenders.set('active', () => { events.push('async cancel') })
+    pipeline._asyncDebounceTimers = new Map([
+        ['pending', setTimeout(() => { throw new Error('disposed timer fired') }, 60_000)]
+    ])
+
+    pipeline.dispose({ backendLost: true })
+    pipeline.dispose({ backendLost: true })
+
+    if (JSON.stringify(events) !== JSON.stringify([
+        'async cancel',
+        ['sink close', { backendLost: true }]
+    ])) {
+        throw new Error(`Expected one cancellation then one sink close, got ${JSON.stringify(events)}`)
+    }
+    if (resourceCalls.length !== 0) {
+        throw new Error(`backendLost disposal must not touch backend resources: ${JSON.stringify(resourceCalls)}`)
+    }
+    if (pipeline.surfaces.size !== 0 || pipeline.graph !== null ||
+        pipeline.frameReadTextures !== null || pipeline.frameWriteTextures !== null ||
+        pipeline.backend !== null) {
+        throw new Error('backendLost disposal must still clear pipeline-owned references')
+    }
+})
+
+test('Pipeline - backendLost reaches a real queue-owning sink without adapter destruction while normal teardown still destroys slots', () => {
+    function fixture() {
+        const adapter = {
+            slots: [],
+            createSlot(index) {
+                const slot = { index }
+                this.slots.push(slot)
+                return slot
+            },
+            begin() {},
+            poll() { return false },
+            read() { throw new Error('not ready') },
+            destroySlot(slot) { slot.destroyed = (slot.destroyed || 0) + 1 }
+        }
+        const queue = new FrameExportQueue(adapter, { slots: 2 })
+        queue.configure({ width: 4, height: 4 })
+        queue.enqueue('pending', 1, () => { throw new Error('closed queue completed') })
+        const backend = new MockBackend()
+        const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+        pipeline.addSink({
+            configure() {},
+            submit() { return true },
+            close(options) { queue.close(options) }
+        })
+        return { adapter, queue, pipeline }
+    }
+
+    const lost = fixture()
+    lost.pipeline.dispose({ backendLost: true })
+    if (JSON.stringify(lost.adapter.slots.map(slot => slot.destroyed || 0)) !== '[0,0]') {
+        throw new Error('backendLost queue teardown invoked adapter destruction')
+    }
+    if (lost.queue.adapter !== null) {
+        throw new Error('backendLost queue teardown retained its adapter')
+    }
+
+    const normal = fixture()
+    normal.pipeline.dispose()
+    if (JSON.stringify(normal.adapter.slots.map(slot => slot.destroyed || 0)) !== '[1,1]') {
+        throw new Error('normal queue teardown must destroy every adapter slot once')
+    }
+    if (normal.queue.adapter !== null) {
+        throw new Error('normal queue teardown retained its adapter')
+    }
+})
+
+test('Pipeline - Dispose preserves the first sink error while completing backend cleanup', () => {
+    const backend = new MockBackend()
+    const events = []
+    backend.textures.set('owned', {})
+    backend.destroyTexture = (id) => {
+        events.push(`destroy texture ${id}`)
+        backend.textures.delete(id)
+    }
+    backend.destroy = (options) => { events.push(`destroy backend ${JSON.stringify(options)}`) }
+    const pipeline = new Pipeline({ passes: [], textures: new Map() }, backend)
+    const firstError = new Error('first sink close failed')
+    pipeline.addSink({
+        configure() {},
+        submit() { return true },
+        close() {
+            events.push('first sink close')
+            throw firstError
+        }
+    })
+    pipeline.addSink({
+        configure() {},
+        submit() { return true },
+        close() { events.push('second sink close') }
+    })
+
+    let thrown
+    try {
+        pipeline.dispose({ loseContext: true })
+    } catch (error) {
+        thrown = error
+    }
+
+    if (thrown !== firstError) {
+        throw new Error(`Expected first sink error identity, got ${thrown?.message}`)
+    }
+    const expected = [
+        'first sink close',
+        'second sink close',
+        'destroy texture owned',
+        'destroy backend {"skipTextures":true,"loseContext":true}'
+    ]
+    if (JSON.stringify(events) !== JSON.stringify(expected)) {
+        throw new Error(`Expected cleanup after the first sink error, got ${JSON.stringify(events)}`)
     }
 })
 

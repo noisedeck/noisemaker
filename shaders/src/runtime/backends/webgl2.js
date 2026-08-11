@@ -3,11 +3,13 @@
  */
 
 import { Backend } from '../backend.js'
+import { FrameExportQueue } from '../frame-export.js'
 import {
     DEFAULT_VERTEX_SHADER,
     FULLSCREEN_TRIANGLE_POSITIONS,
     FULLSCREEN_TRIANGLE_VERTEX_COUNT
 } from '../default-shaders.js'
+import { WebGL2FrameExportAdapter } from './webgl2-frame-export.js'
 
 // How many frames after a program compile or render-target (re)allocation
 // keep per-pass gl.getError() checks enabled. gl.getError() forces a
@@ -48,6 +50,10 @@ export class WebGL2Backend extends Backend {
         this._packedUniformBuffer = new ArrayBuffer(512)
         this._packedUniformView = new DataView(this._packedUniformBuffer)
         this._packedUniformBytes = new Uint8Array(this._packedUniformBuffer)
+    }
+
+    createFrameExportQueue(options = {}) {
+        return new FrameExportQueue(new WebGL2FrameExportAdapter(this), options)
     }
 
     /**

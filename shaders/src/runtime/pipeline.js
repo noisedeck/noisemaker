@@ -9,6 +9,7 @@ import { expandPalette } from './palette-expansion.js'
 import { getEffect } from './registry.js'
 import { Effect } from './effect.js'
 import { CUBE_FACE_BASES } from '../renderer/cubeCamera.js'
+import { CanvasSink, SinkManager } from './sink.js'
 
 /**
  * Oscillator evaluation functions.
@@ -242,6 +243,19 @@ export class Pipeline {
     constructor(graph, backend) {
         this.graph = graph
         this.backend = backend
+        this.sinkManager = new SinkManager()
+        this._sinkDescriptor = {
+            width: 0,
+            height: 0,
+            format: 'rgba8unorm',
+            colorSpace: 'srgb',
+            alphaMode: 'premultiplied',
+            fps: 60
+        }
+        if (typeof backend?.present === 'function') {
+            this.sinkManager.add(new CanvasSink(backend))
+        }
+        this._disposed = false
         this.frameIndex = 0
         this.lastTime = 0
         this.surfaces = new Map()        // Global surfaces (o0-o7)
@@ -286,6 +300,15 @@ export class Pipeline {
 
         // Track effect instances for asyncInit lifecycle
         this._asyncRenders = new Map()  // nodeId → cancel function
+    }
+
+    /**
+     * Register an output sink for the selected render surface.
+     * @param {{configure: Function, submit: Function, close: Function}} sink
+     * @returns {() => void} Idempotent sink removal function
+     */
+    addSink(sink) {
+        return this.sinkManager.add(sink)
     }
 
     /**
@@ -401,6 +424,9 @@ export class Pipeline {
     resize(width, height) {
         this.width = width
         this.height = height
+        this._sinkDescriptor.width = width
+        this._sinkDescriptor.height = height
+        this.sinkManager.configure(this._sinkDescriptor)
 
         // Create/recreate global surfaces
         this.createSurfaces()
@@ -1278,7 +1304,7 @@ export class Pipeline {
      * Skips rendering if compilation is in progress to avoid race conditions
      * where passes reference programs that haven't been compiled yet.
      */
-    render(time = 0) {
+    render(time = 0, presentationTimestamp) {
         // Skip rendering if compilation is in progress
         // This prevents ERR_PROGRAM_NOT_FOUND errors when the graph has been
         // updated but programs haven't finished compiling yet
@@ -1363,9 +1389,14 @@ export class Pipeline {
         const renderSurfaceName = this.graph?.renderSurface
         if (renderSurfaceName) {
             const renderSurface = this.surfaces.get(renderSurfaceName)
-            if (renderSurface && this.backend.present) {
+            if (renderSurface) {
                 const presentId = this.frameReadTextures?.get(renderSurfaceName) ?? renderSurface.read
-                this.backend.present(presentId)
+                if (presentationTimestamp === undefined) {
+                    presentationTimestamp = typeof performance !== 'undefined' && typeof performance.now === 'function'
+                        ? performance.now()
+                        : Date.now()
+                }
+                this.sinkManager.submit(presentId, presentationTimestamp)
             }
         }
 
@@ -1809,12 +1840,29 @@ export class Pipeline {
     }
 
     /**
-     * Dispose of all pipeline resources
+     * Dispose of all pipeline resources.
+     * @param {object} [options]
+     * @param {boolean} [options.loseContext=false] - Ask the backend to lose its context after cleanup
+     * @param {boolean} [options.backendLost=false] - Skip unsafe GPU cleanup when the backend is already lost
      */
-    dispose() {
+    dispose(options = {}) {
+        if (this._disposed) return
+        this._disposed = true
+
+        const { loseContext = false, backendLost = false } = options
+        let firstError
+
+        const captureError = (error) => {
+            if (!firstError) firstError = error
+        }
+
         // Cancel all async renders
         for (const cancel of this._asyncRenders.values()) {
-            cancel()
+            try {
+                cancel()
+            } catch (error) {
+                captureError(error)
+            }
         }
         this._asyncRenders.clear()
 
@@ -1825,29 +1873,50 @@ export class Pipeline {
             this._asyncDebounceTimers.clear()
         }
 
-        // Every texture the pipeline owns is registered with the backend:
-        // global surfaces (including mesh positions/normals/uvs triplets),
-        // graph textures, and runtime-managed textures such as MIDI grids,
-        // media inputs, and async-init uploads. A single sweep of the backend
-        // texture registry destroys each one exactly once.
-        if (this.backend?.textures) {
-            for (const texId of Array.from(this.backend.textures.keys())) {
-                this.backend.destroyTexture(texId)
+        try {
+            this.sinkManager.close(backendLost ? { backendLost: true } : undefined)
+        } catch (error) {
+            captureError(error)
+        }
+
+        if (!backendLost) {
+            // Every texture the pipeline owns is registered with the backend:
+            // global surfaces (including mesh positions/normals/uvs triplets),
+            // graph textures, and runtime-managed textures such as MIDI grids,
+            // media inputs, and async-init uploads. A single sweep of the backend
+            // texture registry destroys each one exactly once.
+            if (this.backend?.textures) {
+                for (const texId of Array.from(this.backend.textures.keys())) {
+                    try {
+                        this.backend.destroyTexture(texId)
+                    } catch (error) {
+                        captureError(error)
+                    }
+                }
+            }
+
+            // Release the remaining backend resources — programs, buffers,
+            // samplers, depth attachments, and context. Textures are already
+            // gone, so skip the backend's own texture sweep.
+            if (this.backend && typeof this.backend.destroy === 'function') {
+                try {
+                    this.backend.destroy({ skipTextures: true, loseContext })
+                } catch (error) {
+                    captureError(error)
+                }
             }
         }
-        this.surfaces.clear()
 
-        // Release the remaining backend resources — programs, buffers,
-        // samplers, depth attachments, and context. Textures are already
-        // gone, so skip the backend's own texture sweep.
-        if (this.backend && typeof this.backend.destroy === 'function') {
-            this.backend.destroy({ skipTextures: true })
-        }
+        this.surfaces.clear()
 
         // Clear references
         this.graph = null
         this.frameReadTextures = null
+        this.frameWriteTextures = null
         this.globalUniforms = {}
+        this.backend = null
+
+        if (firstError) throw firstError
     }
 }
 

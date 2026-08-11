@@ -41,6 +41,8 @@ export {
 export { Backend } from './runtime/backend.js'
 export { WebGL2Backend } from './runtime/backends/webgl2.js'
 export { WebGPUBackend } from './runtime/backends/webgpu.js'
+export { CanvasSink, SinkManager } from './runtime/sink.js'
+export { FrameExportQueue } from './runtime/frame-export.js'
 import { Pipeline, createPipeline } from './runtime/pipeline.js'
 export { Pipeline, createPipeline }
 

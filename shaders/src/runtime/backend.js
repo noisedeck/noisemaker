@@ -118,6 +118,15 @@ export class Backend {
     }
 
     /**
+     * Create a frame export queue when supported by a concrete backend.
+     * @param {object} options
+     * @returns {object|null}
+     */
+    createFrameExportQueue(options) {
+        return null
+    }
+
+    /**
      * Get backend name
      * @returns {string}
      */
