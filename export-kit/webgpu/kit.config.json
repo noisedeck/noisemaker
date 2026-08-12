@@ -1,0 +1,29 @@
+{
+  "configVersion": 1,
+  "id": "webgpu",
+  "series": "0.1",
+  "shaderSource": "runtime",
+  "engineSource": "cdn",
+  "shaderDialects": ["wgsl"],
+  "pageTemplate": true,
+  "requiredTokens": {
+    "index.template.html": [
+      "NM_PROGRAM_NAME_HTML",
+      "NM_PROGRAM_NAME_JSON",
+      "NM_ENGINE_VERSION",
+      "NM_ENGINE_VERSION_JSON"
+    ],
+    "README.template.md": ["NM_PROGRAM_NAME", "NM_EFFECT_LIST", "NM_ENGINE_VERSION"]
+  },
+  "shaderLayout": {
+    "root": "shaders"
+  },
+  "inject": {
+    "type": "dsl-json-template",
+    "target": "index.html"
+  },
+  "compat": {
+    "mode": "manifest-wgsl"
+  },
+  "engineBytesFrom": null
+}

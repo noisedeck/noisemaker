@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>{{NM_PROGRAM_NAME_HTML}} · Noisedeck</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #0a0a0c;
+    color: #e7e7ea;
+    font: 400 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    overflow: hidden;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 14px 18px 10px;
+  }
+  #program-name {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: #f2f2f5;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #status {
+    flex: none;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #6f6f7b;
+    white-space: nowrap;
+    transition: opacity 400ms ease;
+  }
+  #status.is-done { opacity: 0; }
+  #status.is-failed { color: #ff8fa8; opacity: 1; }
+
+  #stage {
+    position: relative;
+    display: flex;
+    min-height: 0;
+    padding: 0 18px;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 3px;
+    background: #050506;
+    box-shadow: 0 0 0 1px #1c1c22, 0 24px 60px -30px #000;
+  }
+
+  footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 10px 18px 14px;
+    font-size: 11px;
+    color: #55555f;
+  }
+  footer a { color: inherit; text-decoration: none; border-bottom: 1px solid #2a2a33; }
+  footer a:hover { color: #9a9aa6; }
+
+  #err {
+    position: absolute;
+    left: 18px;
+    right: 18px;
+    bottom: 0;
+    padding: 14px 16px;
+    border: 1px solid #4a2230;
+    border-left-width: 3px;
+    border-radius: 3px;
+    background-color: #171014;
+    color: #f0c9d2;
+    font: 400 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow: auto;
+    max-height: 70%;
+  }
+  #err[hidden] { display: none; }
+  #err strong { display: block; margin-bottom: 6px; color: #ff8fa8; font-weight: 500; }
+
+  @media (max-width: 600px) {
+    header, footer { padding-left: 12px; padding-right: 12px; }
+    #stage { padding: 0 12px; }
+    #err { left: 12px; right: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="program-name">{{NM_PROGRAM_NAME_HTML}}</h1>
+  <span id="status">loading engine</span>
+</header>
+
+<main id="stage">
+  <canvas id="nm-canvas"></canvas>
+  <div id="err" role="alert" hidden></div>
+</main>
+
+<footer>
+  <span>noisemaker {{NM_ENGINE_VERSION}} · webgl2</span>
+  <span>made with Noisedeck</span>
+</footer>
+
+<script type="module">
+  // ---- exported program -------------------------------------------------
+  const PROGRAM_NAME = {{NM_PROGRAM_NAME_JSON}};
+  const DSL = {{NM_DSL_JSON}};
+  const ENGINE_URL = './vendor/noisemaker/noisemaker-shaders-core.esm.min.js';
+  // The engine's loadEffectFromBundle() uses a dynamic import(), which resolves
+  // against the engine MODULE's url, not against this page. So this path is
+  // engine-relative ("./effects" when the engine ships inside the export), while
+  // BASE_PATH below stays page-relative because loadManifest() uses fetch().
+  const BUNDLE_PATH = './effects';
+  // The engine resolves shared assets (meshes, shader includes) against the
+  // directory holding the core module, so derive it instead of carrying
+  // another token that could drift out of sync with ENGINE_URL.
+  const BASE_PATH = ENGINE_URL.replace(/\/[^/]*$/, '');
+  const LOOP_SECONDS = 15;
+
+  const canvas = document.getElementById('nm-canvas');
+  const statusEl = document.getElementById('status');
+  const errEl = document.getElementById('err');
+  const nameEl = document.getElementById('program-name');
+
+  nameEl.textContent = PROGRAM_NAME;
+
+  function setStatus(text, state) {
+    statusEl.className = state || '';
+    if (text !== null) statusEl.textContent = text;
+  }
+
+  function showError(e) {
+    setStatus('failed', 'is-failed');
+    errEl.hidden = false;
+    errEl.textContent = '';
+    const title = document.createElement('strong');
+    title.textContent = 'This program could not start.';
+    errEl.appendChild(title);
+    errEl.appendChild(document.createTextNode(String((e && e.stack) || e)));
+    console.error('Noisedeck export failed:', e);
+  }
+
+  function measure() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    return {
+      width: Math.max(64, Math.round(rect.width * dpr)),
+      height: Math.max(64, Math.round(rect.height * dpr)),
+    };
+  }
+
+  async function boot() {
+    const size = measure();
+    canvas.width = size.width;
+    canvas.height = size.height;
+
+    const { CanvasRenderer, extractEffectNamesFromDsl } = await import(ENGINE_URL);
+
+    const renderer = new CanvasRenderer({
+      canvas,
+      width: size.width,
+      height: size.height,
+      preferWebGPU: false,
+      useBundles: true,
+      basePath: BASE_PATH,
+      bundlePath: BUNDLE_PATH,
+    });
+
+    setStatus('loading effects');
+    await renderer.loadManifest();
+    const effectIds = extractEffectNamesFromDsl(DSL, renderer.manifest || {}).map((e) => e.effectId);
+    if (effectIds.length > 0) await renderer.loadEffects(effectIds);
+
+    setStatus('compiling');
+    await renderer.compile(DSL);
+    renderer.setLoopDuration(LOOP_SECONDS);
+    renderer.start();
+    setStatus('running', 'is-done');
+
+    let pending = 0;
+    window.addEventListener('resize', () => {
+      clearTimeout(pending);
+      pending = setTimeout(() => {
+        const next = measure();
+        canvas.width = next.width;
+        canvas.height = next.height;
+        renderer.resize(next.width, next.height);
+      }, 120);
+    });
+  }
+
+  try {
+    await boot();
+  } catch (e) {
+    showError(e);
+  }
+</script>
+
+</body>
+</html>

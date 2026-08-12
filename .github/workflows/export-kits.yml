@@ -1,0 +1,55 @@
+name: Export kits
+
+# Public repo: holds NO deploy credentials. Dispatches scaffold's
+# export-kit-release.yml, which builds this repo's export kit at this exact
+# SHA and ships it to kits.noisedeck.app. See scaffold
+# docs/runbook/export-kits.md.
+#
+# noisemaker publishes two kits (webgl2, webgpu) that vendor nothing beyond
+# export-kit/, so one workflow dispatches both, sequentially.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "export-kit/**"
+      - ".github/workflows/export-kits.yml"
+
+concurrency:
+  group: export-kit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint scaffold-dispatch token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 2959521
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+          repositories: scaffold
+
+      - name: Dispatch export-kit-release (webgl2)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh workflow run export-kit-release.yml \
+            --repo noisefactorllc/scaffold \
+            --ref main \
+            -f kit=webgl2 \
+            -f sha=${{ github.sha }}
+
+      - name: Dispatch export-kit-release (webgpu)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh workflow run export-kit-release.yml \
+            --repo noisefactorllc/scaffold \
+            --ref main \
+            -f kit=webgpu \
+            -f sha=${{ github.sha }}
