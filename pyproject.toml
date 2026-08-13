@@ -53,10 +53,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/noisedeck/noisemaker"
+Homepage = "https://github.com/noisefactorllc/noisemaker"
 Documentation = "https://docs.noisemaker.app/"
-Repository = "https://github.com/noisedeck/noisemaker"
-Issues = "https://github.com/noisedeck/noisemaker/issues"
+Repository = "https://github.com/noisefactorllc/noisemaker"
+Issues = "https://github.com/noisefactorllc/noisemaker/issues"
 
 [project.scripts]
 magic-mashup = "noisemaker.scripts.magic_mashup:main"

@@ -53,7 +53,7 @@ def presets_path_option(f):
     help="""
         Noisemaker - Let's make generative art with noise
 
-    https://github.com/noisedeck/noisemaker
+    https://github.com/noisefactorllc/noisemaker
         """,
     context_settings=cli.CLICK_CONTEXT_SETTINGS,
 )

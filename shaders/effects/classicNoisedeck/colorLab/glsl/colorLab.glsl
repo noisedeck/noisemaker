@@ -308,7 +308,7 @@ void main() {
     } else if (colorMode == 3) {
         // oklab
         // magic values from py-noisemaker - MIT License
-        // https://github.com/noisedeck/noisemaker/blob/master/noisemaker/generators.py
+        // https://github.com/noisefactorllc/noisemaker/blob/main/noisemaker/generators.py
         color.g = color.g * -.509 + .276;
         color.b = color.b * -.509 + .198;
 

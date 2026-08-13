@@ -60,5 +60,5 @@ jobs:
           git commit -m "pull upstream shade-mcp dist
 
           shade-mcp release: ${SHADE_MCP_TAG}
-          Source: https://github.com/noisedeck/shade-mcp/releases/tag/${SHADE_MCP_TAG}"
+          Source: https://github.com/noisefactorllc/shade-mcp/releases/tag/${SHADE_MCP_TAG}"
           git push

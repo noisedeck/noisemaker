@@ -137,7 +137,7 @@ float periodicFunction(float p) {
 }
 
 // Noisemaker value noise - MIT License
-// https://github.com/noisedeck/noisemaker/blob/master/noisemaker/value.py
+// https://github.com/noisefactorllc/noisemaker/blob/main/noisemaker/value.py
 int positiveModulo(int value, int modulus) {
     if (modulus == 0) {
         return 0;

@@ -102,7 +102,7 @@ float periodicFunction(float p) {
 }
 
 // Noisemaker value noise - MIT License
-// https://github.com/noisedeck/noisemaker/blob/master/noisemaker/value.py
+// https://github.com/noisefactorllc/noisemaker/blob/main/noisemaker/value.py
 vec3 randomFromLatticeWithOffset(vec2 st, float xFreq, float yFreq, float s, ivec2 offset) {
     vec2 lattice = vec2(st.x * xFreq, st.y * yFreq);
     vec2 baseFloor = floor(lattice);
