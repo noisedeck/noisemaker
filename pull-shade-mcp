@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import sys
 
-REPO = "noisedeck/shade-mcp"
+REPO = "noisefactorllc/shade-mcp"
 VENDOR_DIR = "vendor/shade-mcp"
 ASSET_NAME = "shade-mcp-dist.tar.gz"
 
