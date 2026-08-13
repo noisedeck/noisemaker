@@ -1,10 +1,6 @@
-import { E as EffectDefinition } from '../types-BZ1yH2Of.js';
-export { a as EffectPass, b as EffectUniform } from '../types-BZ1yH2Of.js';
-
-declare function parseDefinitionJson(json: Record<string, unknown>, effectDir: string): EffectDefinition;
-
-declare function parseDefinitionJs(filePath: string, effectDir: string): EffectDefinition;
-
-declare function loadEffectDefinition(effectDir: string): EffectDefinition;
-
-export { EffectDefinition, loadEffectDefinition, parseDefinitionJs, parseDefinitionJson };
+import type { EffectDefinition } from './types.js';
+export { parseDefinitionJson } from './definition-json.js';
+export { parseDefinitionJs } from './definition-js.js';
+export type { EffectDefinition, EffectUniform, EffectPass } from './types.js';
+export declare function loadEffectDefinition(effectDir: string): EffectDefinition;
+//# sourceMappingURL=index.d.ts.map
