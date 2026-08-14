@@ -530,6 +530,34 @@ export class WebGPUBackend extends Backend {
 
 
     /**
+     * Copy one texture to another (blit operation).
+     * Used for surface copy operations.
+     * @param {string} srcId - Source texture ID
+     * @param {string} dstId - Destination texture ID
+     */
+    copyTexture(srcId, dstId) {
+        const srcTex = this.textures.get(srcId)
+        const dstTex = this.textures.get(dstId)
+
+        if (!srcTex || !dstTex) {
+            console.warn(`[copyTexture] Missing texture: src=${srcId} (${!!srcTex}), dst=${dstId} (${!!dstTex})`)
+            return
+        }
+
+        // Create a command encoder for the copy operation
+        const commandEncoder = this.device.createCommandEncoder()
+
+        commandEncoder.copyTextureToTexture(
+            { texture: srcTex.handle },
+            { texture: dstTex.handle },
+            [srcTex.width, srcTex.height, 1]
+        )
+
+        // Submit immediately
+        this.device.queue.submit([commandEncoder.finish()])
+    }
+
+    /**
      * Clear a texture to transparent black.
      * Used to clear surfaces when chains are deleted.
      * @param {string} id - Texture ID

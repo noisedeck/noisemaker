@@ -100,6 +100,16 @@ export class Backend {
     }
 
     /**
+     * Copy one texture to another (blit operation)
+     * Used for surface copy operations.
+     * @param {string} srcId - Source texture ID
+     * @param {string} dstId - Destination texture ID
+     */
+    copyTexture(srcId, dstId) {
+        throw new Error('Backend.copyTexture() must be implemented')
+    }
+
+    /**
      * Clear a texture to transparent black.
      * Used to clear surfaces when chains are deleted.
      * @param {string} id - Texture ID

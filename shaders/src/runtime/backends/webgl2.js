@@ -832,6 +832,57 @@ export class WebGL2Backend extends Backend {
     }
 
 
+    /**
+     * Copy one texture to another (blit operation).
+     * Used for surface copy operations.
+     * @param {string} srcId - Source texture ID
+     * @param {string} dstId - Destination texture ID
+     */
+    copyTexture(srcId, dstId) {
+        const gl = this.gl
+        const srcTex = this.textures.get(srcId)
+        const dstTex = this.textures.get(dstId)
+
+        if (!srcTex || !dstTex) {
+            console.warn(`[copyTexture] Missing texture: src=${srcId} (${!!srcTex}), dst=${dstId} (${!!dstTex})`)
+            return
+        }
+
+        // Use blitFramebuffer for efficient texture copy
+        // Create temporary FBOs if needed
+        let readFbo = this.fbos.get(srcId)
+        if (!readFbo) {
+            readFbo = gl.createFramebuffer()
+            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFbo)
+            gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex.handle, 0)
+        } else {
+            gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFbo)
+        }
+
+        let drawFbo = this.fbos.get(dstId)
+        if (!drawFbo) {
+            drawFbo = gl.createFramebuffer()
+            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawFbo)
+            gl.framebufferTexture2D(gl.DRAW_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dstTex.handle, 0)
+            // Store for future use
+            this.fbos.set(dstId, drawFbo)
+        } else {
+            gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, drawFbo)
+        }
+
+        // Blit the texture
+        gl.blitFramebuffer(
+            0, 0, srcTex.width, srcTex.height,
+            0, 0, dstTex.width, dstTex.height,
+            gl.COLOR_BUFFER_BIT,
+            gl.NEAREST
+        )
+
+        // Unbind
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null)
+    }
+
     async compileProgram(id, spec) {
         const gl = this.gl
 
