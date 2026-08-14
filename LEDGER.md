@@ -104,14 +104,14 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `e1feefa0` / shade-mcp `346ee022`, 2026-08-11
+- **Checkpoint:** noisemaker `f6b22ab3` / shade-mcp `ac4c6ba1`, 2026-08-14
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
   parameters/globals, passes/graph, textures, compatibility/mutation,
   rendered output, cross-backend parity, Shade MCP tool contracts), a fully
   worked validated effect, the surface × capability traceability matrix, and
-  the 27-entry gap register (GAP-001..024 and GAP-026..028). The file pins its
+  the 28-entry gap register (GAP-001..024 and GAP-026..029). The file pins its
   own audited SHAs in the "Source snapshots used for this contract" block at
   its head; that block and this checkpoint are the same two SHAs and must be
   advanced together. There is no generator — every update is a hand edit
@@ -123,7 +123,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline e1feefa0..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline f6b22ab3..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -136,6 +136,17 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-08-14 — caught up through noisemaker `f6b22ab3` / shade-mcp
+    `ac4c6ba1`: verified that no Noisemaker watched source root changed,
+    re-resolved the unpinned MCP package, and recaptured the
+    `shade-mcp`/`0.2.1`/`2025-06-18` handshake, all 18 tool schemas, the exact
+    two-pass source graph, and the eight-call worked transcript. Re-audited
+    the affected MCP contract sources and every MCP-side gap; documented the
+    configurable browser/AI timeouts, headless/session lifecycle, restricted
+    loopback/opaque-origin CORS, opt-in description image, refreshable effect
+    index, and manifest invalidation, narrowed GAP-020 now that pixel parity
+    also uses the shared `isError` wrapper, and opened GAP-029 for invalidation
+    racing an already in-flight index rebuild.
   - 2026-08-11 — caught up through noisemaker `e1feefa0` / shade-mcp
     `346ee022`: documented the renderer sink and bounded asynchronous frame
     export contracts across WebGL2/WebGPU, rechecked every changed-source gap,

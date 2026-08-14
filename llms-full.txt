@@ -17,9 +17,9 @@ and WebGPU backends and must not be cited as evidence for an external port.
 
 Source snapshots used for this contract:
 
-- Noisemaker: `e1feefa0a1188e70aae0169fdc1e7901cc8cc939`.
-- Shade MCP: `346ee022361ce382b55f1ab0abc0000ab6dde37b`.
-- Shade MCP protocol: server name `shade-mcp`, server version `0.1.4`, protocol
+- Noisemaker: `f6b22ab3698b81c5cc67cc2907fea827c57ac5ce`.
+- Shade MCP: `ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`.
+- Shade MCP protocol: server name `shade-mcp`, server version `0.2.1`, protocol
   `2025-06-18`, with 18 tools returned by `tools/list`.
 - The repository config runs `npx -y github:noisedeck/shade-mcp`; it does not pin
   that commit. Re-resolve and re-capture tool contracts before relying on this
@@ -33,7 +33,7 @@ Primary source roots:
 - backend behavior: `shaders/src/runtime/backends/webgl2.js` and `webgpu.js`.
 - repository validation policy: `shaders/tests/test-harness.js`.
 - Shade MCP source for the pinned snapshot:
-  `https://github.com/noisefactorllc/shade-mcp/tree/346ee022361ce382b55f1ab0abc0000ab6dde37b/src`.
+  `https://github.com/noisefactorllc/shade-mcp/tree/ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff/src`.
 
 ## Freshness and maintenance
 
@@ -2016,15 +2016,35 @@ SHADE_VIEWER_PATH=/demo/shaders/
 SHADE_GLOBALS_PREFIX=__noisemaker
 ```
 
+The package requires Node 22 or newer. Browser sessions are headless unless
+`SHADE_HEADLESS` is `0` or `false`; `SHADE_SWIFTSHADER=1` or `true` opts into
+Chromium's software rasterizer. `SHADE_TIMEOUT_MS` supplies the session default
+for Playwright operations that honor it and is also used explicitly by backend,
+status, and graph readiness polls. The parity six-frame warmup instead retains
+an explicit `30000` ms bound.
+`SHADE_AI_TIMEOUT_MS` bounds AI provider requests. Both configurable timeouts
+are parsed with `parseInt(value, 10)` and default to `120000` ms when that result
+is non-finite or nonpositive. Fractional text is truncated and a numeric prefix
+followed by nonnumeric text is accepted.
+`SHADE_AI_MODEL` overrides the provider model. Without an override, Anthropic
+uses `claude-opus-5` and OpenAI uses `gpt-5.2`. SIGINT and SIGTERM close live
+browser sessions and the shared viewer server before process exit.
+
 The browser harness binds its temporary HTTP server to `127.0.0.1`. Viewer and
 effect requests are confined to their configured roots after both lexical and
 realpath checks; dotfiles, dot-directories, traversal, and symlink escapes are
 rejected. Responses no longer add wildcard CORS. Known asset extensions receive
 explicit media types and unlisted extensions remain serveable as
-`application/octet-stream`.
+`application/octet-stream`. Successful file responses set `Vary: Origin` and
+echo `Access-Control-Allow-Origin` only for an opaque `Origin: null` or an
+`http`/`https` loopback origin on `127.0.0.1`, `[::1]`, or `localhost`, with an
+optional port. Other origins receive no allow-origin header.
 
-Sources: `.mcp.json`; `.codex/config.toml`; Shade MCP `src/index.ts` - all
-registration calls; `src/config.ts`; `src/harness/server-manager.ts`.
+Sources: `.mcp.json`; `.codex/config.toml`; Shade MCP `package.json`;
+`src/index.ts` - registration and shutdown; `src/config.ts`;
+`src/ai/provider.ts`; `src/harness/browser-session.ts`;
+`src/harness/live-sessions.ts`; `src/harness/server-manager.ts`;
+`src/tools/browser/parity.ts` - warmup timeout.
 
 ### Act
 
@@ -2080,8 +2100,9 @@ type CompileEffectResult = Batched<
 >
 ```
 
-The tool selects the effect and polls status text for up to 300000 ms. On
-success it projects expanded passes to `{id:p.name || "pass_<index>",status}`;
+The tool selects the effect and polls status text for up to the configured
+`SHADE_TIMEOUT_MS` (default `120000` ms). On success it projects expanded passes
+to `{id:p.name || "pass_<index>",status}`;
 expanded passes normally have no `name`, so `pass_<index>` is expected. Success
 message is `Compiled successfully`; timeout message is `Compile timeout`.
 
@@ -2121,20 +2142,23 @@ Source: Shade MCP `src/tools/browser/render.ts` -
 type DescribeEffectFrameInput = EffectSelector & {
   prompt: string
   backend?: "webgl2" | "webgpu" // default webgl2
+  capture_image?: boolean         // default false
 }
 
 type DescribeEffectFrameResult = Batched<
   | { effect_id: string, status: "ok",
-      frame: { image_uri: string },
-      vision: JsonValue | null }
+      frame?: { image_uri: string },
+      vision: Record<string, JsonValue> | null }
   | { effect_id: string, status: "error", error: string }
 >
 ```
 
-The intended AI JSON is `{description,tags,notes}`, but successful `JSON.parse`
-output is not schema-checked and can be any `JsonValue`. If parsing throws, the
-fallback is `{description:<raw text>,tags:[],notes:null}`. Failure strings
-include the common no-key message and `Failed to render frame`.
+The intended AI JSON is `{description,tags,notes}`, but a parsed object is not
+schema-checked. A parsed primitive or array and invalid JSON instead produce
+`{description:<text>,tags:[],notes:null}`. `frame` is omitted unless
+`capture_image` is true, avoiding an unsolicited base64 payload. Failure strings
+include the common no-key message, `Failed to render frame`, and
+`Failed to render frame: <render error>`.
 
 Source: Shade MCP `src/tools/browser/describe.ts` - schema and
 `describeEffectFrame()`; `src/ai/provider.ts` - provider/no-key behavior.
@@ -2277,7 +2301,8 @@ type RunDslProgramResult =
 ```
 
 Compilation attempts the page editor/run button, then renderer `compile()`, and
-polls for up to 300000 ms. Enumerated messages are `No DSL editor or renderer
+polls for up to the configured `SHADE_TIMEOUT_MS` (default `120000` ms).
+Enumerated messages are `No DSL editor or renderer
 found`, `Compile timeout`, `No renderer`, and `No GL context`, plus page status
 or thrown compiler text. It directly requires `pipeline.backend.gl`, so a
 WebGPU request cannot reach success. It does not return alpha, standard
@@ -2421,10 +2446,14 @@ type SearchEffectsResult = {
 The query is lowercased, synonym-expanded, and whitespace-tokenized. Score is
 an unbounded additive relevance number: full ID substring +20; per keyword ID
 +8, name +15, description +5, tag +8, namespace +12. Only positive scores are
-returned, descending, sliced to `limit`.
+returned, descending, sliced to `limit`. The shared effect index is rebuilt
+after five seconds; concurrent readers share one rebuild. An unparseable effect
+is skipped with a server warning rather than represented in results. A rebuild
+already in flight can survive explicit invalidation; see GAP-029.
 
 Source: Shade MCP `src/tools/knowledge/search-effects.ts`;
-`src/knowledge/effect-index.ts` - `search()`.
+`src/knowledge/effect-index.ts` - initialization and `search()`;
+`src/knowledge/shared-instances.ts` - cache lifetime and rebuild sharing.
 
 #### analyzeEffect
 
@@ -2520,10 +2549,12 @@ type ListEffectsResult = {
 
 Without a filter, `namespace` in output is `all`. The list uses Shade's lossy
 definition projection; pass counts and names reflect that parser, not imported
-Noisemaker class instances.
+Noisemaker class instances. It shares the five-second refreshable effect index
+with `searchEffects` and its read-after-write caveat under GAP-029.
 
 Source: Shade MCP `src/tools/utility/list-effects.ts`;
-`src/knowledge/effect-index.ts` - `list()`.
+`src/knowledge/effect-index.ts` - `list()`;
+`src/knowledge/shared-instances.ts` - shared refreshable index.
 
 #### generateManifest
 
@@ -2537,12 +2568,16 @@ type GenerateManifestResult =
 This verb writes `<SHADE_EFFECTS_DIR>/manifest.json` immediately with compact,
 sorted JSON. It scans definition source with regexes for description, external
 texture/mesh, tags, surface globals, and starter heuristics, and scans shader
-files. It is state-changing; do not call during read-only introspection. The
-only explicit error is `Effects directory not found: <path>`; filesystem write
-exceptions escape the handler.
+files. A successful write clears the cached effect index. When no rebuild is
+already in flight, the next list or search rescans immediately. An in-flight
+rebuild remains shared and can repopulate the cache from a pre-write scan for
+another five-second TTL; see GAP-029. It is state-changing; do not call during
+read-only introspection. The only explicit error is
+`Effects directory not found: <path>`; filesystem write exceptions escape the
+handler.
 
 Source: Shade MCP `src/tools/utility/generate-manifest.ts` -
-`registerGenerateManifest()`.
+`registerGenerateManifest()`; `src/knowledge/shared-instances.ts` - invalidation.
 
 ### Validate
 
@@ -2593,15 +2628,20 @@ The shared `toolResult()` wrapper marks a non-array top-level payload whose
 status is `error` or whose `error` is a string with MCP `isError:true`; SDK-
 caught thrown handler errors are also marked and may carry plain text. It does
 not normalize the JSON payload, mark partial failures inside batch arrays, or
-wrap `testPixelParity`. There is therefore a shared whole-call tool-result marker
-for most tools, but no shared machine-readable domain failure union. See
-GAP-020.
+normalize verb-specific failures. All 18 ordinary handler return paths now use
+the wrapper, but there is still no shared machine-readable domain failure
+union. See GAP-020.
 
 AI-dependent tools use this exact no-key message:
 
 ```text
 No AI API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or create .anthropic/.openai file in project root.
 ```
+
+Provider calls allow at most one retry. `describeEffectFrame` and
+`checkAlgEquiv` request at most 1500 output tokens; `analyzeBranching` requests
+at most 3000. Provider calls are bounded by `SHADE_AI_TIMEOUT_MS` as described
+under Introspect.
 
 Browser results can append `console_errors:string[]` through
 `runWithConsoleCapture`, but field presence depends on the wrapper/result and
@@ -2629,8 +2669,8 @@ Sources: Shade MCP `src/tools/resolve-effects.ts`; all tool registration files;
 
 This instance is the repository's `synth/testPattern` effect. The three source
 blocks below are complete, not excerpts. The MCP evidence was captured against
-Noisemaker commit `e1feefa0a1188e70aae0169fdc1e7901cc8cc939` and Shade MCP
-commit `346ee022361ce382b55f1ab0abc0000ab6dde37b`. MCP request JSON is shown in
+Noisemaker commit `f6b22ab3698b81c5cc67cc2907fea827c57ac5ce` and Shade MCP
+commit `ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`. MCP request JSON is shown in
 wire order. Each response is the JSON value decoded from the server's
 `content[0].text` field.
 
@@ -3173,7 +3213,7 @@ Responses, in the same order:
 {"effect_id":"synth/testPattern","status":"ok","tested_uniforms":["gridSize:pass"],"details":"Uniforms affect output"}
 {"effect_id":"synth/testPattern","status":"skipped","isFilterEffect":false,"similarity":null,"details":"Not a filter effect"}
 {"effect_id":"synth/testPattern","status":"ok","maxDiff":0,"meanDiff":0,"mismatchCount":0,"mismatchPercent":0,"resolution":[1024,1024],"glslSolid":false,"wgslSolid":false,"glslVariance":[16256,16256,16256],"wgslVariance":[16256,16256,16256],"yFlipDetected":false,"yFlipCleanFlip":false,"yFlipMismatchPercent":70.9,"yFlipMeanDiff":180.79,"yFlipRatio":1,"issues":[],"details":"Pixel parity OK (maxDiff=0, meanDiff=0.00)"}
-{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":60.18,"meets_target":true,"stats":{"frame_count":60,"avg_frame_time_ms":16.62,"jitter_ms":2.58,"min_frame_time_ms":3.2,"max_frame_time_ms":29.6}}
+{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":54.6,"meets_target":true,"stats":{"frame_count":54,"avg_frame_time_ms":18.31,"jitter_ms":15.55,"min_frame_time_ms":5.3,"max_frame_time_ms":129.3}}
 ```
 
 Falsifiable interpretation:
@@ -3206,7 +3246,7 @@ Falsifiable interpretation:
   This call does not establish that either buffer came from the worked effect or
   its named backend. See GAP-024.
 - Performance report: threshold pass because
-  `achieved_fps = 60.18 >= target_fps = 30` and the returned `meets_target`
+  `achieved_fps = 54.6 >= target_fps = 30` and the returned `meets_target`
   agrees. The `backend` field is the configured session value; effect and
   actual-backend freshness remain indeterminate under GAP-024.
 
@@ -3242,7 +3282,7 @@ Every cell points to an executable contract or an explicitly identified gap.
 | Compatibility and mutation | compiled AST, `listSteps`, `getCompatibleReplacements` | typed `replaceEffect` contract | candidate precheck; post-mutation browser identity is GAP-024 | compatibility and transform errors; GAP-008/022/024 |
 | Rendered output | frame dimensions, `ImageMetrics`, sink stats, and `PackedFrame` | `RenderEffectFrameInput`, `Sink`, and `FrameExportQueue` contracts | exact metric predicates plus bounded queue/accounting rules | metric, capture, sink, and export failures; GAP-009/014/015/021/024/028 |
 | Cross-backend parity | source-pair availability and parity report | GLSL ES 3.00/WGSL authoring contracts | buffer diff predicates; requested-effect/backend proof is GAP-024 | compile/readback/divergence/identity reports; GAP-012/016/024 |
-| Shade MCP tool contracts | `tools/list`, effect scanners, all output types | Full signatures for all 18 verbs | verb-specific domain predicates | selector errors and tool-specific unions; GAP-013/017/018/019/020/024 |
+| Shade MCP tool contracts | `tools/list`, effect scanners, all output types | Full signatures for all 18 verbs | verb-specific domain predicates | selector errors and tool-specific unions; GAP-013/017/018/019/020/024/029 |
 
 External ports are deliberately outside this matrix. Their repositories define
 separate candidate renderers, golden-image comparators, tolerance policies, and
@@ -3278,7 +3318,7 @@ contract without an engine/tool change.
 | GAP-017 | Shade's definition parser is regex-based and lossy | Shade `src/formats/definition-js.ts` - `parseDefinitionJs()` | list/analysis tools cannot expose the complete Noisemaker definition schema |
 | GAP-018 | MCP selector inputs described as globs are compared literally | Shade `src/tools/resolve-effects.ts` - `resolveEffectIds()` | wildcard-looking selectors silently do not expand |
 | GAP-019 | `testNoPassthrough` varies time/color rather than injecting and comparing an input texture | Shade `src/tools/browser/passthrough.ts` - `testNoPassthrough()` | its name overstates what is measured; true input passthrough is not tested |
-| GAP-020 | MCP tools have a shared whole-call `isError` marker for most top-level failures but no shared domain error envelope | Shade `src/tools/tool-result.ts` marks top-level object failures; `src/tools/browser/parity.ts` bypasses it; batch arrays retain per-entry incompatible unions | partial batch failures and verb-specific payload success/failure still cannot be handled uniformly, and callers must not assume every error text is JSON |
+| GAP-020 | MCP tools have a shared whole-call `isError` marker but no shared domain error envelope | Shade `src/tools/tool-result.ts` marks top-level object failures; all 18 handlers use it for ordinary returns, while batch arrays retain per-entry incompatible unions | partial batch failures and verb-specific payload success/failure still cannot be handled uniformly, and callers must not assume every error text is JSON |
 | GAP-021 | `renderEffectFrame` requested resolution can differ from returned canvas dimensions without a warning | Shade `src/tools/browser/render.ts` sets viewport but reads canvas dimensions; exact transcript requested `256x256` and returned `90x90` | thresholds run on an unexpected sample size unless the caller checks `frame.width/height` |
 | GAP-022 | Mutation introspection includes terminal `write` as a replaceable nonstarter and exposes no node-kind field | `shaders/src/lang/transform.js` - `listSteps()`/`findStepByIndex()`; current `test_transform.js` and `test_compiler_phase2.js` still expect effect-only lengths | callers can target a builtin accidentally and cannot distinguish it structurally without string matching |
 | GAP-023 | `test_compiler_phase2.js` catches assertion failures without setting a nonzero process exit code | `shaders/tests/test_compiler_phase2.js` - `test()` catch only writes `console.error` | automation can report process success while the suite prints `FAIL`; callers must scan output until the harness is fixed |
@@ -3286,7 +3326,8 @@ contract without an engine/tool change.
 | GAP-026 | `onInit`, `onUpdate`, and `onDestroy` are copied into `Effect` wrappers but are not invoked by the production renderer | `shaders/src/runtime/effect.js` defines the wrappers; only `shaders/tests/harness_effect.js` calls them; `shaders/src/runtime/pipeline.js` calls `asyncInit` only | an authored config callback can look valid but never run in production; use only `asyncInit` as a production lifecycle hook until callers exist |
 | GAP-027 | Subchain arguments have no enforced key set, separator rule, duplicate-key diagnostic, or discarded-key report | `shaders/src/lang/parser.js` - `parseSubchainCall()` accepts arbitrary identifier/string pairs, makes commas optional, overwrites duplicates in `kwargs`, and projects only `name`/`id` into the AST | a typo or unknown subchain key can parse successfully and disappear; retry logic receives no machine-readable failure |
 | GAP-028 | Frame export has no terminal result or cancellation counter for accepted frames discarded by reconfigure or close | `shaders/src/runtime/frame-export.js` - `configure()`, `close()`, `_destroySlots()`, `_release()` | accepted work can lose its callback without incrementing `completed`, `failed`, or `dropped`, so a host cannot reconcile or selectively retry canceled frames |
+| GAP-029 | Effect-index invalidation does not supersede an in-flight rebuild | Shade `src/knowledge/shared-instances.ts` leaves `building` intact in `invalidateSharedEffectIndex()` and shares it with the next reader | a list/search immediately after a library change or `generateManifest` can retain a pre-change index for the next five-second TTL; retry after that TTL when freshness matters |
 
 The matrix has 9 surfaces x 4 capabilities = 36 filled cells. Cells that rely
-on behavior absent from code link to the 27 gaps above rather than substituting
+on behavior absent from code link to the 28 gaps above rather than substituting
 an invented contract.
