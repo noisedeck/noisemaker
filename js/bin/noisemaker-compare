@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 <presetName> <seed>"
+  exit 1
+}
+
+if [[ $# -ne 2 ]]; then
+  usage
+fi
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+preset_name=$1
+seed=$2
+
+noisemaker generate "${preset_name}" --filename compare-orig.png --seed "${seed}"
+
+"${script_dir}/noisemaker-js" generate "${preset_name}" --filename compare-jsdsl.png --seed "${seed}"
