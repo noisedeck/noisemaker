@@ -10,4 +10,5 @@ Features
    mashup
    smrticles
    midi-audio
+   renderer-output
    demo-ui

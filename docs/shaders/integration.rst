@@ -277,9 +277,16 @@ Creates and manages the GPU rendering pipeline.
     await renderer.switchBackend('wgsl')   // Switch to WebGPU
     await renderer.switchBackend('glsl')   // Switch to WebGL2
 
+    // Output (after compile)
+    const removeSink = renderer.addSink(sink)
+    const exportQueue = renderer.createFrameExportQueue({ slots: 3 })
+
     // Effect loading
     await renderer.loadEffects(['synth/noise', 'filter/bloom'])
     renderer.getEffectsFromManifest('synth')  // List effects in a namespace
+
+See :doc:`renderer-output` for sink lifecycle, asynchronous frame export, and
+the packed RGBA8 frame contract.
 
 ProgramState
 ^^^^^^^^^^^^
@@ -799,5 +806,6 @@ Further Reading
 - :doc:`language`: DSL syntax and semantics
 - :doc:`effect-reference`: per-effect documentation
 - :doc:`pipeline`: how the rendering pipeline works
+- :doc:`renderer-output`: sending rendered frames to sinks or CPU consumers
 - :doc:`midi-audio`: connecting external controllers
 - :doc:`../releases`: how and when releases are published
