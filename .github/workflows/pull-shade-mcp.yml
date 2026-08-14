@@ -61,4 +61,17 @@ jobs:
 
           shade-mcp release: ${SHADE_MCP_TAG}
           Source: https://github.com/noisefactorllc/shade-mcp/releases/tag/${SHADE_MCP_TAG}"
-          git push
+
+          # main moves on its own schedule, and this job is dispatched by a
+          # shade-mcp release rather than by anything happening here — so an
+          # ordinary push landing between the checkout and this push is
+          # normal, not exceptional. Without the rebase that push is rejected
+          # and the whole vendor drop is lost until someone notices, which is
+          # how v0.2.1 failed to reach either consumer.
+          for attempt in 1 2 3; do
+            git pull --rebase --quiet && git push && exit 0
+            echo "push attempt ${attempt} lost a race; retrying"
+            sleep $((attempt * 5))
+          done
+          echo "::error::could not land the vendor drop after 3 attempts"
+          exit 1
