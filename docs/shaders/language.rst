@@ -28,7 +28,7 @@ Grammar
    SubchainCall   ::= 'subchain' '(' ArgList? ')' '{' ( '.' Call )+ '}'
    WriteCall      ::= 'write' '(' OutputRef ')'
    Write3DCall    ::= 'write3d' '(' ( VolRef | Ident ) ',' ( GeoRef | Ident ) ')'
-   SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'
+   SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'          (preview)
    SceneArg       ::= Kwarg | CameraCall | LightCall | EnvironmentCall | NodeChain
    NodeChain      ::= ( MeshCall | GroupCall ) ( '.' NodeLink )*
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
@@ -62,6 +62,12 @@ Grammar
    Boolean        ::= 'true' | 'false'
    Color          ::= '#' HexDigit HexDigit HexDigit ( HexDigit HexDigit HexDigit )? ( HexDigit HexDigit )?
    HexDigit       ::= Digit | 'A'…'F' | 'a'…'f'
+
+Productions marked ``(preview)`` are experimental. ``SceneCall`` and everything
+reachable from it — ``SceneArg``, ``NodeChain``, ``NodeLink``, ``MaterialCall``,
+``MaterialSpec``, ``MaterialTerm`` — are provisional in Noisemaker 1.5 and
+scheduled to be finalized in 2.0. ``ObjectLiteral`` was added to serve them and
+is likewise provisional: it is currently only meaningful inside ``scene()``.
 
 **Precedence & Associativity:**
 
@@ -277,6 +283,13 @@ Scenes
 with PBR materials — which the deferred renderer resolves into a surface. It
 behaves like any other generator and must terminate in ``.write(oN)``, so its
 output composes with the 2D effect library.
+
+.. note::
+
+   **Preview feature — experimental and subject to change.** The scene
+   vocabulary and its semantics ship as a preview in Noisemaker 1.5 and are
+   scheduled to be finalized in Noisemaker 2.0. Names, keywords, defaults and
+   rendered output may change without a deprecation period.
 
 .. code-block:: none
 

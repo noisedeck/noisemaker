@@ -1,7 +1,7 @@
 .. _shader-scene:
 
-Scene Graph
-===========
+Scene Graph (Preview)
+=====================
 
 ``scene()`` adds a third dimension to the Polymorphic DSL. A scene program
 describes a camera, lights, and a hierarchy of meshes with PBR materials. The
@@ -9,6 +9,16 @@ describes a camera, lights, and a hierarchy of meshes with PBR materials. The
 pixels and writes the result into an ordinary pipeline surface, so 3D output
 composes with the existing 2D filter library rather than needing its own
 post-processing stack.
+
+.. note::
+
+   **Preview feature — experimental and subject to change.** The entire
+   ``scene()`` language surface described on this page, and the engine behind
+   it, ship as a preview in Noisemaker 1.5. Node names, keywords, defaults,
+   argument shapes, and rendered output may all change without a deprecation
+   period. The scene vocabulary is scheduled to be finalized in Noisemaker 2.0;
+   until then, do not depend on a scene program continuing to parse or render
+   identically across releases.
 
 .. code-block:: none
 

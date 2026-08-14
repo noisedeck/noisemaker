@@ -1,7 +1,7 @@
 .. _shader-deferred-rendering:
 
-Deferred Renderer
-=================
+Deferred Renderer (Preview)
+===========================
 
 The renderer that draws :ref:`scene() <shader-scene>` programs. It fills a
 G-buffer from the mesh hierarchy, lights it once in screen space with a
@@ -10,6 +10,14 @@ presents into a texture the 2D pipeline then treats as an ordinary source.
 
 Every pass is written twice — once in GLSL and once in WGSL — and both backends
 are held to bit-identical output by the render tests.
+
+.. note::
+
+   **Preview feature — experimental and subject to change.** The renderer
+   described on this page ships as a preview in Noisemaker 1.5. Pass order,
+   G-buffer channel packing, the lighting model, and the settings that control
+   them are all provisional, and rendered output may change between releases.
+   The engine is scheduled to be finalized in Noisemaker 2.0.
 
 Frame order
 -----------
