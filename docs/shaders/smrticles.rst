@@ -83,8 +83,8 @@ Noisemaker's shader pipeline includes common architecture for GPU-accelerated ag
      letter-spacing: 0.05em;
    }
    </style>
-   <script src="../_static/noisemaker-shaders-core.min.js"></script>
-   <script src="../_static/shader-viewer.js"></script>
+   <script src="/_static/noisemaker-shaders-core.min.js"></script>
+   <script src="/_static/shader-viewer.js"></script>
 
 ----
 

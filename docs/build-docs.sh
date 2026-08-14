@@ -57,10 +57,21 @@ if ! "$SCRIPT_DIR/update-shader-bundle.sh"; then
     exit 1
 fi
 
-# Build the documentation
+# Build the documentation.
+#
+# Must stay -b dirhtml: that is what scaffold's static-site-release
+# builds for docs.noisemaker.app. dirhtml serves composer-api.rst as
+# /composer-api/ rather than /composer-api.html, which changes how
+# every relative asset path in a `.. raw:: html` block resolves. A
+# local -b html build would silently hide broken viewer scripts.
 cd "$SCRIPT_DIR"
-"$SPHINX_BUILD" -b html . _build/html
+"$SPHINX_BUILD" -b dirhtml . _build/html
 
 echo ""
 echo "Documentation built successfully!"
-echo "Open: $SCRIPT_DIR/_build/html/index.html"
+echo "Serve it from the build root — the pages reference /_static/,"
+echo "so file:// will not load the viewers:"
+echo ""
+echo "  python3 -m http.server -d $SCRIPT_DIR/_build/html 8002"
+echo ""
+echo "Then open: http://localhost:8002/"

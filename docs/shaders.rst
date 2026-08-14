@@ -57,8 +57,8 @@ Noisemaker's GPU rendering engine. Dual WebGL2 and WebGPU backends, a composable
      -webkit-box-decoration-break: clone;
    }
    </style>
-   <script src="_static/noisemaker-shaders-core.min.js"></script>
-   <script src="_static/shader-viewer.js"></script>
+   <script src="/_static/noisemaker-shaders-core.min.js"></script>
+   <script src="/_static/shader-viewer.js"></script>
 
 .. toctree::
    :maxdepth: 2

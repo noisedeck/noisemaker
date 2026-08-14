@@ -31,4 +31,4 @@ echo "✓ Bundle size: $BUNDLE_SIZE"
 
 echo ""
 echo "Bundle updated successfully!"
-echo "You can now rebuild the documentation with 'cd docs && make html'"
+echo "You can now rebuild the documentation with 'cd docs && make dirhtml'"

@@ -23,19 +23,24 @@ pip install -r docs/sphinx-requirements.txt
 ```bash
 cd docs
 make clean
-make html
+make dirhtml
 ```
 
+Use `dirhtml`, not `html`. That is the builder scaffold's
+`static-site-release` runs for docs.noisemaker.app, and it is the only
+one that reproduces production URLs: `composer-api.rst` is served as
+`/composer-api/`, not `/composer-api.html`. Relative asset paths inside
+`.. raw:: html` blocks resolve differently between the two, so an
+`html` build can look fine while the deployed page 404s its scripts.
+
 3. View the documentation:
+
+The pages reference `/_static/...` root-absolute, so `file://` will not
+load the viewers. Serve the build root over HTTP:
+
 ```bash
-# On macOS
-open _build/html/index.html
-
-# On Linux
-xdg-open _build/html/index.html
-
-# Or manually navigate to:
-# docs/_build/html/index.html
+python3 -m http.server -d _build/dirhtml 8002
+# then open http://localhost:8002/
 ```
 
 ### Quick Build Script

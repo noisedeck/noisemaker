@@ -1,7 +1,11 @@
 __pycache__/
 docs-venv/
 docs/_build/
+# Bundles that docs/build-docs.sh generates into _static. CI rebuilds them
+# on every docs deploy; committing them would ship a stale engine.
 docs/_static/noisemaker.min.js
+docs/_static/noisemaker-shaders-core.min.js
+docs/_static/effects/
 venv/
 node_modules/
 !test/image-fixtures/*.png

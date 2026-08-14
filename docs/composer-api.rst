@@ -26,7 +26,7 @@ Noisemaker's original Python effects library and its vanilla JS port. These use 
        </div>
      </div>
    </div>
-   <script type="module" src="_static/preset-viewer.js"></script>
+   <script type="module" src="/_static/preset-viewer.js"></script>
 
 .. toctree::
    :maxdepth: 1

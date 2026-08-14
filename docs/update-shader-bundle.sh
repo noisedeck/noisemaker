@@ -62,4 +62,4 @@ echo "  Effects: $EFFECTS_SIZE"
 
 echo ""
 echo "Shader bundles updated successfully!"
-echo "You can now rebuild the documentation with 'cd docs && make html'"
+echo "You can now rebuild the documentation with 'cd docs && make dirhtml'"

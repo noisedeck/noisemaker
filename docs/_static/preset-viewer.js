@@ -15,11 +15,15 @@
     let presetSource = {};
     const bundleDslCache = new Map();
 
+    // Root-absolute so they resolve the same from any page depth. The
+    // dirhtml builder puts non-index pages one level down
+    // (/composer-api/), where a bare '_static/...' would resolve to
+    // /composer-api/_static/... and 404.
     const BUNDLE_CANDIDATES = [
-        '_static/noisemaker.min.js',
-        '_static/noisemaker.bundle.js',
-        '_static/noisemaker.umd.js',
-        '_static/noisemaker.js',
+        '/_static/noisemaker.min.js',
+        '/_static/noisemaker.bundle.js',
+        '/_static/noisemaker.umd.js',
+        '/_static/noisemaker.js',
     ];
 
     const BUNDLE_MAX_ATTEMPTS = 50;

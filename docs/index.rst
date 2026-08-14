@@ -75,8 +75,8 @@ Noisemaker
      -webkit-box-decoration-break: clone;
    }
    </style>
-   <script src="_static/noisemaker-shaders-core.min.js"></script>
-   <script src="_static/shader-viewer.js"></script>
+   <script src="/_static/noisemaker-shaders-core.min.js"></script>
+   <script src="/_static/shader-viewer.js"></script>
 
 Quick Start
 -----------

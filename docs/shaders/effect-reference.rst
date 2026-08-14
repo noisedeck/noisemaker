@@ -312,7 +312,7 @@ Interactive reference for all shader effects. Select an effect to view its docum
    }
    </style>
    
-   <script src="../_static/noisemaker-shaders-core.min.js"></script>
-   <script src="../_static/marked.min.js"></script>
-   <script src="../_static/effect-reference.js"></script>
+   <script src="/_static/noisemaker-shaders-core.min.js"></script>
+   <script src="/_static/marked.min.js"></script>
+   <script src="/_static/effect-reference.js"></script>
 
