@@ -18,7 +18,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.NOISEDECK_APP_ID }}
+          client-id: Iv23liVHXh37ZQ13M67k
           private-key: ${{ secrets.NOISEDECK_APP_PRIVATE_KEY }}
           owner: noisefactorllc
 
