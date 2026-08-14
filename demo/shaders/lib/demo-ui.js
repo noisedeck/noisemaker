@@ -80,6 +80,36 @@ export function formatEnumName(name) {
 }
 
 /**
+ * Create a callback for looking up effect definitions
+ * Handles various naming formats: "filter.grade", "filter/grade", "grade"
+ * @param {function} getEffect - Effect lookup function
+ * @returns {function} Callback for getEffectDef option
+ */
+export function createEffectDefCallback(getEffect) {
+    return (effectName, namespace) => {
+        // effectName might be "filter.grade" or just "grade"
+        // Try direct lookup first
+        let def = getEffect(effectName)
+        if (def) return def
+
+        // Try with "/" instead of "." (e.g., "filter/grade")
+        if (effectName.includes('.')) {
+            def = getEffect(effectName.replace('.', '/'))
+            if (def) return def
+        }
+
+        // If namespace provided separately, try combining
+        if (namespace) {
+            def = getEffect(`${namespace}/${effectName}`) ||
+                  getEffect(`${namespace}.${effectName}`)
+            if (def) return def
+        }
+
+        return null
+    }
+}
+
+/**
  * Extract effect names from DSL text without compiling (for lazy loading)
  * @param {string} dsl - DSL source
  * @param {object} manifest - Shader manifest

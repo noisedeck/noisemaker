@@ -52,11 +52,26 @@ export function withTensorDatas(tensors, fn) {
 }
 
 // --------------------- Logger ---------------------
+let _logger = console
+
+export function setLogger(logger) {
+  _logger = logger || console
+}
+
 export const logger = {
-  debug: (...args) => (console.debug ? console.debug(...args) : console.log(...args)),
-  info: (...args) => (console.info ? console.info(...args) : console.log(...args)),
-  warn: (...args) => (console.warn ? console.warn(...args) : console.log(...args)),
-  error: (...args) => (console.error ? console.error(...args) : console.log(...args)),
+  debug: (...args) => (_logger.debug ? _logger.debug(...args) : _logger.log(...args)),
+  info: (...args) => (_logger.info ? _logger.info(...args) : _logger.log(...args)),
+  warn: (...args) => (_logger.warn ? _logger.warn(...args) : _logger.log(...args)),
+  error: (...args) => (_logger.error ? _logger.error(...args) : _logger.log(...args)),
+}
+
+// --------------------- Seeded random utilities ---------------------
+export function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; --i) {
+    const j = Math.floor(random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]]
+  }
+  return arr
 }
 
 // --------------------- Shape helpers ---------------------

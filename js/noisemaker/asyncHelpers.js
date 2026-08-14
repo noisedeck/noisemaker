@@ -81,3 +81,19 @@ export class YieldController {
     this.currentStep = 0
   }
 }
+
+/**
+ * Wraps an async loop to yield periodically.
+ *
+ * @param {number} count - Number of iterations
+ * @param {Function} callback - Async callback to run each iteration: (index) => Promise<void>
+ * @param {YieldController} [controller] - Optional yield controller
+ * @returns {Promise<void>}
+ */
+export async function asyncLoop(count, callback, controller = null) {
+  const yieldCtrl = controller || new YieldController()
+  for (let i = 0; i < count; i++) {
+    await callback(i)
+    await yieldCtrl.checkYield()
+  }
+}
