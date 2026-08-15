@@ -77,7 +77,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `0d34e10d` (2026-08-14)
+- **Checkpoint:** noisemaker `24c7053c` (2026-08-14)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -91,6 +91,11 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-08-14 — caught up through `24c7053c`: verified `help.md`
+    coverage for all 210 effects and audited the renderer-output guide and
+    navigation links, i18n catalogs, AI contract, CI, and vendored tooling in
+    the range; the existing guide covers the only Sphinx-relevant feature, so
+    no additional narrative changes were needed in this pass.
   - 2026-08-14 — caught up through `0d34e10d`: verified `help.md`
     coverage for all 210 effects, added the renderer-output guide for sinks
     and bounded asynchronous frame export, and audited the in-band export-kit,
