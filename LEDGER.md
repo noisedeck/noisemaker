@@ -20,7 +20,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## I18n strings
 
-- **Checkpoint:** noisemaker `117a2366` (2026-08-13)
+- **Checkpoint:** noisemaker `712ac2cf` (2026-08-14)
 - **Scope:** the translation catalogs
   `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
   `strings.en.json` is generated from effect definitions (`npm run strings`)
@@ -39,6 +39,10 @@ work, verify it, then update the checkpoint and append a log line.
   capitalized, description tone per locale — and reuse the file's existing
   translation for a term before inventing a new one.
 - **Log:**
+  - 2026-08-14 — caught up through `712ac2cf`: audited the i18n
+    catch-up range; the English catalog was unchanged and all six locale
+    catalogs are now complete, so no additional translations were needed in
+    this pass.
   - 2026-08-14 — catch-up, 1,566 strings: 261 missing keys across all six
     locales, covering the new and expanded `filter/chrome` through
     `filter/wind` effect blocks.
