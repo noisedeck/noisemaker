@@ -33,7 +33,7 @@ struct VertexOutput {
 fn main(input : VertexOutput) -> @location(0) vec4<f32> {
     let texSize : vec2<f32> = vec2<f32>(textureDimensions(inputTex));
     let center : vec2<f32> = texSize * 0.5;
-    let pixelCoord : vec2<f32> = input.uv * resolution - center;
+    let pixelCoord : vec2<f32> = input.position.xy - center;
     
     var angle : f32 = angled;
     // Handle animation if needed

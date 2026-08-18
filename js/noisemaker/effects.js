@@ -709,6 +709,10 @@ export function derivative(
   alpha = 1,
 ) {
   const [h, w, c] = shape
+  // Python expands each derivative kernel through mask_values(), which
+  // consumes one RNG seed even though these masks are static.
+  randomInt(1, 65536)
+  randomInt(1, 65536)
   const kx = [
     [0, 0, 0],
     [0, 1, -1],
@@ -2576,7 +2580,6 @@ export async function lensWarp(tensor, shape, time, speed, displacement = 0.0625
     ctx,
     time,
     speed,
-    seed: getBaseSeed(),
     splineOrder: InterpolationType.cosine,
   })
   const noise = await noiseTensor.read()
@@ -3889,64 +3892,6 @@ export function grain(tensor, shape, time, speed, alpha = 0.25) {
 }
 register("grain", grain, { alpha: 0.25 })
 
-const SNOW_TAU = Math.PI * 2
-const SNOW_TIME_SEED_OFFSETS = [97, 57, 131]
-const SNOW_STATIC_SEED = [37, 17, 53]
-const SNOW_LIMITER_SEED = [113, 71, 193]
-
-function snowFract(value) {
-  return value - Math.floor(value)
-}
-
-function snowHash(sampleX, sampleY, sampleZ) {
-  const scale = 0.1031
-  let px = snowFract(sampleX * scale)
-  let py = snowFract(sampleY * scale)
-  let pz = snowFract(sampleZ * scale)
-  const dot =
-    px * (py + 33.33) +
-    py * (pz + 33.33) +
-    pz * (px + 33.33)
-  px += dot
-  py += dot
-  pz += dot
-  return snowFract((px + py) * pz)
-}
-
-function snowPeriodicValue(time, value) {
-  return (Math.sin((time - value) * SNOW_TAU) + 1) * 0.5
-}
-
-function snowNoiseValue(x, y, time, speed, seedVec) {
-  const angle = time * SNOW_TAU
-  const zBase = Math.cos(angle) * speed
-  const baseValue = snowHash(x + seedVec[0], y + seedVec[1], zBase + seedVec[2])
-  if (speed === 0 || time === 0) {
-    return baseValue
-  }
-  const timeSeedX = seedVec[0] + SNOW_TIME_SEED_OFFSETS[0]
-  const timeSeedY = seedVec[1] + SNOW_TIME_SEED_OFFSETS[1]
-  const timeSeedZ = seedVec[2] + SNOW_TIME_SEED_OFFSETS[2]
-  const timeValue = snowHash(
-    x + timeSeedX,
-    y + timeSeedY,
-    1 + timeSeedZ,
-  )
-  const scaledTime = snowPeriodicValue(time, timeValue) * speed
-  return snowPeriodicValue(scaledTime, baseValue)
-}
-
-function buildSnowTensor(ctx, height, width, time, speed, seedVec) {
-  const data = new Float32Array(height * width)
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x
-      data[idx] = snowNoiseValue(x, y, time, speed, seedVec)
-    }
-  }
-  return Tensor.fromArray(ctx, data, [height, width, 1])
-}
-
 export async function snow(tensor, shape, time, speed, alpha = 0.25) {
   const [h, w] = shape
   const ctx = tensor.ctx
@@ -3955,22 +3900,19 @@ export async function snow(tensor, shape, time, speed, alpha = 0.25) {
   const speedVal = Number.isFinite(speed) ? speed : 1
   const scaledSpeed = speedVal * 100
 
-  const staticNoise = buildSnowTensor(
+  const staticNoise = await values([h, w], valueShape, {
     ctx,
-    h,
-    w,
-    timeVal,
-    scaledSpeed,
-    SNOW_STATIC_SEED,
-  )
-  const limiter = buildSnowTensor(
+    time: timeVal,
+    speed: scaledSpeed,
+    splineOrder: InterpolationType.constant,
+  })
+  const limiter = await values([h, w], valueShape, {
     ctx,
-    h,
-    w,
-    timeVal,
-    scaledSpeed,
-    SNOW_LIMITER_SEED,
-  )
+    time: timeVal,
+    speed: scaledSpeed,
+    distrib: ValueDistribution.exp,
+    splineOrder: InterpolationType.constant,
+  })
 
   const limiterDataMaybe = limiter.read()
   const limiterData =
@@ -5088,13 +5030,8 @@ register("frame", frame, {})
 export async function sketch(tensor, shape, time, speed) {
   const [h, w, c] = shape
   const valueShape = [h, w, 1]
-  let valuesTensor = tensor
-  if (c !== 1) {
-    valuesTensor = toValueMap(tensor)
-    if (valuesTensor && typeof valuesTensor.then === "function") {
-      valuesTensor = await valuesTensor
-    }
-  }
+  let valuesTensor = await toValueMap(tensor)
+  valuesTensor = await normalize(valuesTensor)
   valuesTensor = await adjustContrast(valuesTensor, valueShape, time, speed, 2.0)
   valuesTensor = await clamp01(valuesTensor)
   const outlineTensorTmp = await derivative(
@@ -5134,7 +5071,16 @@ export async function sketch(tensor, shape, time, speed) {
     1.0,
     0.875
   )
-  const invValTensor = Tensor.fromArray(tensor.ctx, invData, valueShape)
+  const vignetteValues = await valuesTensor.read()
+  const inverseVignetteData = new Float32Array(vignetteValues.length)
+  for (let i = 0; i < vignetteValues.length; i++) {
+    inverseVignetteData[i] = 1 - vignetteValues[i]
+  }
+  const invValTensor = Tensor.fromArray(
+    tensor.ctx,
+    inverseVignetteData,
+    valueShape
+  )
   let wormsTensor = await worms(
     invValTensor,
     valueShape,
@@ -5692,8 +5638,9 @@ export async function grime(tensor, shape, time, speed) {
     }
   }
   const ryTensor = Tensor.fromArray(ctx, offsetData, valueShape)
+  const offsetMask = Tensor.fromArray(ctx, offsetData.slice(), valueShape)
   let mask = await refractOp(
-    baseMask,
+    offsetMask,
     rxTensor,
     ryTensor,
     1.0,

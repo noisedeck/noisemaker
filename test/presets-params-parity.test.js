@@ -31,7 +31,43 @@ const JS_ONLY = [
 ]
 
 function getPythonPresetData() {
-const py = `import json, random\nfrom noisemaker import rng\nfrom noisemaker.presets import PRESETS\nseeds=[0,1,2,3,4]\npreset_names=sorted(PRESETS().keys())\ncombined={}\nfor name in preset_names:\n    layers=None\n    settings_per_seed=[]\n    for seed in seeds:\n        random.seed(seed)\n        rng.set_seed(seed)\n        preset=PRESETS()[name]\n        if layers is None and preset.get('layers'):\n            layers=preset['layers']\n        if preset.get('settings'):\n            s=preset['settings']()\n            s={k:getattr(v,'value',v) for k,v in s.items()}\n        else:\n            s={}\n        settings_per_seed.append(s)\n    entry={}\n    if layers is not None:\n        entry['layers']=layers\n    if settings_per_seed and settings_per_seed[0]:\n        s={}\n        for key in settings_per_seed[0]:\n            vals=[d.get(key) for d in settings_per_seed]\n            first=vals[0]\n            s[key]=first if all(v==first for v in vals) else 'RANDOM'\n        entry['settings']=s\n    combined[name]=entry\nprint(json.dumps(combined))`
+  const py = `import json, random
+from noisemaker import rng
+from noisemaker.composer import _resolve_metadata_value
+from noisemaker.presets import PRESETS
+
+seeds = [0, 1, 2, 3, 4]
+preset_names = sorted(PRESETS().keys())
+combined = {}
+for name in preset_names:
+    layers = None
+    settings_per_seed = []
+    for seed in seeds:
+        random.seed(seed)
+        rng.set_seed(seed)
+        preset = PRESETS()[name]
+        if layers is None and preset.get('layers'):
+            layers = _resolve_metadata_value(preset['layers'], {})
+        raw_settings = preset.get('settings')
+        if raw_settings:
+            template = raw_settings() if callable(raw_settings) else raw_settings
+            settings = {}
+            for key, value in template.items():
+                settings[key] = _resolve_metadata_value(value, settings)
+            settings = {
+                key: getattr(value, 'value', value)
+                for key, value in settings.items()
+            }
+        else:
+            settings = {}
+        settings_per_seed.append(settings)
+    entry = {}
+    if layers is not None:
+        entry['layers'] = layers
+    if settings_per_seed and settings_per_seed[0]:
+        entry['settings_per_seed'] = settings_per_seed
+    combined[name] = entry
+print(json.dumps(combined))`
   const res = spawnSync('python3', ['-c', py], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -58,20 +94,26 @@ function getJSPresetData() {
       if (layers === null && preset.layers) {
         layers = preset.layers.slice()
       }
-      const s = typeof preset.settings === 'function' ? { ...preset.settings() } : {}
+      const rawSettings = preset.settings
+        ? {
+            ...(typeof preset.settings === 'function'
+              ? preset.settings()
+              : preset.settings),
+          }
+        : {}
+      const s = Object.fromEntries(
+        Object.entries(rawSettings).map(([key, value]) => [
+          key,
+          typeof value === 'function' ? value() : value,
+        ]),
+      )
       settingsPerSeed.push(s)
     }
 
     const entry = {}
     if (layers) entry.layers = layers
     if (settingsPerSeed.length && Object.keys(settingsPerSeed[0]).length) {
-      const s = {}
-      for (const key of Object.keys(settingsPerSeed[0])) {
-        const vals = settingsPerSeed.map((d) => d[key])
-        const first = vals[0]
-        s[key] = vals.every((v) => v === first) ? first : 'RANDOM'
-      }
-      entry.settings = s
+      entry.settings_per_seed = settingsPerSeed
     }
     combined[name] = entry
   }
@@ -82,18 +124,34 @@ function getJSPresetData() {
 const pyData = getPythonPresetData()
 const jsData = getJSPresetData()
 
-// Align JS classification with Python for randomised params
-for (const [name, pyPreset] of Object.entries(pyData)) {
-  const jsPreset = jsData[name]
-  if (!jsPreset || !pyPreset.settings || !jsPreset.settings) continue
-  for (const [key, val] of Object.entries(pyPreset.settings)) {
-    if (val === 'RANDOM') jsPreset.settings[key] = 'RANDOM'
-  }
-}
-
 const missing = []
 const extra = []
 const mismatched = []
+
+function describePresetMismatch(name, pyPreset, jsPreset) {
+  const differences = []
+  if (JSON.stringify(jsPreset.layers) !== JSON.stringify(pyPreset.layers)) {
+    differences.push(
+      `${name}.layers: Python=${JSON.stringify(pyPreset.layers)}, JS=${JSON.stringify(jsPreset.layers)}`,
+    )
+  }
+  const pySettings = pyPreset.settings_per_seed || []
+  const jsSettings = jsPreset.settings_per_seed || []
+  for (let seed = 0; seed < Math.max(pySettings.length, jsSettings.length); seed++) {
+    const py = pySettings[seed] || {}
+    const js = jsSettings[seed] || {}
+    for (const key of new Set([...Object.keys(py), ...Object.keys(js)])) {
+      try {
+        assert.deepStrictEqual(js[key], py[key])
+      } catch {
+        differences.push(
+          `${name}.${key}[seed=${seed}]: Python=${JSON.stringify(py[key])}, JS=${JSON.stringify(js[key])}`,
+        )
+      }
+    }
+  }
+  return differences
+}
 
 for (const [name, pyPreset] of Object.entries(pyData)) {
   if (JS_ONLY.includes(name)) continue
@@ -105,7 +163,7 @@ for (const [name, pyPreset] of Object.entries(pyData)) {
   try {
     assert.deepStrictEqual(jsPreset, pyPreset)
   } catch {
-    mismatched.push(name)
+    mismatched.push(...describePresetMismatch(name, pyPreset, jsPreset))
   }
 }
 
@@ -118,7 +176,7 @@ if (missing.length || extra.length || mismatched.length) {
   let msg = ''
   if (missing.length) msg += `Missing JS presets: ${missing.join(', ')}\n`
   if (extra.length) msg += `Extra JS presets: ${extra.join(', ')}\n`
-  if (mismatched.length) msg += `Mismatched presets: ${mismatched.join(', ')}`
+  if (mismatched.length) msg += `Preset mismatches:\n${mismatched.join('\n')}`
   assert.fail(msg.trim())
 }
 

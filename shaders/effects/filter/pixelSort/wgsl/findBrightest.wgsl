@@ -1,6 +1,7 @@
-// GPGPU Pass 2: Find brightest pixel x-coordinate per row
+// GPGPU Pass 2: Find brightest pixel x-coordinate per row (optimized)
 // Input: luminance texture (R = luminance)
 // Output: R = brightest x (normalized), G = max luminance, B = 0, A = 1
+// Uses sparse sampling for O(1) approximate result
 
 @group(0) @binding(0) var lumTex : texture_2d<f32>;
 
@@ -16,15 +17,17 @@ fn main(input : VertexOutput) -> @location(0) vec4<f32> {
     let y : i32 = coord.y;
     let width : i32 = size.x;
     
-    // Find brightest pixel in this row
+    // Use sparse sampling to find approximate brightest pixel
+    const NUM_SAMPLES : i32 = 32;
     var maxLum : f32 = -1.0;
     var brightestX : i32 = 0;
     
-    for (var i : i32 = 0; i < width; i = i + 1) {
-        let lum : f32 = textureLoad(lumTex, vec2<i32>(i, y), 0).r;
+    for (var s : i32 = 0; s < NUM_SAMPLES; s = s + 1) {
+        let sampleX : i32 = (s * width) / NUM_SAMPLES;
+        let lum : f32 = textureLoad(lumTex, vec2<i32>(sampleX, y), 0).r;
         if (lum > maxLum) {
             maxLum = lum;
-            brightestX = i;
+            brightestX = sampleX;
         }
     }
     

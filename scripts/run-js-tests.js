@@ -46,7 +46,7 @@ const testEntries = [
   { file: 'test/generators.test.js', parity: false },
   { file: 'test/parser.test.js', parity: false },
   { file: 'test/evaluator.test.js', parity: false },
-  { file: 'test/encoder.test.js', parity: true }, // Requires WebGPU context infrastructure
+  { file: 'test/encoder.test.js', parity: false },
   { file: 'test/cli.test.js', parity: false },
   { file: 'test/docs-static-paths.test.js', parity: false }
 ]

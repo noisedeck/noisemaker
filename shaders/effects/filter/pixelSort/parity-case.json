@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "effects": [
+    "synth/perlin",
+    "filter/pixelSort"
+  ],
+  "dsl": "search synth, filter\n\nperlin(scale: 75, octaves: 2)\n  .pixelSort(angled: -180)\n  .write(o0)\n\nrender(o0)",
+  "surface": "o0",
+  "resolution": [
+    192,
+    192
+  ],
+  "epsilon": 0,
+  "requireColorVariation": true
+}

@@ -14,6 +14,14 @@ from noisemaker.effects import (
     ridge,
     sine,
     blur,
+    ripple,
+    sketch,
+    vhs,
+    crt,
+    snow,
+    grime,
+    nebula,
+    false_color,
     fibers,
     scratches,
     stray_hair,
@@ -159,6 +167,69 @@ blur_tex = tf.constant(blur_vals, shape=[2,2,1], dtype=tf.float32)
 blur_out = blur(blur_tex, [2,2,1]).numpy().flatten().tolist()
 with open(fixtures_dir / 'blur.json', 'w') as f:
     json.dump(blur_out, f)
+
+# Ripple fixture
+value.set_seed(10)
+ripple_vals = [0.1, 0.2, 0.3, 0.4]
+ripple_tex = tf.constant(ripple_vals, shape=[2,2,1], dtype=tf.float32)
+ripple_out = ripple(ripple_tex, [2,2,1], freq=2, displacement=0.5, kink=1, time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'ripple.json', 'w') as f:
+    json.dump(ripple_out, f)
+
+# Sketch fixture
+value.set_seed(1)
+sketch_vals = [0.1, 0.5, 0.3, 0.8]
+sketch_tex = tf.constant(sketch_vals, shape=[2,2,1], dtype=tf.float32)
+sketch_out = sketch(sketch_tex, [2,2,1], time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'sketch.json', 'w') as f:
+    json.dump(sketch_out, f)
+
+# VHS fixture
+value.set_seed(1)
+vhs_vals = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.1, 0.2, 0.3]
+vhs_tex = tf.constant(vhs_vals, shape=[2,2,3], dtype=tf.float32)
+vhs_out = vhs(vhs_tex, [2,2,3], time=0.25, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'vhs.json', 'w') as f:
+    json.dump(vhs_out, f)
+
+value.set_seed(1)
+vhs_half_out = vhs(vhs_tex, [2,2,3], time=0.5, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'vhsHalf.json', 'w') as f:
+    json.dump(vhs_half_out, f)
+
+# CRT fixture
+value.set_seed(1)
+crt_out = crt(vhs_tex, [2,2,3], time=0.25, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'crt.json', 'w') as f:
+    json.dump(crt_out, f)
+
+# Snow fixture
+value.set_seed(1)
+snow_vals = [0.1, 0.2, 0.3, 0.4]
+snow_tex = tf.constant(snow_vals, shape=[2,2,1], dtype=tf.float32)
+snow_out = snow(snow_tex, [2,2,1], time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'snow.json', 'w') as f:
+    json.dump(snow_out, f)
+
+# Grime fixture
+value.set_seed(1)
+grime_out = grime(tf.zeros([8,8,1], dtype=tf.float32), [8,8,1], time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'grime.json', 'w') as f:
+    json.dump(grime_out, f)
+
+# Nebula fixture
+value.set_seed(1)
+nebula_out = nebula(tf.zeros([32,32,3], dtype=tf.float32), [32,32,3], time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'nebula.json', 'w') as f:
+    json.dump(nebula_out, f)
+
+# False color fixture
+value.set_seed(1)
+false_color_vals = [0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.3, 0.4, 0.4, 0.4]
+false_color_tex = tf.constant(false_color_vals, shape=[2,2,3], dtype=tf.float32)
+false_color_out = false_color(false_color_tex, [2,2,3], time=0, speed=1).numpy().flatten().tolist()
+with open(fixtures_dir / 'falseColor.json', 'w') as f:
+    json.dump(false_color_out, f)
 
 # Simplex fixture
 shape = (2,2)
