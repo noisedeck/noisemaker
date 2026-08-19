@@ -60,9 +60,10 @@ function float16ToFloat32(h) {
 /** How many distinct viewport sizes keep a depth texture alive. */
 const DEPTH_TEXTURE_CACHE_LIMIT = 4
 
-export function resolveCullState(cullMode) {
-    if (cullMode === 'none') return { cullMode: 'none' }
-    return { cullMode: cullMode === 'front' ? 'front' : 'back', frontFace: 'cw' }
+export function resolveCullState(cullMode, fallback = 'none') {
+    const mode = cullMode ?? fallback
+    if (mode === 'none') return { cullMode: 'none' }
+    return { cullMode: mode === 'front' ? 'front' : 'back', frontFace: 'cw' }
 }
 
 export class WebGPUBackend extends Backend {
@@ -2067,7 +2068,11 @@ export class WebGPUBackend extends Backend {
                 },
                 primitive: {
                     topology: topology || 'triangle-list',
-                    ...resolveCullState(cullMode)
+                    // Default 'none': the MRT path also carries the fullscreen
+                    // GPGPU passes that compute-style effects compile down to,
+                    // and WebGL2 only culls when drawMode is 'triangles'. Mesh
+                    // passes ask for 'back' explicitly.
+                    ...resolveCullState(cullMode, 'none')
                 }
             }
             if (depth) {
@@ -2165,7 +2170,9 @@ export class WebGPUBackend extends Backend {
                 },
                 primitive: {
                     topology: 'triangle-list',
-                    ...resolveCullState(cullMode)
+                    // This path is triangle meshes only, which is exactly where
+                    // WebGL2 enables culling, so 'back' stays the default.
+                    ...resolveCullState(cullMode, 'back')
                 },
                 depthStencil: {
                     format: 'depth24plus',
