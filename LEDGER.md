@@ -81,7 +81,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `24c7053c` (2026-08-14)
+- **Checkpoint:** noisemaker `1ee891a2` (2026-08-18)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -95,6 +95,12 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-08-19 — caught up through `1ee891a2`: verified `help.md`
+    coverage for all 210 effects and audited the shader-parity attestation
+    infrastructure, PixelSort parity repair, JS/Python parity corrections,
+    fixture tooling, and dependency updates in the range; updated the release
+    workflow narrative for the new CPU parity-attestation gate, while no new
+    effect or user-facing feature required an additional feature guide.
   - 2026-08-14 — caught up through `24c7053c`: verified `help.md`
     coverage for all 210 effects and audited the renderer-output guide and
     navigation links, i18n catalogs, AI contract, CI, and vendored tooling in

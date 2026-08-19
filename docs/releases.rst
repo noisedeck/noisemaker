@@ -41,7 +41,9 @@ Shaders (``shaders.yml``)
 
 Runs on push/PR to ``main`` when ``shaders/``, ``scripts/``, ``demo/``, or related files change.
 
-- **PR / push**: DSL language tests, Playwright render tests (WebGL2), and structure tests.
+- **PR / push**: CPU-only verification that changed dual-language shader sources
+  carry current cross-backend parity attestations, DSL language tests,
+  Playwright render tests (WebGL2), and structure tests.
 - **Push to main** (after tests pass): builds shader bundles and packages them as ``noisemaker-shaders.tar.gz`` (for attachment to the auto-created GitHub release), then delegates the release to the platform release infrastructure.
 - **Automated release** (delegated): the platform workflow checks out noisemaker at the pushed commit, reads ``MAJOR.MINOR`` from ``pyproject.toml``, computes the next patch from existing ``v*`` tags, rebuilds the shader bundles, deploys them to the CDN origin at ``/MAJOR.MINOR.PATCH/``, atomically updates the rolling ``/MAJOR/`` and ``/MAJOR.MINOR/`` symlinks to point at the new patch directory, and creates and pushes the ``vMAJOR.MINOR.PATCH`` annotated tag back to this repo.
 - **Demo site deploy**: the noisemaker.app demo site (separate from the shader CDN) is also built and synced on each qualifying push.
