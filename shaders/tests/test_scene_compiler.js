@@ -493,4 +493,39 @@ function irFor(src) {
   `), /Unknown scene child 'sphere'.*line/s, 'unknown child rejected')
 }
 
+// Scene errors carry a real source location.
+//
+// substitute() rebuilds Call nodes when it resolves variables and used to drop
+// `loc`, so every scene diagnostic reported "line 0 col 0" while language.rst
+// promised a line and column.
+{
+  let err = null
+  try {
+    irFor('search synth\nscene(camera(fov: 60), banana(x: 1)).write(o0)')
+  } catch (e) { err = e }
+  assert.ok(err, 'expected an error for an unknown scene child')
+  assert.match(err.message, /banana/, 'names the offending child')
+  const m = err.message.match(/line (\d+) col (\d+)/)
+  assert.ok(m, `expected a line/col in: ${err.message}`)
+  assert.notStrictEqual(m[1], '0', `expected a real line number, got: ${err.message}`)
+}
+
+// Unknown keywords on scene nodes are errors, not silent drops.
+//
+// assertKnownKeywords was wired only to the material terms, so a typo on
+// scene/camera/light/mesh/group/environment compiled clean and was discarded.
+{
+  const cases = [
+    ['camera', 'scene(camera(fov: 60, wobble: 3)).write(o0)'],
+    ['light',  'scene(camera(fov: 60), light(type: "directional", intesity: 2)).write(o0)'],
+    ['mesh',   'scene(camera(fov: 60), mesh("sphere", raduis: 2)).write(o0)'],
+    ['scene',  'scene(ambeint: 0.2, camera(fov: 60)).write(o0)'],
+  ]
+  for (const [label, body] of cases) {
+    assert.throws(() => irFor('search synth\n' + body),
+      /Unknown keyword/,
+      `${label}(): expected an unknown-keyword error`)
+  }
+}
+
 console.log('Scene compiler tests passed')

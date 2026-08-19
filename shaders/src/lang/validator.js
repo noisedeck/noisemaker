@@ -316,6 +316,10 @@ export function validate(ast) {
             const mapped = node.chain.map(c => {
                 const mappedArgs = c.args.map(a => substitute(a))
                 let mappedCall = {type:'Call', name:c.name, args:mappedArgs}
+                // Carry the source location across the rebuild. Scene nodes are
+                // handed to the scene compiler as raw AST, and it reports errors
+                // from `loc`; without this every scene error says line 0 col 0.
+                if (c.loc) mappedCall.loc = c.loc
                 if (c.kwargs) {
                     const kw = {}
                     for (const [k,v] of Object.entries(c.kwargs)) kw[k] = substitute(v)
@@ -328,6 +332,7 @@ export function validate(ast) {
         if (node.type === 'Call') {
             const mappedArgs = node.args.map(a => substitute(a))
             let mappedCall = {type:'Call', name:node.name, args:mappedArgs}
+            if (node.loc) mappedCall.loc = node.loc
             if (node.kwargs) {
                 const kw = {}
                 for (const [k,v] of Object.entries(node.kwargs)) kw[k] = substitute(v)
@@ -695,9 +700,19 @@ export function validate(ast) {
                     }
                 }
                 if (!spec) {
-                    // Scene DSL functions pass through the validator without ops registration.
-                    // The scene compiler processes them in a later pipeline stage.
-                    if (SCENE_FUNCTIONS.has(call.name)) {
+                    // Only scene() is a chain element. Its vocabulary — camera,
+                    // mesh, light, material and the rest — lives *inside* the
+                    // call, preserved as AST and never reaching this loop. Any
+                    // of those names appearing here is a mistake, and passing
+                    // them through turned a typo into a silent no-op that
+                    // compiled clean and rendered nothing.
+                    if (call.name !== 'scene' && SCENE_FUNCTIONS.has(call.name)) {
+                        pushDiag('S001', original, `Unknown effect: '${call.name}'. Scene nodes like ${call.name}() are only valid inside scene().`)
+                        continue
+                    }
+                    // scene() passes through the validator without an ops
+                    // registration; the scene compiler interprets it later.
+                    if (call.name === 'scene') {
                         const sceneAst = substitute(clone(original))
                         const idx = tempIndex++
                         const step = {

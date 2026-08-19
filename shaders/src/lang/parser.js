@@ -855,7 +855,10 @@ export function parse(tokens) {
             }
         }
         expect('RPAREN', "Expect ')'")
-        const call = {type: 'Call', name: nameToken.lexeme, args}
+        // Record where the call was written. Scene nodes are handed to the
+        // scene compiler as raw AST and it reports errors from `loc`; without
+        // this every scene diagnostic reads "line 0 col 0".
+        const call = {type: 'Call', name: nameToken.lexeme, args, loc: {line: nameToken.line, col: nameToken.col}}
         if (keyword) call.kwargs = kwargs
         if (nameToken.lexeme === 'from') {
             return transformFromInvocation(call, nameToken)

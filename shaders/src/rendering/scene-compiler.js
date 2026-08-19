@@ -25,6 +25,33 @@ const LIGHT_TYPES = new Set(['directional', 'point', 'spot'])
 /** Keyword args that describe placement rather than geometry. */
 const TRANSFORM_KEYS = new Set(['id', 'pos', 'rot', 'scale'])
 
+/**
+ * Keywords each scene node accepts. Anything outside these is a typo: without
+ * the check a mistyped keyword is dropped in silence and the node renders with
+ * a default in its place.
+ */
+const CAMERA_KEYS = new Set(['fov', 'near', 'far', 'pos', 'target'])
+const ENVIRONMENT_KEYS = new Set(['intensity'])
+const SCENE_SETTING_KEYS = new Set([
+    'ambient', 'background', 'exposure', 'ground', 'sky',
+    'reflections', 'reflectionProbe', 'reflectionProbeSize',
+    'ssao', 'ssaoRadius'
+])
+/** Light keywords, by light type — `angle`/`penumbra` are spot-only. */
+const LIGHT_KEYS = {
+    directional: new Set(['type', 'color', 'intensity', 'dir']),
+    point: new Set(['type', 'color', 'intensity', 'pos', 'falloff']),
+    spot: new Set(['type', 'color', 'intensity', 'pos', 'falloff', 'dir', 'angle', 'penumbra'])
+}
+/** Shape parameters per mesh type, mirroring geometry/primitives.js. */
+const MESH_PARAM_KEYS = {
+    sphere: new Set(['radius', 'segments']),
+    box: new Set(['size']),
+    plane: new Set(['width', 'height']),
+    cylinder: new Set(['radius', 'height', 'segments']),
+    torus: new Set(['radius', 'tube', 'segments', 'tubeSegments'])
+}
+
 function locOf(node) {
     const loc = node?.loc
     return { line: loc?.line ?? 0, col: loc?.col ?? 0 }
@@ -151,6 +178,7 @@ function asCallChain(node) {
 }
 
 function buildCamera(call) {
+    assertKnownKeywords(call, CAMERA_KEYS)
     return {
         fov: kw(call, 'fov') ?? 60,
         near: kw(call, 'near') ?? 0.1,
@@ -165,6 +193,7 @@ function buildLight(call) {
     if (!LIGHT_TYPES.has(type)) {
         throw sceneError(`Unknown light type '${type}'`, call.kwargs?.type ?? call)
     }
+    assertKnownKeywords(call, LIGHT_KEYS[type])
     const light = {
         type,
         color: kw(call, 'color') ?? [1, 1, 1],
@@ -192,6 +221,7 @@ function buildEnvironment(call) {
     if (!arg || arg.type !== 'OutputRef') {
         throw sceneError('environment() expects a surface reference (o0..o7)', arg ?? call)
     }
+    assertKnownKeywords(call, ENVIRONMENT_KEYS)
     return {
         surface: arg.name,
         intensity: kw(call, 'intensity') ?? 1
@@ -353,8 +383,12 @@ function walkNode(
         }
         node.meshType = meshType
         node.meshParams = {}
+        const shapeKeys = MESH_PARAM_KEYS[meshType]
         for (const [key, val] of Object.entries(head.kwargs ?? {})) {
             if (TRANSFORM_KEYS.has(key)) continue
+            if (!shapeKeys.has(key)) {
+                throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, val)
+            }
             node.meshParams[key] = litValue(val)
         }
     }
@@ -418,6 +452,9 @@ export function compileScene(compilationResult) {
 
     const settings = {}
     for (const [key, val] of Object.entries(sceneAst.kwargs ?? {})) {
+        if (!SCENE_SETTING_KEYS.has(key)) {
+            throw sceneError(`Unknown keyword '${key}' for scene()`, val)
+        }
         settings[key] = litValue(val)
     }
     const reflectionProbe = settings.reflectionProbe

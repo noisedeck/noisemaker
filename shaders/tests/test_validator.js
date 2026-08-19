@@ -205,3 +205,31 @@ test('hex color still splats across r/g/b when another keyword is present',
         if (Math.abs(a.b - 0) > 1e-6) throw new Error(`b: expected 0, got ${a.b}`)
         if (a.alpha !== 0.5) throw new Error(`alpha: expected 0.5, got ${a.alpha}`)
     })
+
+// ---------------------------------------------------------------------------
+// Scene names are only chain elements as `scene()` itself.
+//
+// camera/mesh/light/group/material/solid/surface/pbr/emit/environment are
+// children *inside* a scene() call, preserved as AST and never reaching the
+// chain loop. Letting them pass through at any chain position turned an
+// "Unknown effect" typo into a silent no-op that renders nothing.
+// ---------------------------------------------------------------------------
+
+test('a scene child name used as a chain element is an unknown effect',
+    'search synth, filter\nnoise().camera(fov: 60).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001' && /camera/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 for 'camera' as a chain element, got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+test('solid() with no synth in scope is still an unknown effect',
+    'search filter\nsolid(r: 1).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001' && /solid/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 for 'solid' under 'search filter', got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+test('scene() itself still passes through to the scene compiler',
+    'search synth, filter\nscene(camera(fov: 60)).write(o0)', (result) => {
+        const step = result.plans[0].chain.find(s => s.op === '_scene.scene')
+        if (!step) throw new Error(`Expected a _scene.scene step, got ${result.plans[0].chain.map(s => s.op).join(', ')}`)
+        if (!step.args || !step.args._ast) throw new Error('Expected the original AST to be preserved on the step')
+    })
