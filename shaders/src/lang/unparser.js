@@ -87,6 +87,84 @@ function formatOscillator(osc) {
  * @param {object} midi - MIDI configuration object
  * @returns {string} DSL representation of the midi() call
  */
+/**
+ * Render a preserved scene AST back to DSL source.
+ *
+ * Scene calls are not validated against the effect registry — the validator
+ * stores the original AST on the step and the scene compiler interprets it
+ * later — so there is no arg spec to format against. This walks the AST
+ * directly. Without it, scene steps fell through to the generic path and
+ * stringified as `_scene.scene(_ast: [object Object])`, which does not reparse.
+ * @param {object} node - AST node from the preserved scene tree
+ * @returns {string} DSL source for the node
+ */
+function formatSceneAst(node) {
+    if (node === null || node === undefined) return 'null'
+    switch (node.type) {
+        case 'Call': {
+            const parts = (node.args ?? []).map(formatSceneAst)
+            for (const [key, value] of Object.entries(node.kwargs ?? {})) {
+                parts.push(`${key}: ${formatSceneAst(value)}`)
+            }
+            return `${node.name}(${parts.join(', ')})`
+        }
+        case 'Chain':
+            return (node.chain ?? []).map(formatSceneAst).join('.')
+        case 'ArrayLiteral':
+            return `[${(node.elements ?? []).map(formatSceneAst).join(', ')}]`
+        case 'Object': {
+            const entries = Object.entries(node.properties ?? {})
+                .map(([key, value]) => `${key}: ${formatSceneAst(value)}`)
+            return `{${entries.join(', ')}}`
+        }
+        case 'Oscillator': {
+            // Field order matches the parser's parameter order so the emitted
+            // call reparses to the same node.
+            const parts = []
+            if (node.oscType !== undefined) parts.push(`type: ${formatSceneAst(node.oscType)}`)
+            for (const key of ['min', 'max', 'speed', 'offset', 'seed']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `osc(${parts.join(', ')})`
+        }
+        case 'Member':
+            return (node.path ?? []).join('.')
+        case 'Ident':
+            return node.name
+        case 'OutputRef':
+        case 'VolRef':
+        case 'GeoRef':
+        case 'SourceRef':
+            return node.name
+        case 'String':
+            return JSON.stringify(node.value)
+        case 'Boolean':
+            return node.value ? 'true' : 'false'
+        case 'Number':
+            return formatNumber(node.value)
+        case 'Color':
+            return formatColorLiteral(node.value)
+        default:
+            if (typeof node.value === 'number') return formatNumber(node.value)
+            if (typeof node.value === 'string') return JSON.stringify(node.value)
+            return String(node.name ?? node.value ?? '')
+    }
+}
+
+/** Shortest representation that reparses to the same number. */
+function formatNumber(value) {
+    if (!Number.isFinite(value)) return '0'
+    return Number.isInteger(value) ? String(value) : String(parseFloat(value.toPrecision(10)))
+}
+
+/** Format an [r,g,b,a] colour back to a #RRGGBB / #RRGGBBAA literal. */
+function formatColorLiteral(components) {
+    const hex = (v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')
+    const [r, g, b, a = 1] = components
+    const base = `#${hex(r)}${hex(g)}${hex(b)}`
+    return a >= 1 ? base : `${base}${hex(a)}`
+}
+
 function formatMidi(midi) {
     const parts = [`channel: ${midi.channel}`]
 
@@ -670,6 +748,11 @@ function formatLetExpr(expr, options = {}) {
             return expr.name
         case 'Member':
             return expr.path.join('.')
+        case 'Object':
+            // Object literals were added to serve scene(), but they are a
+            // general expression form and can appear in a let binding, where
+            // there is no arg spec to format against.
+            return formatSceneAst(expr)
         case 'Oscillator': {
             // Raw AST Oscillator: sub-fields are AST nodes
             let typeStr = 'oscKind.sine'
@@ -851,6 +934,12 @@ export function unparse(compiled, overrides = {}, options = {}) {
                     read3dCode = `read3d(${tex3d}, ${geo})`
                 }
                 currentChain.push(makeChainElement(read3dCode))
+                globalStepIndex++
+                continue
+            }
+            // Scene steps carry their original AST rather than validated args.
+            if (step.scene && step.args?._ast) {
+                currentChain.push(makeChainElement(formatSceneAst(step.args._ast)))
                 globalStepIndex++
                 continue
             }

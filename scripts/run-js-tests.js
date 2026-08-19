@@ -61,6 +61,7 @@ const testEntries = [
   { file: 'shaders/tests/test_scene_graph_wiring.js', parity: false },
   { file: 'shaders/tests/test_scene_bindings.js', parity: false },
   { file: 'shaders/tests/test_scene_integration.js', parity: false },
+  { file: 'shaders/tests/test_scene_roundtrip.js', parity: false },
   { file: 'shaders/tests/test_webgl2_depth_buffer.js', parity: false },
   { file: 'shaders/tests/test_webgpu_depth_cache.js', parity: false },
   { file: 'shaders/tests/test_gbuffer.js', parity: false },
