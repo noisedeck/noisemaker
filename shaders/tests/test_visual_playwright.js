@@ -735,11 +735,14 @@ async function testMaterialsLabOscillatorAnimation(browser, port) {
       }
     }
 
-    const rotation = await page.evaluate(() => {
+    const rotation = await page.evaluate(async () => {
       const renderer = window.__noisemakerCanvasRenderer
       renderer.stop()
       renderer._clock.reset()
-      renderer.render(0)
+      // render() is awaited: the scene must finish drawing before the pipeline
+      // reads its texture, so animation bindings are applied inside that
+      // promise rather than synchronously on the way in.
+      await renderer.render(0)
       const spinner = renderer._sceneTree.getById('spinner')
       const sceneMeshes = renderer._sceneTree.getMeshNodes()
         .filter(mesh => !mesh.planarReflection)
@@ -747,7 +750,7 @@ async function testMaterialsLabOscillatorAnimation(browser, port) {
         .filter(mesh => mesh.parent !== spinner)
         .map(mesh => mesh.meshType)
       const start = spinner.rotation[1]
-      renderer.render(0.25)
+      await renderer.render(0.25)
       const quarterLoop = spinner.rotation[1]
       return {
         start,

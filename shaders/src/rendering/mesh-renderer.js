@@ -146,7 +146,10 @@ export class MeshRenderer {
         id: passId,
         program: 'scene_mesh_gbuf',
         drawMode: 'triangles',
-        cullMode: opts.cullMode,
+        // Stated explicitly rather than left undefined: the backends disagree
+        // on the default. WebGL2 enables CULL_FACE and culls back faces; the
+        // WebGPU MRT pipeline sets none, rendering double-sided.
+        cullMode: opts.cullMode ?? 'back',
         count: handle.vertexCount,
         inputs,
         outputs,

@@ -137,3 +137,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         throw new Error(`live compute bindings were not preserved: ${names.join(', ')}`)
     }
 })
+
+// ---------------------------------------------------------------------------
+// Cull state must be derived from the pass, identically on every WebGPU
+// pipeline path, and must correspond to what WebGL2 does.
+//
+// WebGL2 culls with frontFace(CCW) on unflipped geometry. The WGSL mesh vertex
+// shader flips clip-space Y, which reverses triangle winding in framebuffer
+// space, so 'cw' is the WebGPU spelling of the same thing. Getting this wrong
+// culls exactly the faces that should be kept.
+// ---------------------------------------------------------------------------
+
+import { resolveCullState } from '../src/runtime/backends/webgpu.js'
+
+test('cull state defaults to back-face culling, matching WebGL2', () => {
+    const state = resolveCullState(undefined)
+    if (state.cullMode !== 'back') throw new Error(`expected cullMode 'back', got '${state.cullMode}'`)
+    if (state.frontFace !== 'cw') throw new Error(`expected frontFace 'cw' for the Y-flipped mesh shader, got '${state.frontFace}'`)
+})
+
+test('cull state honours an explicit none', () => {
+    const state = resolveCullState('none')
+    if (state.cullMode !== 'none') throw new Error(`expected cullMode 'none', got '${state.cullMode}'`)
+})
+
+test('cull state honours an explicit front', () => {
+    const state = resolveCullState('front')
+    if (state.cullMode !== 'front') throw new Error(`expected cullMode 'front', got '${state.cullMode}'`)
+    if (state.frontFace !== 'cw') throw new Error(`expected frontFace 'cw', got '${state.frontFace}'`)
+})

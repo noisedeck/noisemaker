@@ -55,6 +55,24 @@ const PROBE_GBUF_TEXTURES = [
   { id: 'scene_probe_gbuf_depth', format: 'r32f' }
 ]
 
+/**
+ * Zero the four targets of a G-buffer.
+ *
+ * Not a draw. The previous form submitted a fullscreen triangle with
+ * scene_present — a single-output program — against drawBuffers: 4. WebGPU
+ * rejects that pipeline at interface matching, and WebGL2 accepts it but writes
+ * only attachment 0, leaving normals, positions and depth undefined rather than
+ * cleared. clearTexture zeroes each target directly and behaves the same on
+ * both backends, which is also what the `depth <= 0` no-hit sentinel expects.
+ * @param {object} backend - Active render backend
+ * @param {object} outputs - colorN -> texture id map for the G-buffer
+ */
+function clearGBuffer(backend, outputs) {
+  for (const id of Object.values(outputs)) {
+    backend.clearTexture(id)
+  }
+}
+
 const PROBE_GBUF_OUTPUTS = Object.freeze({
   color0: 'scene_probe_gbuf_albedo_metallic',
   color1: 'scene_probe_gbuf_normal_roughness',
@@ -307,20 +325,12 @@ export class SceneRenderer {
 
     // If no meshes, clear the G-buffer
     if (meshPasses.length === 0) {
-      this.backend.executePass({
-        id: 'scene_gbuf_clear',
-        program: 'scene_present',
-        inputs: {},
-        outputs: {
-          color0: 'scene_gbuf_albedo_metallic',
-          color1: 'scene_gbuf_normal_roughness',
-          color2: 'scene_gbuf_position_emission',
-          color3: 'scene_gbuf_depth'
-        },
-        drawBuffers: 4,
-        clear: true,
-        uniforms: {}
-      }, frameState)
+      clearGBuffer(this.backend, {
+        color0: 'scene_gbuf_albedo_metallic',
+        color1: 'scene_gbuf_normal_roughness',
+        color2: 'scene_gbuf_position_emission',
+        color3: 'scene_gbuf_depth'
+      })
     }
 
     // A planar reflector is a second view of the scene, not a screen-space
@@ -346,15 +356,7 @@ export class SceneRenderer {
         this.backend.executePass(pass, frameState)
       }
       if (planarMeshPasses.length === 0) {
-        this.backend.executePass({
-          id: 'scene_planar_gbuf_clear',
-          program: 'scene_present',
-          inputs: {},
-          outputs: PLANAR_GBUF_OUTPUTS,
-          drawBuffers: 4,
-          clear: true,
-          uniforms: {}
-        }, frameState)
+        clearGBuffer(this.backend, PLANAR_GBUF_OUTPUTS)
       }
     }
 
@@ -558,15 +560,7 @@ export class SceneRenderer {
       )
       for (const pass of meshPasses) this.backend.executePass(pass, frameState)
       if (meshPasses.length === 0) {
-        this.backend.executePass({
-          id: `scene_probe_gbuf_clear_face_${face}`,
-          program: 'scene_present',
-          inputs: {},
-          outputs: PROBE_GBUF_OUTPUTS,
-          drawBuffers: 4,
-          clear: true,
-          uniforms: {}
-        }, frameState)
+        clearGBuffer(this.backend, PROBE_GBUF_OUTPUTS)
       }
 
       this.backend.executePass({

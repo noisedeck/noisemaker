@@ -28,6 +28,8 @@ function stubBackend() {
       this.cubeTextureSpecs.set(id, spec)
     },
     destroyTexture(id) { this.textures.delete(id) },
+    clearedTextures: [],
+    clearTexture(id) { this.clearedTextures.push(id) },
     async compileProgram(id) { this.programs.add(id) },
     executePass(pass, state) { this.passes.push(pass); this.lastFrameState = state },
     beginFrame() { this.frames++ },
@@ -806,6 +808,63 @@ function treeWithLights(lights, settings = {}) {
   const lighting = backend.passes.find(p => p.id === 'scene_lighting')
   assert.strictEqual(lighting.uniforms.u_envIntensity, 0, 'no env -> intensity 0')
   assert.strictEqual(lighting.inputs.u_envTexture, 'scene_albedo_fallback', 'fallback bound for the declaration')
+}
+
+// No pass may declare more draw buffers than its program writes outputs.
+//
+// The zero-mesh G-buffer clears drew a fullscreen triangle with scene_present,
+// which declares a single @location(0) output, against drawBuffers: 4. WebGPU
+// rejects that pipeline outright at interface-matching; WebGL2 accepts it and
+// leaves attachments 1-3 undefined rather than cleared, so the lighting pass
+// then reads garbage normals and positions.
+{
+  const FRAGMENT_OUTPUTS = { scene_present: 1, scene_tonemap: 1 }
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+
+  // A scene with lights but no meshes takes every zero-mesh clear path.
+  const tree = treeWithLights([{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }])
+  tree.getMeshNodes = () => []
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  for (const pass of backend.passes) {
+    const outputs = FRAGMENT_OUTPUTS[pass.program]
+    if (outputs === undefined) continue
+    const declared = pass.drawBuffers ?? 1
+    assert.ok(declared <= outputs,
+      `pass '${pass.id}' declares drawBuffers: ${declared} but program '${pass.program}' writes ${outputs} output(s)`)
+  }
+
+  // And the G-buffer is genuinely cleared rather than partly overwritten.
+  assert.ok(backend.clearedTextures.length >= 4,
+    `expected the four G-buffer targets to be cleared, got ${JSON.stringify(backend.clearedTextures)}`)
+}
+
+// Mesh passes state their cull mode explicitly.
+//
+// Left undefined, the two backends disagree by default: WebGL2 enables
+// CULL_FACE and culls back faces, while the WebGPU MRT pipeline sets no
+// cullMode at all and so renders double-sided. Every G-buffer fill is MRT, so
+// the whole scene was single-sided on one backend and double-sided on the
+// other, which changes normals, SSAO and reflections downstream.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = SceneTree.fromIR({
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    materials: [],
+    settings: {},
+    nodes: [{ id: 'n0', type: 'mesh', meshType: 'box', meshParams: {}, transform: {}, children: [], parent: null }]
+  })
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  const meshPass = backend.passes.find(p => p.program === 'scene_mesh_gbuf')
+  assert.ok(meshPass, 'a mesh G-buffer pass was submitted')
+  assert.ok(meshPass.cullMode !== undefined,
+    'mesh passes must state cullMode explicitly so both backends agree')
+  assert.strictEqual(meshPass.cullMode, 'back', 'default matches WebGL2 back-face culling')
 }
 
 console.log('Scene renderer tests passed')

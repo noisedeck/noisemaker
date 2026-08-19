@@ -45,6 +45,23 @@ function float16ToFloat32(h) {
     return (sign ? -1 : 1) * f * Math.pow(2, exponent - 15)
 }
 
+/**
+ * Translate a pass's cull mode into WebGPU primitive state.
+ *
+ * WebGL2 culls with frontFace(CCW) + cullFace(BACK) on unflipped geometry. The
+ * WGSL mesh vertex shader flips clip-space Y, which reverses triangle winding
+ * in framebuffer space, so 'cw' is the WebGPU spelling of WebGL2's CCW. Every
+ * pipeline path derives its state here so the two backends cannot drift: the
+ * MRT path previously set no cullMode at all (silently double-sided) while the
+ * single-output 3D path hardcoded 'back' and ignored the pass entirely.
+ * @param {string|undefined} cullMode - 'none' | 'front' | 'back' | undefined
+ * @returns {{cullMode: string, frontFace?: string}} WebGPU primitive state
+ */
+export function resolveCullState(cullMode) {
+    if (cullMode === 'none') return { cullMode: 'none' }
+    return { cullMode: cullMode === 'front' ? 'front' : 'back', frontFace: 'cw' }
+}
+
 export class WebGPUBackend extends Backend {
     constructor(device, context) {
         super(device)
@@ -1869,7 +1886,8 @@ export class WebGPUBackend extends Backend {
 
             pipeline = this.resolve3DRenderPipeline(program, {
                 blend: pass.blend,
-                format: resolvedFormat
+                format: resolvedFormat,
+                cullMode: pass.cullMode
             })
         } else {
             // Standard 2D rendering
@@ -1971,7 +1989,8 @@ export class WebGPUBackend extends Backend {
             blend: pass.blend,
             topology: (pass.drawMode === 'points') ? 'point-list' : 'triangle-list',
             formats,
-            depth: isMRT3D
+            depth: isMRT3D,
+            cullMode: pass.cullMode
         })
 
         // Begin render pass with multiple color attachments
@@ -2022,8 +2041,8 @@ export class WebGPUBackend extends Backend {
     /**
      * Get or create a render pipeline with multiple render targets
      */
-    resolveMRTRenderPipeline(program, { blend, topology, formats, depth = false }) {
-        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}_${depth ? 'depth' : 'nodepth'}`
+    resolveMRTRenderPipeline(program, { blend, topology, formats, depth = false, cullMode }) {
+        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}_${depth ? 'depth' : 'nodepth'}_${cullMode || 'back'}`
 
         if (!program.pipelineCache.has(key)) {
             // Build targets array for all outputs
@@ -2044,7 +2063,8 @@ export class WebGPUBackend extends Backend {
                     targets
                 },
                 primitive: {
-                    topology: topology || 'triangle-list'
+                    topology: topology || 'triangle-list',
+                    ...resolveCullState(cullMode)
                 }
             }
             if (depth) {
@@ -2086,8 +2106,8 @@ export class WebGPUBackend extends Backend {
     /**
      * Get or create a render pipeline for 3D mesh rendering with depth test and back-face culling.
      */
-    resolve3DRenderPipeline(program, { blend, format }) {
-        const key = `3d|${format || 'rgba16float'}|${blend ? JSON.stringify(blend) : 'noblend'}`
+    resolve3DRenderPipeline(program, { blend, format, cullMode }) {
+        const key = `3d|${format || 'rgba16float'}|${blend ? JSON.stringify(blend) : 'noblend'}|${cullMode || 'back'}`
 
         if (!program.pipelineCache.has(key)) {
             const pipeline = this.device.createRenderPipeline({
@@ -2106,9 +2126,7 @@ export class WebGPUBackend extends Backend {
                 },
                 primitive: {
                     topology: 'triangle-list',
-                    cullMode: 'back',
-                    // 'cw' because WGSL shader flips Y which reverses winding order
-                    frontFace: 'cw'
+                    ...resolveCullState(cullMode)
                 },
                 depthStencil: {
                     format: 'depth24plus',
