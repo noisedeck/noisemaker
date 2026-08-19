@@ -78,7 +78,10 @@ export function compileGraph(source, options = {}) {
  * @returns {Promise<Pipeline>} Initialized pipeline ready to render
  */
 export async function createRuntime(source, options = {}) {
-    const graph = compileGraph(source, options)
+    // Callers that have already compiled the source — CanvasRenderer.compile()
+    // builds a graph to detect scene programs — pass it in rather than paying
+    // for a second parse, validate, expand and allocation pass on every edit.
+    const graph = options.graph ?? compileGraph(source, options)
     const pipeline = await createPipeline(graph, options)
     return pipeline
 }

@@ -60,6 +60,7 @@ const testEntries = [
   { file: 'shaders/tests/test_scene_compiler.js', parity: false },
   { file: 'shaders/tests/test_scene_graph_wiring.js', parity: false },
   { file: 'shaders/tests/test_scene_bindings.js', parity: false },
+  { file: 'shaders/tests/test_scene_integration.js', parity: false },
   { file: 'shaders/tests/test_gbuffer.js', parity: false },
   { file: 'shaders/tests/test_scene_renderer.js', parity: false },
   { file: 'shaders/tests/test_procedural.js', parity: false },

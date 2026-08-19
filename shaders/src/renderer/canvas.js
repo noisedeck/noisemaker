@@ -308,6 +308,7 @@ export class CanvasRenderer {
 
         // Scene rendering state (for scene() DSL programs)
         this._isScene = false
+        this._sceneRenderPending = null
         this._sceneTree = null
         this._sceneRenderer = null
         this._sceneBackend = null
@@ -815,10 +816,12 @@ export class CanvasRenderer {
      * Render a single frame at a specific time
      * @param {number} normalizedTime - Time value 0-1
      */
-    render(normalizedTime) {
+    async render(normalizedTime) {
         // Scene programs draw into SCENE_COLOR_TEXTURE first; the pipeline
         // below then blits that into its surface and runs any 2D effects.
-        this._renderScene(normalizedTime * this._loopDuration * 1000, normalizedTime)
+        // Awaited, so a single-shot render + readback sees the scene it just
+        // asked for rather than the previous frame's.
+        await this._renderScene(normalizedTime * this._loopDuration * 1000, normalizedTime)
 
         if (this._pipeline && !this._isContextLost) {
             try {
@@ -842,9 +845,14 @@ export class CanvasRenderer {
      * @param {number} timeMs - Timestamp to advance the scene clock with
      * @param {number} normalizedTime - Shared animation loop position in [0, 1]
      */
-    _renderScene(timeMs, normalizedTime) {
+    async _renderScene(timeMs, normalizedTime) {
         if (!this._isScene || !this._sceneRenderer || !this._sceneTree) return
-        try {
+        // A scene render spans await points — shader compilation when the light
+        // count changes, and GPU backpressure. Reuse the in-flight one rather
+        // than starting a second pass over the same textures and queueing
+        // unbounded work behind it.
+        if (this._sceneRenderPending) return this._sceneRenderPending
+        const pending = (async () => {
             if (this._clock) {
                 this._clock.tick(timeMs)
             }
@@ -852,27 +860,23 @@ export class CanvasRenderer {
                 sceneModules.evaluateBindings(this._sceneBindings, normalizedTime)
             }
             this._sceneTree.updateWorldMatrices()
-            // render() is async (shader compilation on light-count change);
-            // an async throw surfaces as a rejected promise, not a sync
-            // throw, so route it explicitly or it becomes an invisible
-            // unhandled rejection.
-            this._sceneRenderer.render(this._sceneTree, this._clock, SCENE_COLOR_TEXTURE)
-                .catch(err => {
-                    console.error('Scene render error:', err)
-                    if (this._onError) {
-                        this._onError(err)
-                    }
-                })
+            await this._sceneRenderer.render(this._sceneTree, this._clock, SCENE_COLOR_TEXTURE)
+        })()
+        this._sceneRenderPending = pending
+        try {
+            await pending
         } catch (err) {
             console.error('Scene render error:', err)
             if (this._onError) {
                 this._onError(err)
             }
+        } finally {
+            if (this._sceneRenderPending === pending) this._sceneRenderPending = null
         }
     }
 
     /** @private Main render loop */
-    _renderLoop(time) {
+    async _renderLoop(time) {
         if (!this._isRunning) return
 
         this._animationFrameId = requestAnimationFrame(this._boundRenderLoop)
@@ -882,7 +886,9 @@ export class CanvasRenderer {
 
         // Scene programs draw into SCENE_COLOR_TEXTURE before the pipeline
         // runs, so the pipeline's blit picks the result up this frame.
-        this._renderScene(time, normalizedTime)
+        await this._renderScene(time, normalizedTime)
+        // Teardown can land while the scene render is in flight.
+        if (!this._isRunning) return
 
         if (this._pipeline) {
             // Normal effect pipeline rendering path
@@ -1044,7 +1050,9 @@ export class CanvasRenderer {
 
         this._currentDsl = dsl
 
-        // Check if this is a scene program by compiling the graph first
+        // Compile once, here: the graph tells us whether this is a scene
+        // program, and is then handed to createRuntime so the pipeline is built
+        // from it rather than from a second compile of the same source.
         const graph = compileGraph(dsl, { shaderOverrides })
 
         // A scene program still builds a normal pipeline: the scene renders
@@ -1074,7 +1082,8 @@ export class CanvasRenderer {
                     width: this._width,
                     height: this._height,
                     preferWebGPU: this._preferWebGPU,
-                    shaderOverrides
+                    shaderOverrides,
+                    graph
                 })
             } catch (err) {
                 if (!this._isLifecycleCurrent(lifecycleGeneration)) return null
