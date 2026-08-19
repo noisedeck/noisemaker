@@ -724,5 +724,7 @@ export class SceneRenderer {
     }
     this.backend.destroyTexture(REFLECTION_PROBE_TEXTURE)
     this.backend.destroyTexture(REFLECTION_PROBE_FALLBACK)
+    // Mesh geometry lives in textures the mesh renderer owns.
+    if (this.meshRenderer) this.meshRenderer.dispose()
   }
 }

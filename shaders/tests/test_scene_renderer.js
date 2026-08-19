@@ -34,7 +34,13 @@ function stubBackend() {
     executePass(pass, state) { this.passes.push(pass); this.lastFrameState = state },
     beginFrame() { this.frames++ },
     endFrame() { this.framesEnded++ },
-    uploadMeshData() { return { success: true } }
+    uploadMeshData(meshId) {
+      // Mirrors the real backends: three textures per distinct geometry.
+      for (const suffix of ['positions', 'normals', 'uvs']) {
+        this.textures.set(`global_${meshId}_${suffix}`, { handle: meshId })
+      }
+      return { success: true }
+    }
   }
 }
 
@@ -865,6 +871,73 @@ function treeWithLights(lights, settings = {}) {
   assert.ok(meshPass.cullMode !== undefined,
     'mesh passes must state cullMode explicitly so both backends agree')
   assert.strictEqual(meshPass.cullMode, 'back', 'default matches WebGL2 back-face culling')
+}
+
+// Mesh passes are built once per node and mutated, not reallocated per frame.
+//
+// The project bans per-frame allocation in render loops, and Pipeline builds
+// its passes once at compile time. buildMeshPasses rebuilt everything on every
+// frame instead: a full JSON.stringify of the mesh params per mesh even on the
+// geometry cache-hit path, a mat4.create for the normal matrix, four template
+// literals for texture names, an array spread for the base colour, and three
+// object literals.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = SceneTree.fromIR({
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    materials: [],
+    settings: {},
+    nodes: [
+      { id: 'a', type: 'mesh', meshType: 'box', meshParams: {}, transform: {}, children: [], parent: null },
+      { id: 'b', type: 'mesh', meshType: 'sphere', meshParams: { radius: 2 }, transform: {}, children: [], parent: null }
+    ]
+  })
+  const meshNodes = tree.getMeshNodes()
+  const camera = tree.camera
+
+  const first = renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})
+  const second = renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})
+
+  assert.strictEqual(first.length, 2, 'two mesh passes')
+  for (let i = 0; i < first.length; i++) {
+    assert.strictEqual(first[i], second[i], `pass ${i} must be reused between frames, not rebuilt`)
+    assert.strictEqual(first[i].uniforms, second[i].uniforms, `pass ${i} uniforms must be reused`)
+    assert.strictEqual(first[i].uniforms.u_normalMatrix, second[i].uniforms.u_normalMatrix,
+      `pass ${i} normal matrix must be written into a reused buffer`)
+    assert.strictEqual(first[i].inputs, second[i].inputs, `pass ${i} inputs must be reused`)
+  }
+}
+
+// dispose() releases the mesh geometry textures too.
+//
+// It destroyed only ALL_TEXTURES and the probe targets, never the
+// global_<meshId>_{positions,normals,uvs} uploaded per distinct geometry. The
+// renderer is reused across recompiles on the same backend, so editing
+// mesh("sphere", segments: N) interned a new cache entry and three new
+// textures for every distinct N, for the lifetime of the backend.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = SceneTree.fromIR({
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    materials: [],
+    settings: {},
+    nodes: [{ id: 'a', type: 'mesh', meshType: 'box', meshParams: {}, transform: {}, children: [], parent: null }]
+  })
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const meshTextures = [...backend.textures.keys()].filter(id => /_positions$|_normals$|_uvs$/.test(id))
+  assert.ok(meshTextures.length >= 3, `precondition: geometry textures were uploaded (${meshTextures.length})`)
+
+  renderer.dispose()
+
+  const leaked = [...backend.textures.keys()].filter(id => /_positions$|_normals$|_uvs$/.test(id))
+  assert.deepStrictEqual(leaked, [], `dispose() left mesh geometry textures behind: ${leaked.join(', ')}`)
 }
 
 console.log('Scene renderer tests passed')

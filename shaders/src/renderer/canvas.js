@@ -1069,7 +1069,15 @@ export class CanvasRenderer {
         } else {
             this._isScene = false
             this._sceneTree = null
-            this._sceneRenderer = null
+            // Recompiling from a scene program to a non-scene one keeps the same
+            // pipeline and backend alive, so dropping the reference without
+            // disposing stranded every scene texture — and recompiling back to a
+            // scene then created new ones under the same ids, orphaning the old
+            // handles a second time.
+            if (this._sceneRenderer) {
+                this._sceneRenderer.dispose()
+                this._sceneRenderer = null
+            }
             this._sceneBindings = null
             this._clock = null
         }
