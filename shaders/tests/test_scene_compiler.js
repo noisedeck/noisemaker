@@ -528,4 +528,56 @@ function irFor(src) {
   }
 }
 
+// A scene without camera() gets the documented default camera.
+//
+// Every camera keyword has a default, so an absent camera() is not an error —
+// but leaving ir.camera null made mesh-renderer dereference it once per frame,
+// producing a black canvas and a console.error in the render loop.
+{
+  const ir = irFor('search synth\nscene(mesh("sphere")).write(o0)')
+  assert.ok(ir, 'scene without camera still compiles')
+  assert.ok(ir.camera, 'a default camera is synthesized')
+  assert.strictEqual(ir.camera.fov, 60, 'documented default fov')
+  assert.deepStrictEqual(ir.camera.position, [0, 0, 5], 'documented default position')
+  assert.deepStrictEqual(ir.camera.target, [0, 0, 0], 'documented default target')
+}
+
+// osc() is rejected where it is not supported, instead of reaching the GPU.
+//
+// buildCamera/buildLight read vectors with a bare kw(), so an oscillator
+// descriptor object flowed through to uniform3fv and the light position or
+// view matrix became NaN with no error anywhere.
+{
+  const cases = [
+    ['camera pos',  'scene(camera(pos: [osc(), 0, 5])).write(o0)'],
+    ['camera target', 'scene(camera(target: [0, osc(), 0])).write(o0)'],
+    ['light pos',   'scene(camera(fov: 60), light(type: "point", pos: [osc(), 2, 0])).write(o0)'],
+    ['light dir',   'scene(camera(fov: 60), light(type: "directional", dir: [osc(), -1, 0])).write(o0)'],
+  ]
+  for (const [label, body] of cases) {
+    assert.throws(() => irFor('search synth\n' + body),
+      /must contain finite numbers|osc/i,
+      `${label}: expected a compile error rather than NaN at runtime`)
+  }
+}
+
+// Mesh shape parameters are validated before they reach the geometry builders.
+{
+  const bad = [
+    ['torus tube 0',      'mesh("torus", tube: 0)'],
+    ['sphere segments 0', 'mesh("sphere", segments: 0)'],
+    ['sphere radius osc', 'mesh("sphere", radius: osc())'],
+    ['huge segments',     'mesh("sphere", segments: 100000)'],
+    ['negative radius',   'mesh("sphere", radius: -1)'],
+  ]
+  for (const [label, meshCall] of bad) {
+    assert.throws(() => irFor(`search synth\nscene(camera(fov: 60), ${meshCall}).write(o0)`),
+      /must be|out of range|between/i,
+      `${label}: expected a compile error`)
+  }
+  // The ordinary forms still compile.
+  const ok = irFor('search synth\nscene(camera(fov: 60), mesh("torus", radius: 2, tube: 0.5, segments: 48)).write(o0)')
+  assert.strictEqual(ok.nodes.find(n => n.type === 'mesh').meshParams.tube, 0.5, 'valid params pass through')
+}
+
 console.log('Scene compiler tests passed')

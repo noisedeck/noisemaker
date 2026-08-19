@@ -43,6 +43,21 @@ const LIGHT_KEYS = {
     point: new Set(['type', 'color', 'intensity', 'pos', 'falloff']),
     spot: new Set(['type', 'color', 'intensity', 'pos', 'falloff', 'dir', 'angle', 'penumbra'])
 }
+/**
+ * How each mesh shape parameter is validated. Unchecked, these reach the
+ * geometry builders verbatim: `tube: 0` divides by zero and fills the buffer
+ * with NaN, and `segments: 100000` asks for ~5e9 vertices on the main thread.
+ */
+const MESH_PARAM_SPEC = {
+    radius: { kind: 'number', min: 1e-6, label: 'greater than zero' },
+    tube: { kind: 'number', min: 1e-6, label: 'greater than zero' },
+    width: { kind: 'number', min: 1e-6, label: 'greater than zero' },
+    height: { kind: 'number', min: 1e-6, label: 'greater than zero' },
+    segments: { kind: 'int', min: 3, max: 512, label: 'an integer between 3 and 512' },
+    tubeSegments: { kind: 'int', min: 3, max: 512, label: 'an integer between 3 and 512' },
+    size: { kind: 'vec3', label: 'a vec3 of finite numbers' }
+}
+
 /** Shape parameters per mesh type, mirroring geometry/primitives.js. */
 const MESH_PARAM_KEYS = {
     sphere: new Set(['radius', 'segments']),
@@ -163,6 +178,28 @@ function vectorKw(call, name, fallback, length, { nonNegative = false } = {}) {
     return value
 }
 
+function validateMeshParam(name, value, node) {
+    const spec = MESH_PARAM_SPEC[name]
+    if (!spec) return value
+    if (spec.kind === 'vec3') {
+        if (!Array.isArray(value) || value.length !== 3 ||
+            !value.every(c => typeof c === 'number' && Number.isFinite(c))) {
+            throw sceneError(`${name} must be ${spec.label}`, node)
+        }
+        return value
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw sceneError(`${name} must be ${spec.label}`, node)
+    }
+    if (spec.kind === 'int' && !Number.isInteger(value)) {
+        throw sceneError(`${name} must be ${spec.label}`, node)
+    }
+    if (value < (spec.min ?? -Infinity) || value > (spec.max ?? Infinity)) {
+        throw sceneError(`${name} must be ${spec.label}`, node)
+    }
+    return value
+}
+
 /**
  * A scene child is either a bare Call (`camera(...)`) or a Chain when methods
  * are attached (`mesh(...).material(...)`). Normalize both to
@@ -177,14 +214,40 @@ function asCallChain(node) {
     return null
 }
 
+/** The camera a scene gets when it declares none. Every keyword defaults, so
+ *  an absent camera() is not an error — it is this. */
+const DEFAULT_CAMERA = Object.freeze({
+    fov: 60, near: 0.1, far: 1000,
+    position: Object.freeze([0, 0, 5]),
+    target: Object.freeze([0, 0, 0])
+})
+
+function defaultCamera() {
+    return {
+        fov: DEFAULT_CAMERA.fov,
+        near: DEFAULT_CAMERA.near,
+        far: DEFAULT_CAMERA.far,
+        position: [...DEFAULT_CAMERA.position],
+        target: [...DEFAULT_CAMERA.target]
+    }
+}
+
 function buildCamera(call) {
     assertKnownKeywords(call, CAMERA_KEYS)
+    // Validated rather than read bare: an osc() descriptor or a wrong-arity
+    // array used to travel all the way to the view matrix and turn it to NaN,
+    // with nothing reporting why the scene had gone black.
+    const near = numberKw(call, 'near', DEFAULT_CAMERA.near, { min: 1e-6, rangeLabel: 'greater than zero' })
+    const far = numberKw(call, 'far', DEFAULT_CAMERA.far, { min: 1e-6, rangeLabel: 'greater than zero' })
+    if (far <= near) {
+        throw sceneError('far must be greater than near', call.kwargs?.far ?? call)
+    }
     return {
-        fov: kw(call, 'fov') ?? 60,
-        near: kw(call, 'near') ?? 0.1,
-        far: kw(call, 'far') ?? 1000,
-        position: kw(call, 'pos') ?? [0, 0, 5],
-        target: kw(call, 'target') ?? [0, 0, 0]
+        fov: numberKw(call, 'fov', DEFAULT_CAMERA.fov, { min: 1e-6, max: 179, rangeLabel: 'between 0 and 179 degrees' }),
+        near,
+        far,
+        position: vectorKw(call, 'pos', DEFAULT_CAMERA.position, 3),
+        target: vectorKw(call, 'target', DEFAULT_CAMERA.target, 3)
     }
 }
 
@@ -194,23 +257,27 @@ function buildLight(call) {
         throw sceneError(`Unknown light type '${type}'`, call.kwargs?.type ?? call)
     }
     assertKnownKeywords(call, LIGHT_KEYS[type])
+    // Vectors and scalars are validated here for the same reason as the camera:
+    // an osc() descriptor read bare reached uniform3fv and NaN'd the light.
+    // Intensity is the one channel bindings can animate, so it stays permissive
+    // and is sanitized by collectBindings instead.
     const light = {
         type,
-        color: kw(call, 'color') ?? [1, 1, 1],
+        color: vectorKw(call, 'color', [1, 1, 1], 3, { nonNegative: true }),
         intensity: kw(call, 'intensity') ?? 1
     }
     if (type === 'directional') {
-        light.direction = kw(call, 'dir') ?? [0, -1, 0]
+        light.direction = vectorKw(call, 'dir', [0, -1, 0], 3)
     } else {
-        light.position = kw(call, 'pos') ?? [0, 0, 0]
+        light.position = vectorKw(call, 'pos', [0, 0, 0], 3)
         light.falloff = numberKw(call, 'falloff', 1, {
             min: 0,
             rangeLabel: 'non-negative'
         })
         if (type === 'spot') {
-            light.direction = kw(call, 'dir') ?? [0, -1, 0]
-            light.angle = kw(call, 'angle') ?? 45
-            light.penumbra = kw(call, 'penumbra') ?? 0.1
+            light.direction = vectorKw(call, 'dir', [0, -1, 0], 3)
+            light.angle = numberKw(call, 'angle', 45, { min: 0, max: 180, rangeLabel: 'between 0 and 180 degrees' })
+            light.penumbra = numberKw(call, 'penumbra', 0.1, { min: 0, max: 1, rangeLabel: 'between 0 and 1' })
         }
     }
     return light
@@ -389,7 +456,7 @@ function walkNode(
             if (!shapeKeys.has(key)) {
                 throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, val)
             }
-            node.meshParams[key] = litValue(val)
+            node.meshParams[key] = validateMeshParam(key, litValue(val), val)
         }
     }
     if (reflectorLinks.length === 1) {
@@ -518,6 +585,13 @@ export function compileScene(compilationResult) {
                 )
         }
     }
+
+    // A scene may legitimately declare no camera — every camera keyword has a
+    // default, so the node as a whole is optional too. Filling it in here keeps
+    // the renderer's contract simple: ir.camera is always present. Leaving it
+    // null made mesh-renderer dereference it once per frame, which surfaced as
+    // a black canvas and a console.error inside the render loop.
+    if (!ir.camera) ir.camera = defaultCamera()
 
     return ir
 }
