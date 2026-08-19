@@ -801,6 +801,95 @@ async function testMaterialsLabOscillatorAnimation(browser, port) {
   }
 }
 
+/**
+ * Render one fixed scene on both backends and compare the lit colour buffer.
+ *
+ * The scene work claimed bit-identical output between WebGL2 and WebGPU, but
+ * nothing compared them: every other case runs one backend at a time and
+ * asserts only that the canvas is not flat. This reads scene_lit_color from
+ * both and reports the real delta.
+ */
+const CROSS_BACKEND_SCENE = `search synth
+scene(
+  background: [0.02, 0.02, 0.03],
+  ambient: 0.2,
+  camera(fov: 55, pos: [0, 2.5, -6], target: [0, 0.5, 0]),
+  light(type: "directional", dir: [1, -1, 1], intensity: 2),
+  mesh("sphere", radius: 1.2, segments: 48, pos: [-1.4, 1, 0])
+    .material(solid(color: [0.9, 0.3, 0.2]).pbr(metallic: 0.1, roughness: 0.5)),
+  mesh("box", size: [1.4, 1.4, 1.4], pos: [1.4, 0.7, 0])
+    .material(solid(color: [0.2, 0.5, 0.9]).pbr(metallic: 0.8, roughness: 0.3)),
+  mesh("plane", width: 12, height: 12)
+    .material(solid(color: [0.35, 0.35, 0.35]).pbr(metallic: 0, roughness: 0.9))
+).write(o0)
+render(o0)`
+
+async function litColorFor(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const url = `http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+    await page.getByRole('button', { name: 'Edit DSL program' }).click()
+    await page.getByRole('textbox').fill(CROSS_BACKEND_SCENE)
+    await page.getByRole('button', { name: 'run', exact: true }).click()
+    await page.waitForFunction(
+      () => document.getElementById('status')?.textContent === 'compiled successfully',
+      { timeout: 15000 }
+    )
+    await page.waitForTimeout(500)
+    return await page.evaluate(async () => {
+      const renderer = window.__noisemakerCanvasRenderer
+      renderer.stop()
+      // A fixed time so both backends render the same frame.
+      await renderer.render(0.25)
+      const image = await renderer.sceneRenderer.backend.readPixels('scene_lit_color')
+      return { width: image.width, height: image.height, data: Array.from(image.data) }
+    })
+  } finally {
+    await context.close()
+  }
+}
+
+async function testCrossBackendParity(browser, port) {
+  const sceneName = 'cross-backend lit colour parity'
+  console.log(`\n--- Testing ${sceneName} ---`)
+  const [a, b] = [await litColorFor(browser, port, 'webgl2'), await litColorFor(browser, port, 'webgpu')]
+
+  if (a.width !== b.width || a.height !== b.height) {
+    return [{ scene: sceneName, backend: 'both', status: 'fail',
+      reason: `size mismatch: ${a.width}x${a.height} vs ${b.width}x${b.height}` }]
+  }
+
+  let maxDelta = 0
+  let differing = 0
+  for (let i = 0; i < a.data.length; i++) {
+    const delta = Math.abs(a.data[i] - b.data[i])
+    if (delta > 0) differing++
+    if (delta > maxDelta) maxDelta = delta
+  }
+  const pct = (differing / a.data.length) * 100
+  console.log(`  Cross-backend: maxDelta=${maxDelta} differing=${pct.toFixed(4)}%`)
+
+  // This is a ceiling, not a parity assertion. The scene path is NOT
+  // bit-identical across backends: measured at maxDelta 35 over ~14.5% of
+  // channels on this scene. The G-buffer and lighting run in float and the two
+  // shader compilers reassociate differently, so some drift is expected — but
+  // 35/255 is well beyond float noise and is a real divergence still to be
+  // tracked down. The gate exists so it cannot silently get worse in the
+  // meantime; tighten it as the causes are found.
+  const CEILING = 40
+  const withinCeiling = maxDelta <= CEILING
+  return [{
+    scene: sceneName,
+    backend: 'webgl2-vs-webgpu',
+    status: withinCeiling ? 'pass' : 'fail',
+    reason: `maxDelta=${maxDelta} over ${pct.toFixed(4)}% of channels (ceiling ${CEILING}; not bit-identical)`
+  }]
+}
+
 async function main() {
   const { server, port } = await startServer()
   console.log(`Server on port ${port}`)
@@ -840,6 +929,7 @@ async function main() {
     results.push(await testRoughMaterialReflectionStability(browser, port, 'webgpu'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgl2'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
+    results.push(...(await testCrossBackendParity(browser, port)))
   }
   if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']

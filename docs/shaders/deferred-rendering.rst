@@ -8,8 +8,17 @@ G-buffer from the mesh hierarchy, lights it once in screen space with a
 Cook-Torrance BRDF, adds ambient occlusion and reflections, tonemaps, and
 presents into a texture the 2D pipeline then treats as an ordinary source.
 
-Every pass is written twice — once in GLSL and once in WGSL — and both backends
-are held to bit-identical output by the render tests.
+Every pass is written twice — once in GLSL and once in WGSL.
+
+.. warning::
+
+   **The two backends are not bit-identical.** A cross-backend comparison of
+   ``scene_lit_color`` on a fixed scene measures a maximum channel delta of 35
+   across roughly 14.5% of channels. Some drift is inherent — the G-buffer and
+   lighting run in float, and the two shader compilers reassociate differently —
+   but that magnitude is well beyond float noise and is an open divergence, not
+   an accepted tolerance. ``test_visual_playwright.js`` gates the delta against
+   a ceiling so it cannot silently widen while the causes are tracked down.
 
 .. note::
 
@@ -298,7 +307,7 @@ Backend parity
 Each shader is two independently hand-written sources selected by backend
 identity, not one source cross-compiled. Only the SSAO kernel and the light
 count are genuinely shared, templated into both. Everything else must be kept in
-step by hand, which is what the bit-identical parity tests exist to enforce.
+step by hand, which is what the cross-backend parity gate exists to bound.
 
 The WGSL side carries documented compensations for the API differences: clip
 space is fixed up in the vertex stage because WebGPU's Y is down and Z spans
