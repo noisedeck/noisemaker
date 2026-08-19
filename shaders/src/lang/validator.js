@@ -760,12 +760,29 @@ export function validate(ast) {
                 }
                 const seen = new Set()
                 const specArgs = spec.args || []
+                // Positional arguments are consumed in source order against the
+                // slots a keyword has not already filled. `call.args` holds only
+                // the positionals (the parser routes keywords into `kw`), so it
+                // must be walked with its own cursor rather than indexed by slot
+                // — otherwise the first keyword shifts every later positional
+                // and the trailing one falls off the end.
+                let posCursor = 0
                 for (let i = 0; i < specArgs.length; i++) {
                     const def = specArgs[i]
-                    let node = kw && kw[def.name] !== undefined ? kw[def.name] : call.args[i]
+                    const fromKeyword = kw && kw[def.name] !== undefined
+                    let node
+                    if (fromKeyword) {
+                        node = kw[def.name]
+                    } else if (posCursor < call.args.length) {
+                        node = call.args[posCursor]
+                        posCursor++
+                    }
                     node = substitute(node)
                     const argKey = def.name
-                    if (!kw && node && node.type === 'Color' && def.type !== 'color' && def.name === 'r' && specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b') {
+                    // A single positional hex colour splats across an r/g/b
+                    // triple. An explicit `g:`/`b:` keyword always wins, so the
+                    // splat stands down rather than overwriting it.
+                    if (!fromKeyword && node && node.type === 'Color' && def.type !== 'color' && def.name === 'r' && specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b' && !(kw && kw.g !== undefined) && !(kw && kw.b !== undefined)) {
                         const [r, g, b] = node.value
                         args[argKey] = r
                         const defG = specArgs[i + 1]
@@ -1349,6 +1366,15 @@ export function validate(ast) {
                             pushDiag('S001', kw[key], `Unknown argument '${key}' for ${call.name}()`)
                         }
                     }
+                }
+
+                // Positionals left over after every slot is filled correspond to
+                // no parameter. Before mixed argument order was allowed these
+                // were a parse error; without this they bind to nothing and the
+                // call renders with a default in their place.
+                if (posCursor < call.args.length) {
+                    const extra = call.args[posCursor]
+                    pushDiag('S001', extra || call, `Too many positional arguments for ${call.name}(): '${call.name}' takes ${specArgs.length}`)
                 }
                 const hook = typeof call.name === 'string' ? validatorHooks[call.name] : null
                 if (typeof hook === 'function') {

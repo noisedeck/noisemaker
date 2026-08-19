@@ -137,3 +137,71 @@ test('Existing hex Color still produces same value for vec4', 'search synth\nvec
         throw new Error('Hex color path changed: ' + JSON.stringify(args.pos4))
     }
 })
+
+// ---------------------------------------------------------------------------
+// Mixed positional/keyword argument binding.
+//
+// Relaxing the "positional and keyword arguments are mutually exclusive" rule
+// (needed so scene() can carry settings as keywords beside child nodes as
+// positionals) left the binding loop indexing the dense positional list by
+// parameter slot. Once a keyword fills a slot, every later positional shifts
+// and falls off the end.
+// ---------------------------------------------------------------------------
+
+registerOp('filter.blur', {
+    name: 'blur',
+    args: [
+        { name: 'amount', type: 'float', default: 0.1 },
+        { name: 'angle', type: 'float', default: 0 },
+        { name: 'quality', type: 'float', default: 1 }
+    ]
+})
+
+registerOp('filter.tint', {
+    name: 'tint',
+    args: [
+        { name: 'r', type: 'float', default: 1 },
+        { name: 'g', type: 'float', default: 1 },
+        { name: 'b', type: 'float', default: 1 },
+        { name: 'alpha', type: 'float', default: 1 }
+    ]
+})
+
+function argsOf(result, op) {
+    const step = result.plans[0].chain.find(s => s.op === op)
+    if (!step) throw new Error(`no '${op}' step in chain: ${result.plans[0].chain.map(s => s.op).join(', ')}`)
+    return step.args
+}
+
+test('positional after keyword binds to the next unfilled slot',
+    'search synth, filter\nnoise().blur(0.9, angle: 0.5, 4).write(o0)', (result) => {
+        const a = argsOf(result, 'filter.blur')
+        if (a.amount !== 0.9) throw new Error(`amount: expected 0.9, got ${a.amount}`)
+        if (a.angle !== 0.5) throw new Error(`angle: expected 0.5, got ${a.angle}`)
+        if (a.quality !== 4) throw new Error(`quality: expected 4, got ${a.quality} (positional was dropped)`)
+    })
+
+test('keyword first, then positionals fill remaining slots in order',
+    'search synth, filter\nnoise().blur(angle: 0.5, 0.9, 4).write(o0)', (result) => {
+        const a = argsOf(result, 'filter.blur')
+        if (a.amount !== 0.9) throw new Error(`amount: expected 0.9, got ${a.amount}`)
+        if (a.angle !== 0.5) throw new Error(`angle: expected 0.5, got ${a.angle}`)
+        if (a.quality !== 4) throw new Error(`quality: expected 4, got ${a.quality}`)
+    })
+
+test('excess positional arguments are diagnosed, not silently dropped',
+    'search synth, filter\nnoise().kaleid(4, 9, 9).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => /too many|excess|positional/i.test(d.message || ''))
+        if (!diag) {
+            throw new Error(`Expected a diagnostic for excess positionals, got ${JSON.stringify(result.diagnostics)}`)
+        }
+    })
+
+test('hex color still splats across r/g/b when another keyword is present',
+    'search synth, filter\nnoise().tint(#ff8000, alpha: 0.5).write(o0)', (result) => {
+        const a = argsOf(result, 'filter.tint')
+        if (Math.abs(a.r - 1) > 1e-6) throw new Error(`r: expected 1, got ${a.r}`)
+        if (Math.abs(a.g - 0.502) > 0.01) throw new Error(`g: expected ~0.502, got ${a.g}`)
+        if (Math.abs(a.b - 0) > 1e-6) throw new Error(`b: expected 0, got ${a.b}`)
+        if (a.alpha !== 0.5) throw new Error(`alpha: expected 0.5, got ${a.alpha}`)
+    })

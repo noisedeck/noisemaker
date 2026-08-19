@@ -147,12 +147,18 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
@@ -200,12 +206,18 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
@@ -250,12 +262,18 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
