@@ -57,6 +57,9 @@ function float16ToFloat32(h) {
  * @param {string|undefined} cullMode - 'none' | 'front' | 'back' | undefined
  * @returns {{cullMode: string, frontFace?: string}} WebGPU primitive state
  */
+/** How many distinct viewport sizes keep a depth texture alive. */
+const DEPTH_TEXTURE_CACHE_LIMIT = 4
+
 export function resolveCullState(cullMode) {
     if (cullMode === 'none') return { cullMode: 'none' }
     return { cullMode: cullMode === 'front' ? 'front' : 'back', frontFace: 'cw' }
@@ -2092,15 +2095,51 @@ export class WebGPUBackend extends Backend {
         if (!this.depthTextures) this.depthTextures = new Map()
         const key = `${width}x${height}`
         let depthTexture = this.depthTextures.get(key)
-        if (!depthTexture) {
-            depthTexture = this.device.createTexture({
-                size: { width, height, depthOrArrayLayers: 1 },
-                format: 'depth24plus',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT
-            })
+        if (depthTexture) {
+            // Refresh recency: Map iterates in insertion order, so re-inserting
+            // moves this size to the young end for eviction purposes.
+            this.depthTextures.delete(key)
             this.depthTextures.set(key, depthTexture)
+            return depthTexture
+        }
+        depthTexture = this.device.createTexture({
+            size: { width, height, depthOrArrayLayers: 1 },
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
+        })
+        this.depthTextures.set(key, depthTexture)
+
+        // Bound the cache. Keyed by size and never evicted, a resize drag
+        // allocated one depth24plus texture per distinct viewport size and kept
+        // every one of them until destroy().
+        while (this.depthTextures.size > DEPTH_TEXTURE_CACHE_LIMIT) {
+            const oldestKey = this.depthTextures.keys().next().value
+            const evicted = this.depthTextures.get(oldestKey)
+            this.depthTextures.delete(oldestKey)
+            this.retireDepthTexture(evicted)
         }
         return depthTexture
+    }
+
+    /**
+     * Destroy an evicted depth texture once the GPU has finished with it.
+     *
+     * Destroying a texture an in-flight command buffer still references is a
+     * validation error, which is why eviction cannot be immediate. Retirements
+     * are batched behind a single onSubmittedWorkDone().
+     * @param {GPUTexture} texture - Evicted depth texture
+     */
+    retireDepthTexture(texture) {
+        if (!texture) return
+        if (!this._retiredDepthTextures) this._retiredDepthTextures = []
+        this._retiredDepthTextures.push(texture)
+        if (this._depthRetireScheduled) return
+        this._depthRetireScheduled = true
+        this.device.queue.onSubmittedWorkDone().then(() => {
+            for (const retired of this._retiredDepthTextures) retired.destroy()
+            this._retiredDepthTextures.length = 0
+            this._depthRetireScheduled = false
+        })
     }
 
     /**

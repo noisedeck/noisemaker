@@ -394,6 +394,11 @@ export class WebGL2Backend extends Backend {
             return
         }
 
+        // executePass binds the target FBO before calling this and draws right
+        // after, so the caller's binding has to survive. Finishing on null sent
+        // that draw to the default framebuffer instead.
+        const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING)
+
         // Create new depth renderbuffer
         const depthBuffer = gl.createRenderbuffer()
         gl.bindRenderbuffer(gl.RENDERBUFFER, depthBuffer)
@@ -409,7 +414,7 @@ export class WebGL2Backend extends Backend {
             console.warn(`[ensureDepthBuffer] FBO incomplete after adding depth: ${status}`)
         }
 
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer)
         gl.bindRenderbuffer(gl.RENDERBUFFER, null)
 
         this.depthBuffers.set(fbo, { buffer: depthBuffer, width, height })
@@ -781,6 +786,7 @@ export class WebGL2Backend extends Backend {
         // Delete single-texture FBO for this texture
         const fbo = this.fbos.get(id)
         if (fbo) {
+            this.releaseDepthBuffer(fbo)
             gl.deleteFramebuffer(fbo)
             this.fbos.delete(id)
         }
@@ -794,9 +800,29 @@ export class WebGL2Backend extends Backend {
             }
         }
         for (const mrtId of mrtToDelete) {
-            gl.deleteFramebuffer(this.fbos.get(mrtId))
+            const mrtFbo = this.fbos.get(mrtId)
+            this.releaseDepthBuffer(mrtFbo)
+            gl.deleteFramebuffer(mrtFbo)
             this.fbos.delete(mrtId)
         }
+    }
+
+    /**
+     * Release the depth renderbuffer attached to an FBO, if any.
+     *
+     * depthBuffers is keyed by the WebGLFramebuffer object itself, so deleting
+     * the framebuffer without this both leaks the DEPTH_COMPONENT24 storage and
+     * leaves a Map entry keyed by a dead object. SceneRenderer.resize()
+     * destroys and recreates every scene texture, so that happened once per FBO
+     * per resize event.
+     * @param {WebGLFramebuffer} fbo - Framebuffer being deleted
+     */
+    releaseDepthBuffer(fbo) {
+        if (!fbo) return
+        const depth = this.depthBuffers.get(fbo)
+        if (!depth) return
+        this.gl.deleteRenderbuffer(depth.buffer)
+        this.depthBuffers.delete(fbo)
     }
 
     /**
