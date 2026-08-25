@@ -4,6 +4,7 @@ import { SceneNode } from '../src/scene/node.js'
 import { CameraNode } from '../src/scene/camera.js'
 import { LightNode } from '../src/scene/light.js'
 import { MeshNode } from '../src/scene/mesh-node.js'
+import { VolumeNode } from '../src/scene/volume-node.js'
 import { SceneTree } from '../src/scene/tree.js'
 
 function approx(a, b, eps = 1e-4) {
@@ -251,6 +252,58 @@ function approx(a, b, eps = 1e-4) {
   } finally {
     console.warn = realWarn
   }
+}
+
+// VolumeNode
+{
+  const volume = new VolumeNode({
+    surface: 'vol2',
+    threshold: 0.25,
+    material: 'mat_1',
+    position: [0, 1, 0]
+  })
+  assert.strictEqual(volume.surface, 'vol2')
+  assert.strictEqual(volume.threshold, 0.25)
+  assert.strictEqual(volume.materialId, 'mat_1')
+  assert.deepStrictEqual(volume.position, [0, 1, 0])
+  assert.ok(volume instanceof SceneNode, 'volumes are scene nodes')
+  assert.ok(!(volume instanceof MeshNode), 'volumes are not meshes')
+}
+
+// Volume nodes build from IR, inherit group transforms, and are collected
+// separately from meshes — the mesh renderer must never see one.
+{
+  const ir = {
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [],
+    nodes: [
+      { id: 'rig', type: 'group', parent: null, transform: { position: [10, 0, 0] }, children: [1, 2] },
+      { id: 'cloud', type: 'volume', parent: 0, surface: 'vol0', threshold: 0.4, material: 'mat_0', transform: { position: [0, 5, 0] }, children: [] },
+      { id: 'floor', type: 'mesh', parent: 0, meshType: 'plane', meshParams: {}, transform: {}, children: [] }
+    ],
+    settings: {},
+    materials: { mat_0: {} }
+  }
+  const tree = SceneTree.fromIR(ir)
+  const volumes = tree.getVolumeNodes()
+  assert.strictEqual(volumes.length, 1, 'one volume collected')
+  assert.strictEqual(volumes[0].surface, 'vol0', 'vol surface carried through')
+  assert.strictEqual(volumes[0].threshold, 0.4, 'threshold carried through')
+  assert.strictEqual(volumes[0].materialId, 'mat_0', 'material id carried through')
+
+  assert.strictEqual(tree.getMeshNodes().length, 1, 'volumes are not mesh nodes')
+  assert.strictEqual(tree.getMeshNodes()[0].id, 'floor', 'the mesh is the plane')
+
+  // Parent transforms compose, and the dirty flag propagates, exactly as for
+  // a mesh — the volume pass reads getWorldMatrix() the same way.
+  const world = volumes[0].getWorldMatrix()
+  approx(world[12], 10)
+  approx(world[13], 5)
+  assert.ok(!volumes[0]._dirty, 'clean after getWorldMatrix')
+  tree.getById('rig').position = [0, 0, 0]
+  assert.ok(volumes[0]._dirty, 'dirty after the parent moves')
+
+  assert.strictEqual(tree.getPlanarReflector(), null, 'a volume is never a planar reflector')
 }
 
 console.log('Scene tree tests passed')

@@ -47,7 +47,8 @@ and everything downstream of that write is ordinary effect chaining.
    This is mesh rendering — cameras, geometry and PBR materials. It is a
    separate subsystem from :ref:`the volumetric 3D pipeline <shader-3d-pipeline>`,
    which marches density fields held in ``vol`` and ``geo`` surfaces. Both
-   terminate in ordinary surfaces, so they can be composited together.
+   terminate in ordinary surfaces, so they can be composited together, and
+   `Volumes`_ brings a ``vol`` surface into the scene graph as a node.
 
 Structure
 ---------
@@ -56,7 +57,8 @@ Structure
 
    SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'
    SceneArg       ::= Setting | CameraCall | LightCall | EnvironmentCall | NodeChain
-   NodeChain      ::= ( MeshCall | GroupCall ) ( '.' NodeLink )*
+   NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) ( '.' NodeLink )*
+   VolumeCall     ::= 'volume' '(' VolRef ( ',' Kwarg )* ')'
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
    MaterialCall   ::= 'material' '(' MaterialSpec ')'
    MaterialSpec   ::= ( 'solid' | 'surface' ) '(' ArgList? ')' ( '.' MaterialTerm )*
@@ -65,8 +67,8 @@ Structure
 Only one ``scene()`` is permitted per program. Scene children are positional
 arguments; settings are keyword arguments, and the two may be interleaved.
 
-Permitted direct children are ``camera``, ``light``, ``environment``, ``mesh``
-and ``group``. Anything else raises ``Unknown scene child '<name>'``.
+Permitted direct children are ``camera``, ``light``, ``environment``, ``mesh``,
+``volume`` and ``group``. Anything else raises ``Unknown scene child '<name>'``.
 
 Name resolution
 ^^^^^^^^^^^^^^^
@@ -77,8 +79,9 @@ material source and the ``synth/solid`` generator, and a top-level ``solid()``
 under ``search synth`` still compiles to the 2D effect.
 
 Only ``scene`` falls through to the scene layer when no effect matches. The
-other ten names — ``camera``, ``light``, ``environment``, ``mesh``, ``group``,
-``material``, ``solid``, ``surface``, ``pbr`` and ``emit`` — are children
+other eleven names — ``camera``, ``light``, ``environment``, ``mesh``,
+``volume``, ``group``, ``material``, ``solid``, ``surface``, ``pbr`` and
+``emit`` — are children
 *inside* a ``scene()`` call and never reach the chain. Written as a chain
 element with no effect behind them they raise
 ``Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside
@@ -287,11 +290,101 @@ must be a vec3 of finite numbers.
 
    mesh("torus", radius: 1, tube: 0.32, pos: [3, -0.28, 0])
 
+Volumes
+-------
+
+``volume()`` places a density volume in the scene graph. Its positional
+argument is one of the pipeline's eight volume surfaces, so a 3D program that
+fills an atlas with ``write3d()`` becomes a node beside the meshes rather than a
+separate fullscreen marcher with its own camera and lights. Like the rest of
+this page it is a preview surface, and it is subject to the change policy in the
+note at the top.
+
+.. code-block:: none
+
+   search synth3d
+
+   noise3d().write3d(vol0, geo0)
+
+   scene(
+     camera(fov: 60, pos: [0, 2, -6]),
+     light(type: "directional", dir: [1, -1, 1]),
+     volume(vol0, threshold: 0.5, pos: [0, 1, 0], scale: [2, 2, 2])
+       .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7)),
+     mesh("plane", width: 10, height: 10)
+   ).write(o0)
+
+   render(o0)
+
+The positional argument must be a volume reference (``vol0``–``vol7``). A
+surface reference, a string, an out-of-range index, or no argument at all raises
+``volume() expects a volume reference (vol0..vol7)``, and a second positional
+raises ``volume() takes one positional argument, the volume reference``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 12 74
+
+   * - Keyword
+     - Default
+     - Meaning
+   * - ``threshold``
+     - ``0.5``
+     - Iso level, in ``0..1``. The isosurface is where the volume's density
+       crosses this value — the same meaning the ``threshold`` uniform carries
+       in the ``render3d`` family.
+   * - ``id``
+     - —
+     - Optional name, useful for locating a node from host code.
+   * - ``pos``
+     - ``[0, 0, 0]``
+     - Translation, exactly 3 components.
+   * - ``rot``
+     - ``[0, 0, 0]``
+     - Rotation in degrees, exactly 3 components.
+   * - ``scale``
+     - ``[1, 1, 1]``
+     - Scale, exactly 3 components.
+
+Anything outside that set raises ``Unknown keyword '<name>' for volume()``
+rather than being dropped in silence. The transform keywords behave exactly as
+they do on ``mesh()``: they compose down a ``group()`` hierarchy and accept
+``osc()`` descriptors in place of numbers.
+
+A volume takes a ``.material()`` on the same terms as a mesh — ``solid()``,
+refined by ``.pbr()`` and ``.emit()`` — and inherits a group's material when it
+declares none. ``surface()`` is the one exception: a raymarched isosurface has
+no UVs to map a texture onto, so both ``volume(vol0).material(surface(o2))`` and
+a volume inheriting such a material from its group raise ``volume() cannot take
+a surface() material``.
+
+.. note::
+
+   The scene draws before the pipeline each tick, so a scene pass reading
+   ``vol0`` samples the surface's **previous-frame** content. This is the same
+   contract ``surface(oN)`` materials and ``environment(oN)`` already live
+   under, and it is visible only as a one-frame lag between a volume's producer
+   and the scene that draws it.
+
+Three behaviours worth knowing:
+
+- **Extent.** A volume's body space is the local ``[-1, 1]`` cube — the same
+  space the volumetric renderers march — so a ``volume()`` at ``scale: 1``
+  spans **two** world units per axis, where ``mesh("box")`` at ``scale: 1``
+  spans one. Halve the scale to match a unit box.
+- **Resolution.** The ``vol0``–``vol7`` atlases are fixed at 64 cubed. A
+  ``volume()`` node samples a 64-cube regardless of the ``volumeSize`` the
+  producing effect was configured with.
+- **Reflections.** Volumes are lit by scene lights and occlude meshes through
+  the shared depth buffer, but they do not yet appear in planar reflections or
+  the reflection probe — those passes render meshes only.
+
 Groups and transforms
 ---------------------
 
-``group()`` nests nodes. Its positional arguments are child ``mesh()`` or
-``group()`` chains, and its transform applies to the whole subtree. Its only
+``group()`` nests nodes. Its positional arguments are child ``mesh()``,
+``volume()`` or ``group()`` chains, and its transform applies to the whole
+subtree. Its only
 keywords are the four transform keywords below; anything else raises
 ``Unknown keyword '<name>' for group()``.
 
@@ -302,7 +395,7 @@ keywords are the four transform keywords below; anything else raises
      mesh("box", size: [1.1, 1.1, 1.1], pos: [-3, -0.05, 0])
    )
 
-Both ``mesh()`` and ``group()`` accept the same transform keywords:
+``mesh()``, ``volume()`` and ``group()`` accept the same transform keywords:
 
 .. list-table::
    :header-rows: 1
@@ -439,6 +532,7 @@ Sources
 -------
 
 ``shaders/src/rendering/scene-compiler.js`` — DSL to scene IR;
-``shaders/src/scene/`` — tree, nodes, camera, lights, transform math, clock and
-animation bindings; ``shaders/src/geometry/primitives.js`` — primitive builders;
+``shaders/src/scene/`` — tree, nodes (including ``volume-node.js``), camera,
+lights, transform math, clock and animation bindings;
+``shaders/src/geometry/primitives.js`` — primitive builders;
 ``shaders/src/lang/validator.js`` — ``SCENE_FUNCTIONS`` passthrough.

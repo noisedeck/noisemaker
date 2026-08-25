@@ -14,6 +14,7 @@
 import assert from 'node:assert'
 import { compile } from '../src/lang/index.js'
 import { unparse } from '../src/lang/unparser.js'
+import { compileScene } from '../src/rendering/scene-compiler.js'
 
 let passed = 0
 let failed = 0
@@ -79,6 +80,32 @@ scene(
   mesh("torus", rot: [0, osc(oscKind.saw, min: 0, max: 360), 0])
 ).write(o0)
 render(o0)`, 'oscillator')
+})
+
+// ---------------------------------------------------------------------------
+// volume() carries a VolRef positional, which the unparser emits from the same
+// branch as every other surface reference. The reparsed program must compile to
+// the same scene IR, not merely to text that parses.
+// ---------------------------------------------------------------------------
+
+test('a volume() scene child round-trips and recompiles to the same IR', () => {
+    const src = `search synth
+noise3d().write3d(vol0, geo0)
+scene(
+  camera(fov: 60, pos: [0, 2, -6]),
+  light(type: "directional", dir: [1, -1, 1]),
+  volume(vol0, threshold: 0.5, pos: [0, 1, 0], scale: [2, 2, 2])
+    .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7)),
+  mesh("plane", width: 10, height: 10)
+).write(o0)
+render(o0)`
+    const out = assertStable(src, 'volume scene')
+    assert.match(out, /volume\(vol0, threshold: 0\.5/, 'keeps the volume reference and its keywords')
+    assert.match(out, /\.material\(solid\(/, 'keeps the material chain on the volume')
+    assert.deepStrictEqual(
+        compileScene(compile(out)),
+        compileScene(compile(src)),
+        'the reparsed program compiles to the same scene IR')
 })
 
 test('an object literal in a let binding round-trips', () => {

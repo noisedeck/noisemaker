@@ -100,4 +100,24 @@ function build(src) {
   )
 }
 
+// A volume node animates exactly like a mesh: collectBindings walks every
+// node in the tree, so the vol atlas placement is driven by the same clock.
+{
+  const { tree, bindings } = build(`
+    search synth
+    scene(
+      volume(vol0, threshold: 0.4, rot: [0, osc(type: oscKind.saw), 0])
+    ).write(o0)
+  `)
+  assert.strictEqual(bindings.length, 1, 'one volume binding collected')
+  assert.strictEqual(bindings[0].channel, 'rotation', 'rotation channel')
+  const volume = tree.getVolumeNodes()[0]
+  assert.strictEqual(volume.rotation[1], 0, 'saw starts at zero degrees')
+  volume.getWorldMatrix()
+  evaluateBindings(bindings, 0.25)
+  assert.strictEqual(volume.rotation[1], 90, 'quarter loop maps to 90 degrees')
+  assert.strictEqual(volume._dirty, true, 'dirty after evaluation')
+  assert.strictEqual(volume.threshold, 0.4, 'threshold is untouched by bindings')
+}
+
 console.log('Scene bindings tests passed')

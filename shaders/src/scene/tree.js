@@ -3,6 +3,7 @@ import { SceneNode } from './node.js'
 import { CameraNode } from './camera.js'
 import { LightNode } from './light.js'
 import { MeshNode } from './mesh-node.js'
+import { VolumeNode } from './volume-node.js'
 
 export class SceneTree {
   constructor() {
@@ -49,6 +50,13 @@ export class SceneTree {
             material: desc.material,
             planarReflection: desc.planarReflection
           })
+        } else if (desc.type === 'volume') {
+          return new VolumeNode({
+            ...opts,
+            surface: desc.surface,
+            threshold: desc.threshold,
+            material: desc.material
+          })
         } else {
           // 'group' or other types
           return new SceneNode(opts)
@@ -83,6 +91,16 @@ export class SceneTree {
     const result = []
     this._traverse(this.root, node => {
       if (node instanceof MeshNode) {
+        result.push(node)
+      }
+    })
+    return result
+  }
+
+  getVolumeNodes() {
+    const result = []
+    this._traverse(this.root, node => {
+      if (node instanceof VolumeNode) {
         result.push(node)
       }
     })

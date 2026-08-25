@@ -654,4 +654,123 @@ function irFor(src) {
   assert.strictEqual(group.children.length, 1, 'group child kept')
 }
 
+// ---------------------------------------------------------------------------
+// volume() — a scene child whose positional is a vol surface.
+//
+// The volumetric path used to live entirely outside the scene graph: a
+// fullscreen render3d() marcher with its own hardwired camera and lights. A
+// volume node puts a vol atlas into the same tree as the meshes, so it takes
+// the same transform keywords, the same material chain, and the same
+// diagnostics.
+// ---------------------------------------------------------------------------
+{
+  const ir = irFor(`
+    search synth
+    scene(
+      camera(fov: 60, pos: [0, 2, -6]),
+      volume(vol3, threshold: 0.25, id: "cloud", pos: [0, 1, 0], rot: [0, 45, 0], scale: [2, 2, 2])
+        .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7))
+    ).write(o0)
+  `)
+  assert.strictEqual(ir.nodes.length, 1, 'one volume node')
+  const node = ir.nodes[0]
+  assert.strictEqual(node.type, 'volume', 'node type')
+  assert.strictEqual(node.surface, 'vol3', 'vol surface name')
+  assert.strictEqual(node.threshold, 0.25, 'threshold keyword')
+  assert.strictEqual(node.id, 'cloud', 'id keyword')
+  assert.deepStrictEqual(node.transform.position, [0, 1, 0], 'pos keyword')
+  assert.deepStrictEqual(node.transform.rotation, [0, 45, 0], 'rot keyword')
+  assert.deepStrictEqual(node.transform.scale, [2, 2, 2], 'scale keyword')
+  assert.strictEqual(node.parent, null, 'root-level volume')
+  assert.deepStrictEqual(node.children, [], 'volumes have no children')
+  assert.strictEqual(typeof node.material, 'string', 'material interned by key')
+  const mat = ir.materials[node.material]
+  assert.deepStrictEqual(mat.baseColor, [0.9, 0.4, 0.2], 'solid() colour')
+  assert.strictEqual(mat.pbr.roughness, 0.7, 'pbr() roughness')
+}
+
+// threshold defaults to 0.5 — the iso level render3d uses — and a volume
+// without a material leaves the key unset, exactly as a mesh does.
+{
+  const ir = irFor('search synth\nscene(camera(fov: 60), volume(vol0)).write(o0)')
+  assert.strictEqual(ir.nodes[0].threshold, 0.5, 'default iso level')
+  assert.strictEqual(ir.nodes[0].material, undefined, 'no material key')
+  assert.deepStrictEqual(ir.nodes[0].transform, {}, 'no transform keywords')
+}
+
+// A volume nests in a group and inherits the group's material, like a mesh.
+{
+  const ir = irFor(`
+    search synth
+    scene(
+      camera(fov: 60),
+      group(id: "rig", pos: [1, 0, 0],
+        volume(vol1, threshold: 0.75)
+      ).material(solid(color: [0, 1, 0]))
+    ).write(o0)
+  `)
+  const group = ir.nodes.find(n => n.type === 'group')
+  const volume = ir.nodes.find(n => n.type === 'volume')
+  assert.ok(group && volume, 'both nodes present')
+  assert.strictEqual(volume.parent, ir.nodes.indexOf(group), 'volume parented to the group')
+  assert.deepStrictEqual(group.children, [ir.nodes.indexOf(volume)], 'group lists the volume')
+  assert.strictEqual(volume.material, group.material, 'material inherited from the group')
+}
+
+// osc() in a volume transform is canonicalized the same way as on a mesh, so
+// the bindings walker finds it.
+{
+  const ir = irFor(`
+    search synth
+    scene(camera(fov: 60), volume(vol0, rot: [0, osc(type: oscKind.saw), 0])).write(o0)
+  `)
+  const rot = ir.nodes[0].transform.rotation
+  assert.strictEqual(rot[1].type, 'Oscillator', 'osc() descriptor preserved')
+  assert.strictEqual(rot[0], 0, 'literal components untouched')
+}
+
+// Diagnostics: every rejection names volume() and carries a real position.
+{
+  const cases = [
+    ['missing positional', 'scene(camera(fov: 60), volume()).write(o0)',
+      /volume\(\) expects a volume reference \(vol0..vol7\)/],
+    ['surface positional', 'scene(camera(fov: 60), volume(o2)).write(o0)',
+      /volume\(\) expects a volume reference \(vol0..vol7\)/],
+    ['string positional', 'scene(camera(fov: 60), volume("vol0")).write(o0)',
+      /volume\(\) expects a volume reference \(vol0..vol7\)/],
+    // The lexer accepts any vol<digits>; only vol0..vol7 are allocated.
+    ['out of range', 'scene(camera(fov: 60), volume(vol9)).write(o0)',
+      /volume\(\) expects a volume reference \(vol0..vol7\)/],
+    ['second positional', 'scene(camera(fov: 60), volume(vol0, vol1)).write(o0)',
+      /volume\(\) takes one positional argument, the volume reference/],
+    ['unknown keyword', 'scene(camera(fov: 60), volume(vol0, thresholdd: 0.5)).write(o0)',
+      /Unknown keyword 'thresholdd' for volume\(\)/],
+    ['threshold type', 'scene(camera(fov: 60), volume(vol0, threshold: "half")).write(o0)',
+      /threshold must be a finite number/],
+    ['threshold range', 'scene(camera(fov: 60), volume(vol0, threshold: 1.5)).write(o0)',
+      /threshold must be between 0 and 1/],
+    ['bad transform', 'scene(camera(fov: 60), volume(vol0, pos: [0, 1])).write(o0)',
+      /pos must contain exactly 3 values/],
+    ['surface material', 'scene(camera(fov: 60), volume(vol0).material(surface(o2))).write(o0)',
+      /volume\(\) cannot take a surface\(\) material/],
+    // Inheriting one is the same mistake, reported at the volume that would
+    // have been textured rather than at the group that declares the material.
+    ['inherited surface material',
+      'scene(camera(fov: 60), group(volume(vol0)).material(surface(o2))).write(o0)',
+      /volume\(\) cannot take a surface\(\) material/]
+  ]
+  for (const [label, body, messagePattern] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${body}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${label}: expected a compile error`)
+    assert.match(thrown.message, messagePattern, `${label}: unexpected message`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `${label}: expected a real source position, got "${thrown.message}"`)
+  }
+}
+
 console.log('Scene compiler tests passed')

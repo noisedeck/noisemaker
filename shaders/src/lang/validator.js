@@ -39,7 +39,7 @@ const SURFACE_PASSTHROUGH_CALLS = new Set(['read'])
  * (a later pipeline stage) is responsible for interpreting them.
  */
 const SCENE_FUNCTIONS = new Set([
-    'scene', 'camera', 'mesh', 'light', 'group',
+    'scene', 'camera', 'mesh', 'volume', 'light', 'group',
     'material', 'solid', 'surface', 'pbr', 'emit',
     'environment'
 ])

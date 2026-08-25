@@ -25,6 +25,9 @@ const LIGHT_TYPES = new Set(['directional', 'point', 'spot'])
 /** Keyword args that describe placement rather than geometry. */
 const TRANSFORM_KEYS = new Set(['id', 'pos', 'rot', 'scale'])
 
+/** The eight global volume atlases the pipeline allocates. */
+const VOLUME_REF = /^vol[0-7]$/
+
 /**
  * Keywords each scene node accepts. Anything outside these is a typo: without
  * the check a mistyped keyword is dropped in silence and the node renders with
@@ -32,6 +35,12 @@ const TRANSFORM_KEYS = new Set(['id', 'pos', 'rot', 'scale'])
  */
 const CAMERA_KEYS = new Set(['fov', 'near', 'far', 'pos', 'target'])
 const ENVIRONMENT_KEYS = new Set(['intensity'])
+/**
+ * volume() takes placement plus the iso level. `threshold` matches the range
+ * render3d's own uniform declares (0..1, default 0.5) so a program moved from
+ * the marcher to the scene graph keeps its value.
+ */
+const VOLUME_KEYS = new Set(['id', 'pos', 'rot', 'scale', 'threshold'])
 const SCENE_SETTING_KEYS = new Set([
     'ambient', 'background', 'exposure', 'ground', 'sky',
     'reflections', 'reflectionProbe', 'reflectionProbeSize',
@@ -75,6 +84,14 @@ function locOf(node) {
 function sceneError(message, node) {
     const { line, col } = locOf(node)
     return new SyntaxError(`${message} at line ${line} col ${col}`)
+}
+
+/**
+ * Surface and volume references carry no `loc` of their own, so an error about
+ * one anchors to the call that contains it rather than reporting line 0.
+ */
+function located(node, fallback) {
+    return node?.loc ? node : fallback
 }
 
 function oscillatorNumber(node, name, fallback, oscillatorNode) {
@@ -296,6 +313,26 @@ function buildEnvironment(call) {
 }
 
 /**
+ * Read volume()'s positional argument: one of the eight global volume atlases.
+ * The lexer accepts any `vol<digits>`, so the index is range-checked here for
+ * the same reason read3d() checks it — `vol9` names no allocated surface.
+ */
+function volumeReference(call) {
+    const args = call.args ?? []
+    if (args.length > 1) {
+        throw sceneError(
+            'volume() takes one positional argument, the volume reference',
+            located(args[1], call)
+        )
+    }
+    const arg = args[0]
+    if (!arg || arg.type !== 'VolRef' || !VOLUME_REF.test(arg.name)) {
+        throw sceneError('volume() expects a volume reference (vol0..vol7)', located(arg, call))
+    }
+    return arg.name
+}
+
+/**
  * Resolve an inline `.material(...)` link into a material record, interning it
  * under a generated key. Returns the key, or undefined when absent.
  */
@@ -405,7 +442,7 @@ function buildTransform(call) {
 }
 
 /**
- * Flatten a mesh/group child into the node array, returning its index.
+ * Flatten a mesh/volume/group child into the node array, returning its index.
  * Nodes are pushed before recursing so parent indices stay stable.
  */
 function walkNode(
@@ -420,7 +457,7 @@ function walkNode(
     if (!resolved) return null
 
     const { head, links } = resolved
-    if (head.name !== 'mesh' && head.name !== 'group') return null
+    if (head.name !== 'mesh' && head.name !== 'group' && head.name !== 'volume') return null
 
     // group() takes only placement keywords; its positionals are its children.
     // Unchecked, a mistyped keyword was dropped in silence and the group
@@ -442,7 +479,7 @@ function walkNode(
 
     const node = {
         id: kw(head, 'id'),
-        type: head.name === 'mesh' ? 'mesh' : 'group',
+        type: head.name,
         transform: buildTransform(head),
         children: [],
         parent: parentIndex
@@ -467,6 +504,21 @@ function walkNode(
                 throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, val)
             }
             node.meshParams[key] = validateMeshParam(key, litValue(val), val)
+        }
+    }
+    if (head.name === 'volume') {
+        assertKnownKeywords(head, VOLUME_KEYS)
+        node.surface = volumeReference(head)
+        node.threshold = numberKw(head, 'threshold', 0.5, { min: 0, max: 1 })
+        // A raymarched isosurface has no UVs, so surface() has nothing to map
+        // onto it. Rejecting here beats binding an albedo texture the volume
+        // pass would silently ignore. An inherited material is rejected too,
+        // and reported at the volume rather than at the group that declares it.
+        if (material !== undefined && materials[material].albedoSurface !== undefined) {
+            throw sceneError(
+                'volume() cannot take a surface() material; an isosurface has no UVs',
+                ownMaterial !== undefined ? materialLinks[0] : head
+            )
         }
     }
     if (reflectorLinks.length === 1) {
@@ -507,7 +559,7 @@ function walkNode(
  * @param {object} compilationResult - Output of compile() from lang/index.js
  * @returns {object|null} Scene IR, or null when the program has no scene()
  */
-const SCENE_CHILDREN = ['camera', 'light', 'environment', 'mesh', 'group']
+const SCENE_CHILDREN = ['camera', 'light', 'environment', 'mesh', 'volume', 'group']
 
 export function compileScene(compilationResult) {
     const sceneSteps = []
@@ -585,6 +637,7 @@ export function compileScene(compilationResult) {
                 ir.environment = buildEnvironment(resolved.head)
                 break
             case 'mesh':
+            case 'volume':
             case 'group':
                 walkNode(child, null, ir.nodes, ir.materials, undefined, reflectorState)
                 break

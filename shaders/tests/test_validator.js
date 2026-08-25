@@ -223,6 +223,14 @@ test('a scene child name used as a chain element is an unknown effect',
         if (!diag) throw new Error(`Expected S001 naming 'camera' and the scene() constraint, got ${JSON.stringify(result.diagnostics)}`)
     })
 
+test('volume() used as a chain element is an unknown effect',
+    'search synth, filter\nnoise().volume(vol0).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001'
+            && /volume/.test(d.message || '')
+            && /only valid inside scene\(\)/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 naming 'volume' and the scene() constraint, got ${JSON.stringify(result.diagnostics)}`)
+    })
+
 test('solid() with no synth in scope is still an unknown effect',
     'search filter\nsolid(r: 1).write(o0)', (result) => {
         const diag = result.diagnostics.find(d => d.code === 'S001'

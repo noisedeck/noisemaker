@@ -30,7 +30,8 @@ Grammar
    Write3DCall    ::= 'write3d' '(' ( VolRef | Ident ) ',' ( GeoRef | Ident ) ')'
    SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'          (preview)
    SceneArg       ::= Kwarg | CameraCall | LightCall | EnvironmentCall | NodeChain
-   NodeChain      ::= ( MeshCall | GroupCall ) ( '.' NodeLink )*
+   NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) ( '.' NodeLink )*
+   VolumeCall     ::= 'volume' '(' VolRef ( ',' Kwarg )* ')'                 (preview)
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
    MaterialCall   ::= 'material' '(' MaterialSpec ')'
    MaterialSpec   ::= ( 'solid' | 'surface' ) '(' ArgList? ')' ( '.' MaterialTerm )*
@@ -64,8 +65,8 @@ Grammar
    HexDigit       ::= Digit | 'A'…'F' | 'a'…'f'
 
 Productions marked ``(preview)`` are experimental. ``SceneCall`` and everything
-reachable from it — ``SceneArg``, ``NodeChain``, ``NodeLink``, ``MaterialCall``,
-``MaterialSpec``, ``MaterialTerm`` — are provisional in Noisemaker 1.5 and
+reachable from it — ``SceneArg``, ``NodeChain``, ``VolumeCall``, ``NodeLink``,
+``MaterialCall``, ``MaterialSpec``, ``MaterialTerm`` — are provisional in Noisemaker 1.5 and
 scheduled to be finalized in 2.0. ``ObjectLiteral`` was added to serve them and
 is likewise provisional: it is currently only meaningful inside ``scene()``.
 
