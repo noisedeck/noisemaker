@@ -9,7 +9,10 @@ export class LightNode extends SceneNode {
     this.intensity = intensity
     this.direction = direction || [0, -1, 0]
     this.falloff = falloff != null ? falloff : 1
-    this.angle = angle != null ? angle : Math.PI / 4
+    // Spot cone half-angle in DEGREES. The DSL compiler (buildLight) and the
+    // renderer (_buildLightingUniforms, which converts to radians) both use
+    // degrees, so this default must match buildLight's default of 45.
+    this.angle = angle != null ? angle : 45
     this.penumbra = penumbra != null ? penumbra : 0.1
   }
 }

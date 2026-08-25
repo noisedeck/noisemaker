@@ -14,7 +14,7 @@
  * Usage: node shaders/tests/test_visual_playwright.js
  */
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdir } from 'node:fs/promises'
 import { resolve, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
@@ -126,7 +126,11 @@ async function testCase(browser, port, backend, scene) {
     // overwriting another, and excluding the info overlay lets the pixel
     // statistics detect a genuinely flat render on WebGPU too.
     const sceneName = scene.replace(/\.dsl$/, '')
-    const screenshotPath = resolve(ROOT, `demo/shaders/scenes/screenshot-${sceneName}-${backend}.png`)
+    // Test output, not a fixture: writing into demo/shaders/scenes/ overwrote the
+    // committed reference screenshots on every run and left the tree dirty.
+    const artifactDir = resolve(ROOT, 'shaders/tests/.artifacts/scene-visual')
+    await mkdir(artifactDir, { recursive: true })
+    const screenshotPath = resolve(artifactDir, `screenshot-${sceneName}-${backend}.png`)
     await page.$eval('#info', el => { el.style.display = 'none' })
     await page.locator('#canvas').screenshot({ path: screenshotPath })
     console.log(`  Screenshot saved`)

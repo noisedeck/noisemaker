@@ -196,4 +196,61 @@ function approx(a, b, eps = 1e-4) {
   assert.strictEqual(cam.id, 'mycam')
 }
 
+// removeChild clears the removed node's inherited transform
+{
+  const parent = new SceneNode({ id: 'p', position: [10, 0, 0] })
+  const child = new SceneNode({ id: 'c', position: [0, 5, 0] })
+  parent.addChild(child)
+
+  const attached = child.getWorldMatrix()
+  approx(attached[12], 10)
+  approx(attached[13], 5)
+
+  parent.removeChild(child)
+  const detached = child.getWorldMatrix()
+  approx(detached[12], 0, 1e-4)
+  approx(detached[13], 5)
+}
+
+// LightNode spot angle default is in DEGREES, matching the DSL compiler's
+// buildLight() default of 45 and scene-renderer's degrees-to-radians convert.
+{
+  const light = new LightNode({ type: 'spot' })
+  assert.strictEqual(light.angle, 45)
+  // An explicit angle is passed through untouched (still degrees).
+  const explicit = new LightNode({ type: 'spot', angle: 30 })
+  assert.strictEqual(explicit.angle, 30)
+}
+
+// CameraNode ignores scene-graph parenting: warn once when a camera is
+// parented under a transform that would otherwise have moved it.
+{
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (...args) => { warnings.push(args.join(' ')) }
+  try {
+    const moving = new SceneNode({ id: 'rig', position: [10, 0, 0] })
+    const cam = new CameraNode({ position: [0, 0, 5], target: [0, 0, 0] })
+    moving.addChild(cam)
+    cam.getViewMatrix()
+    cam.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'warns exactly once')
+    assert.ok(/parent/i.test(warnings[0]), warnings[0])
+
+    // An identity-transform parent changes nothing, so it stays quiet.
+    const still = new SceneNode({ id: 'still' })
+    const cam2 = new CameraNode({ position: [0, 0, 5] })
+    still.addChild(cam2)
+    cam2.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'identity parent does not warn')
+
+    // An unparented camera stays quiet too.
+    const cam3 = new CameraNode({ position: [0, 0, 5] })
+    cam3.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'unparented camera does not warn')
+  } finally {
+    console.warn = realWarn
+  }
+}
+
 console.log('Scene tree tests passed')

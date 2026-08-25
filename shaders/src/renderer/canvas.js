@@ -311,7 +311,6 @@ export class CanvasRenderer {
         this._sceneRenderPending = null
         this._sceneTree = null
         this._sceneRenderer = null
-        this._sceneBackend = null
         this._clock = null
 
         // Bound render loop for proper `this` context
@@ -997,14 +996,6 @@ export class CanvasRenderer {
         this._isScene = false
         this._sceneTree = null
         this._sceneRenderer = null
-        if (this._sceneBackend) {
-            try {
-                this._sceneBackend.destroy({ loseContext })
-            } catch (_) {
-                // Ignore cleanup errors for scene backend
-            }
-            this._sceneBackend = null
-        }
         if (this._clock) {
             this._clock.reset()
             this._clock = null

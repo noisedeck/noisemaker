@@ -16,6 +16,13 @@ const { acquireServer, releaseServer } = await import(path.join(repoRoot, 'vendo
 const width = 160
 const height = 96
 const expectedPatternHashes = {
+    // Rebaselined from 'ca2097ced765d7e77eaf1904c9f2932892115d4b03974cdad92a94ec1129e102'.
+    // Not a regression from this branch: the pre-branch tree, checked out clean and
+    // run unmodified, produces the value below as well, so nothing in this branch
+    // moved these pixels. The mono line pattern rotates by monoAngle=30 before
+    // thresholding, so a last-bit difference in the rotation flips pixels along the
+    // ink edge; the old hash came from a different ANGLE/driver build. Both backends
+    // agree on the new value, and the circle pattern below was unaffected.
     line: '842b9a9d8176638ead50666b3f97b0756ab403e129fe46ad007f57c4626bd2ce',
     circle: '0c1bb60f6ee1609c725092be1a460432c9f720ac32a34f491a9d0f9134d45892',
 }

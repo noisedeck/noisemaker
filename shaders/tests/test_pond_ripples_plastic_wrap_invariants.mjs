@@ -25,6 +25,14 @@ const width = 96
 const height = 96
 const defaultPondHash = 'fc7d901982ab7f080faa0770f203b5c0c2846efc2864fa0db4e37921807845a9'
 const defaultPondWebgpuHash = defaultPondHash
+// Rebaselined from 'a2553a928da58a3a8513306d6c2b9420bf31eef4fdb51687e8dc1b9c6e2f3ccc'.
+// Not a regression from this branch: checking the pre-branch tree out clean and
+// running this file unmodified produces the value below too, so no source change
+// here moved these pixels. The old value is simply not reproducible in this
+// environment. Plastic Wrap's default half-vector lighting is last-bit sensitive
+// and the previous hash was recorded against a different ANGLE/driver build.
+// WebGL2 and WebGPU agree on the new value bit-for-bit (parity max=0), and the
+// neighbouring Pond hashes above were unaffected.
 const defaultPlasticHash = 'c2dd9c18ec53919f94c921968dc3af3f0127acb5dd9bf817bb7975aaecccd8c3'
 
 const sourceDsl = `search synth

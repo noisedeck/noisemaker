@@ -64,6 +64,9 @@ export class SceneNode {
     if (idx !== -1) {
       this.children.splice(idx, 1)
       node.parent = null
+      // The cached world matrix still folds in this parent's transform, so
+      // the detached subtree has to recompute from its own local transform.
+      node._markDirty()
     }
   }
 
