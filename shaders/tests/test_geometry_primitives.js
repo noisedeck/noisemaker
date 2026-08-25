@@ -5,7 +5,10 @@ import {
   createBox,
   createPlane,
   createCylinder,
-  createTorus
+  createTorus,
+  createCone,
+  createCapsule,
+  createIcosphere
 } from '../src/geometry/primitives.js'
 
 function assertGeometry(geo, label) {
@@ -24,6 +27,17 @@ function assertGeometry(geo, label) {
     assert.ok(geo.indices[i] < vertCount,
       `${label}: index ${i} (${geo.indices[i]}) < vertCount (${vertCount})`)
   }
+  // every component is finite (no NaN/Infinity leaking from trig or normalization)
+  for (let i = 0; i < geo.positions.length; i++) {
+    assert.ok(Number.isFinite(geo.positions[i]), `${label}: position[${i}] is finite`)
+  }
+  for (let i = 0; i < geo.normals.length; i++) {
+    assert.ok(Number.isFinite(geo.normals[i]), `${label}: normal[${i}] is finite`)
+  }
+  for (let i = 0; i < geo.uvs.length; i++) {
+    assert.ok(Number.isFinite(geo.uvs[i]), `${label}: uv[${i}] is finite`)
+  }
+
   // normals are unit length
   for (let i = 0; i < geo.normals.length; i += 3) {
     const len = Math.sqrt(
@@ -72,12 +86,89 @@ function assertGeometry(geo, label) {
   assertGeometry(geo, 'torus')
 }
 
+// Cone
+{
+  const segments = 16
+  const geo = createCone({ radius: 1, height: 2, segments })
+  assertGeometry(geo, 'cone')
+  // side: (base + apex) per segment boundary; cap: center + ring
+  assert.strictEqual(geo.positions.length / 3, 3 * segments + 4, 'cone vertex count')
+  // segments side triangles + segments cap triangles
+  assert.strictEqual(geo.indices.length, 6 * segments, 'cone index count')
+
+  let apexCount = 0
+  for (let i = 0; i < geo.positions.length; i += 3) {
+    const [x, y, z] = [geo.positions[i], geo.positions[i + 1], geo.positions[i + 2]]
+    assert.ok(y >= -1.0001 && y <= 1.0001, 'cone vertex within height')
+    if (Math.abs(y - 1) < 1e-6) {
+      apexCount++
+      assert.ok(Math.hypot(x, z) < 1e-6, 'cone apex is on the axis')
+    } else {
+      assert.ok(Math.abs(y + 1) < 1e-6, 'cone non-apex vertex sits on the base plane')
+      assert.ok(Math.abs(Math.hypot(x, z) - 1) < 1e-6 || Math.hypot(x, z) < 1e-6,
+        'cone base vertex on base ring or cap center')
+    }
+  }
+  assert.strictEqual(apexCount, segments + 1, 'cone has one apex vertex per side segment boundary')
+}
+
+// Capsule
+{
+  const segments = 16
+  const rings = 6
+  const radius = 0.5
+  const height = 2
+  const geo = createCapsule({ radius, height, segments, rings })
+  assertGeometry(geo, 'capsule')
+  // two hemispheres of (rings + 1) rows, each row (segments + 1) wide
+  assert.strictEqual(geo.positions.length / 3, 2 * (rings + 1) * (segments + 1), 'capsule vertex count')
+  assert.strictEqual(geo.indices.length, 12 * rings * segments, 'capsule index count')
+
+  const halfCyl = height / 2 - radius
+  let minY = Infinity
+  let maxY = -Infinity
+  for (let i = 0; i < geo.positions.length; i += 3) {
+    const [x, y, z] = [geo.positions[i], geo.positions[i + 1], geo.positions[i + 2]]
+    minY = Math.min(minY, y)
+    maxY = Math.max(maxY, y)
+    // distance to the capsule's spine segment must equal the radius
+    const spineY = Math.max(-halfCyl, Math.min(halfCyl, y))
+    const d = Math.hypot(x, y - spineY, z)
+    assert.ok(Math.abs(d - radius) < 1e-6, `capsule vertex at radius ${radius} (got ${d})`)
+  }
+  assert.ok(Math.abs(maxY - height / 2) < 1e-6, 'capsule top pole at +height/2')
+  assert.ok(Math.abs(minY + height / 2) < 1e-6, 'capsule bottom pole at -height/2')
+}
+
+// Icosphere
+{
+  const subdivisions = 2
+  const geo = createIcosphere({ radius: 1, subdivisions })
+  assertGeometry(geo, 'icosphere')
+  assert.strictEqual(geo.positions.length / 3, 10 * 4 ** subdivisions + 2, 'icosphere vertex count')
+  assert.strictEqual(geo.indices.length, 20 * 4 ** subdivisions * 3, 'icosphere index count')
+
+  for (let i = 0; i < geo.positions.length; i += 3) {
+    const dist = Math.hypot(geo.positions[i], geo.positions[i + 1], geo.positions[i + 2])
+    assert.ok(Math.abs(dist - 1.0) < 1e-6, `icosphere vertex at radius 1 (got ${dist})`)
+  }
+
+  // subdivision 0 is the bare icosahedron
+  const base = createIcosphere({ subdivisions: 0 })
+  assertGeometry(base, 'icosahedron')
+  assert.strictEqual(base.positions.length / 3, 12, 'icosahedron has 12 vertices')
+  assert.strictEqual(base.indices.length, 60, 'icosahedron has 20 faces')
+}
+
 // Default params
 {
   const geo = createSphere({})
   assertGeometry(geo, 'sphere-defaults')
   const geo2 = createBox({})
   assertGeometry(geo2, 'box-defaults')
+  assertGeometry(createCone({}), 'cone-defaults')
+  assertGeometry(createCapsule({}), 'capsule-defaults')
+  assertGeometry(createIcosphere({}), 'icosphere-defaults')
 }
 
 /**
@@ -132,6 +223,9 @@ function assertWindingMatchesNormals(geo, label) {
   assertWindingMatchesNormals(createPlane({}), 'plane')
   assertWindingMatchesNormals(createCylinder({}), 'cylinder')
   assertWindingMatchesNormals(createTorus({}), 'torus')
+  assertWindingMatchesNormals(createCone({}), 'cone')
+  assertWindingMatchesNormals(createCapsule({}), 'capsule')
+  assertWindingMatchesNormals(createIcosphere({}), 'icosphere')
 }
 
 // Non-default parameters must not change winding
@@ -140,6 +234,9 @@ function assertWindingMatchesNormals(geo, label) {
   assertWindingMatchesNormals(createBox({ size: [2, 0.5, 3] }), 'box-params')
   assertWindingMatchesNormals(createCylinder({ radius: 2, height: 4, segments: 8 }), 'cylinder-params')
   assertWindingMatchesNormals(createTorus({ radius: 3, tube: 0.2, segments: 8, tubeSegments: 6 }), 'torus-params')
+  assertWindingMatchesNormals(createCone({ radius: 0.4, height: 1, segments: 8 }), 'cone-params')
+  assertWindingMatchesNormals(createCapsule({ radius: 0.25, height: 1.1, segments: 12, rings: 4 }), 'capsule-params')
+  assertWindingMatchesNormals(createIcosphere({ radius: 0.5, subdivisions: 3 }), 'icosphere-params')
 }
 
 console.log('Geometry primitives tests passed')

@@ -299,3 +299,225 @@ export function createTorus({ radius = 1, tube = 0.4, segments = 32, tubeSegment
 
   return new Geometry({ positions, normals, uvs, indices })
 }
+
+/**
+ * Create a cone with a base cap. Apex at +height/2, base at -height/2.
+ * @param {object} opts
+ * @param {number} [opts.radius=1] - Base radius
+ * @param {number} [opts.height=2]
+ * @param {number} [opts.segments=32]
+ * @returns {Geometry}
+ */
+export function createCone({ radius = 1, height = 2, segments = 32 } = {}) {
+  const positions = []
+  const normals = []
+  const uvs = []
+  const indices = []
+
+  const halfH = height / 2
+
+  // Slope normal components: radial and vertical parts of the side normal
+  const slope = Math.hypot(radius, height)
+  const nRadial = slope > 0 ? height / slope : 1
+  const nUp = slope > 0 ? radius / slope : 0
+
+  // --- Side ---
+  // The apex is duplicated per segment boundary so each side triangle gets a
+  // normal pointing along its own slope instead of a meaningless averaged one.
+  for (let i = 0; i <= segments; i++) {
+    const u = i / segments
+    const theta = u * Math.PI * 2
+
+    const cx = Math.cos(theta)
+    const cz = Math.sin(theta)
+
+    // Base vertex
+    positions.push(cx * radius, -halfH, cz * radius)
+    normals.push(cx * nRadial, nUp, cz * nRadial)
+    uvs.push(u, 0)
+
+    // Apex vertex, normal taken at the midpoint of the segment it spans
+    const thetaMid = ((i + 0.5) / segments) * Math.PI * 2
+    positions.push(0, halfH, 0)
+    normals.push(Math.cos(thetaMid) * nRadial, nUp, Math.sin(thetaMid) * nRadial)
+    uvs.push((i + 0.5) / segments, 1)
+  }
+
+  for (let i = 0; i < segments; i++) {
+    const base = i * 2
+    indices.push(base, base + 1, base + 2)
+  }
+
+  // --- Base cap ---
+  const capCenterIdx = positions.length / 3
+  positions.push(0, -halfH, 0)
+  normals.push(0, -1, 0)
+  uvs.push(0.5, 0.5)
+
+  for (let i = 0; i <= segments; i++) {
+    const theta = (i / segments) * Math.PI * 2
+    const cx = Math.cos(theta)
+    const cz = Math.sin(theta)
+
+    positions.push(cx * radius, -halfH, cz * radius)
+    normals.push(0, -1, 0)
+    uvs.push(cx * 0.5 + 0.5, cz * 0.5 + 0.5)
+  }
+
+  for (let i = 0; i < segments; i++) {
+    indices.push(capCenterIdx, capCenterIdx + 1 + i, capCenterIdx + 2 + i)
+  }
+
+  return new Geometry({ positions, normals, uvs, indices })
+}
+
+/**
+ * Create a capsule: a cylinder along Y capped by two hemispheres.
+ * `height` is the total extent along Y, so the cylindrical mid-section is
+ * height - 2 * radius (clamped at zero, where the capsule becomes a sphere).
+ * @param {object} opts
+ * @param {number} [opts.radius=0.5]
+ * @param {number} [opts.height=2] - Total height including both caps
+ * @param {number} [opts.segments=32] - Segments around the axis
+ * @param {number} [opts.rings=8] - Latitude rings per hemisphere
+ * @returns {Geometry}
+ */
+export function createCapsule({ radius = 0.5, height = 2, segments = 32, rings = 8 } = {}) {
+  const positions = []
+  const normals = []
+  const uvs = []
+  const indices = []
+
+  const halfCyl = Math.max(0, height / 2 - radius)
+
+  // Rows 0..rings are the top hemisphere (pole to equator, offset +halfCyl);
+  // rows rings+1..2*rings+1 are the bottom hemisphere (equator to pole,
+  // offset -halfCyl). The equator is present in both, and the quad band
+  // between the two equator rows forms the cylindrical mid-section.
+  const rowCount = 2 * (rings + 1)
+  const stride = segments + 1
+
+  for (let row = 0; row < rowCount; row++) {
+    const topHalf = row <= rings
+    const t = topHalf ? row / rings : (row - rings - 1) / rings
+    const phi = topHalf
+      ? t * Math.PI * 0.5
+      : Math.PI * 0.5 + t * Math.PI * 0.5
+    const yOffset = topHalf ? halfCyl : -halfCyl
+    const v = row / (rowCount - 1)
+
+    for (let x = 0; x <= segments; x++) {
+      const u = x / segments
+      const theta = u * Math.PI * 2
+
+      const nx = -Math.sin(phi) * Math.cos(theta)
+      const ny = Math.cos(phi)
+      const nz = Math.sin(phi) * Math.sin(theta)
+
+      positions.push(nx * radius, ny * radius + yOffset, nz * radius)
+      normals.push(nx, ny, nz)
+      uvs.push(u, v)
+    }
+  }
+
+  for (let row = 0; row < rowCount - 1; row++) {
+    for (let x = 0; x < segments; x++) {
+      const a = row * stride + x
+      const b = a + 1
+      const c = a + stride
+      const d = c + 1
+
+      // Skip degenerate triangles at the poles
+      if (row !== 0) {
+        indices.push(a, c, b)
+      }
+      if (row !== rowCount - 2) {
+        indices.push(b, c, d)
+      }
+    }
+  }
+
+  return new Geometry({ positions, normals, uvs, indices })
+}
+
+/**
+ * Create an icosphere: an icosahedron with each face recursively subdivided
+ * and the resulting vertices projected onto the sphere. More uniform triangle
+ * sizes than a UV sphere, and no pole pinching.
+ * @param {object} opts
+ * @param {number} [opts.radius=1]
+ * @param {number} [opts.subdivisions=2] - Vertex count is 10 * 4^n + 2
+ * @returns {Geometry}
+ */
+export function createIcosphere({ radius = 1, subdivisions = 2 } = {}) {
+  const t = (1 + Math.sqrt(5)) / 2
+
+  const normalize = (v) => {
+    const len = Math.hypot(v[0], v[1], v[2])
+    return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0]
+  }
+
+  // Regular icosahedron: three mutually perpendicular golden rectangles
+  const verts = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+    [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+    [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]
+  ].map(normalize)
+
+  let tris = [
+    [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+    [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+    [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+    [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
+  ]
+
+  const midpointCache = new Map()
+  const getMidpoint = (a, b) => {
+    const key = `${Math.min(a, b)}_${Math.max(a, b)}`
+    const cached = midpointCache.get(key)
+    if (cached !== undefined) return cached
+
+    const va = verts[a]
+    const vb = verts[b]
+    const idx = verts.length
+    verts.push(normalize([
+      (va[0] + vb[0]) / 2,
+      (va[1] + vb[1]) / 2,
+      (va[2] + vb[2]) / 2
+    ]))
+    midpointCache.set(key, idx)
+    return idx
+  }
+
+  for (let s = 0; s < subdivisions; s++) {
+    const next = []
+    for (const [a, b, c] of tris) {
+      const ab = getMidpoint(a, b)
+      const bc = getMidpoint(b, c)
+      const ca = getMidpoint(c, a)
+      // All four children keep the parent's counter-clockwise winding
+      next.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca])
+    }
+    tris = next
+  }
+
+  const positions = []
+  const normals = []
+  const uvs = []
+
+  for (const v of verts) {
+    positions.push(v[0] * radius, v[1] * radius, v[2] * radius)
+    normals.push(v[0], v[1], v[2])
+    // Spherical mapping. Vertices are shared across the seam, so the u wrap
+    // is discontinuous there — fine for lighting, approximate for texturing.
+    uvs.push(
+      0.5 + Math.atan2(v[2], v[0]) / (Math.PI * 2),
+      0.5 - Math.asin(Math.max(-1, Math.min(1, v[1]))) / Math.PI
+    )
+  }
+
+  const indices = []
+  for (const [a, b, c] of tris) indices.push(a, b, c)
+
+  return new Geometry({ positions, normals, uvs, indices })
+}

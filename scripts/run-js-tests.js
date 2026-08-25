@@ -60,6 +60,8 @@ const testEntries = [
   { file: 'shaders/tests/test_glmatrix_smoke.js', parity: false },
   { file: 'shaders/tests/test_scene_math.js', parity: false },
   { file: 'shaders/tests/test_geometry_primitives.js', parity: false },
+  { file: 'shaders/tests/test_mesh_obj_generator.js', parity: false },
+  { file: 'shaders/tests/test_mesh_packing.js', parity: false },
   { file: 'shaders/tests/test_scene_tree.js', parity: false },
   { file: 'shaders/tests/test_gltf_loader.js', parity: false },
   { file: 'shaders/tests/test_scene_parser.js', parity: false },
