@@ -102,9 +102,30 @@ render(o0)`
     const out = assertStable(src, 'volume scene')
     assert.match(out, /volume\(vol0, threshold: 0\.5/, 'keeps the volume reference and its keywords')
     assert.match(out, /\.material\(solid\(/, 'keeps the material chain on the volume')
+
+    // Pinned first, compared second. deepStrictEqual on two compileScene() runs
+    // measures the pipeline against itself: a defect that drops volumes from
+    // BOTH parses leaves the comparison green and the test blind. These
+    // assertions are the external anchor — they name what the source is
+    // supposed to produce, so the self-comparison inherits a fixed point.
+    const sourceIr = compileScene(compile(src))
+    const volumes = sourceIr.nodes.filter(node => node.type === 'volume')
+    assert.strictEqual(volumes.length, 1, 'the source compiles to exactly one volume node')
+    assert.strictEqual(volumes[0].surface, 'vol0', 'the volume node keeps its vol0 atlas')
+    assert.strictEqual(volumes[0].threshold, 0.5, 'the volume node keeps its iso level')
+    assert.deepStrictEqual(volumes[0].transform.position, [0, 1, 0], 'the volume node keeps its position')
+    assert.deepStrictEqual(volumes[0].transform.scale, [2, 2, 2], 'the volume node keeps its scale')
+    assert.strictEqual(typeof volumes[0].material, 'string', 'the volume node references a material')
+    assert.deepStrictEqual(
+        sourceIr.materials[volumes[0].material].baseColor, [0.9, 0.4, 0.2],
+        'the volume material keeps its solid() baseColor')
+    assert.strictEqual(
+        sourceIr.materials[volumes[0].material].pbr.roughness, 0.7,
+        'the volume material keeps its pbr() roughness')
+
     assert.deepStrictEqual(
         compileScene(compile(out)),
-        compileScene(compile(src)),
+        sourceIr,
         'the reparsed program compiles to the same scene IR')
 })
 

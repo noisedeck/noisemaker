@@ -31,7 +31,7 @@ Grammar
    SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'          (preview)
    SceneArg       ::= Kwarg | CameraCall | LightCall | EnvironmentCall | NodeChain
    NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) ( '.' NodeLink )*
-   VolumeCall     ::= 'volume' '(' VolRef ( ',' Kwarg )* ')'                 (preview)
+   VolumeCall     ::= 'volume' '(' ArgList ')'                               (preview)
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
    MaterialCall   ::= 'material' '(' MaterialSpec ')'
    MaterialSpec   ::= ( 'solid' | 'surface' ) '(' ArgList? ')' ( '.' MaterialTerm )*
@@ -63,6 +63,13 @@ Grammar
    Boolean        ::= 'true' | 'false'
    Color          ::= '#' HexDigit HexDigit HexDigit ( HexDigit HexDigit HexDigit )? ( HexDigit HexDigit )?
    HexDigit       ::= Digit | 'A'…'F' | 'a'…'f'
+
+``VolumeCall`` is an ordinary ``ArgList`` constrained by the scene compiler
+rather than by the grammar: it takes exactly one positional argument, a volume
+reference ``( VolRef | Ident )`` naming ``vol0``–``vol7`` — written directly or
+reached through a ``let`` binding — and every other argument is a keyword.
+Positional and keyword arguments may appear in any order, and a trailing comma
+is permitted, as they are in any other ``ArgList``.
 
 Productions marked ``(preview)`` are experimental. ``SceneCall`` and everything
 reachable from it — ``SceneArg``, ``NodeChain``, ``VolumeCall``, ``NodeLink``,

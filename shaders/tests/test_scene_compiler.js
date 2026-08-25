@@ -773,4 +773,121 @@ function irFor(src) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// A reference-valued keyword still anchors to a real source position.
+//
+// VolRef/OutputRef/GeoRef/MeshRef carry no `loc` of their own, so every error
+// that anchored to a keyword's VALUE — rather than to the call containing it —
+// reported "line 0 col 0". `volume(vol0, geo: geo0)` and its siblings across
+// mesh(), camera(), group(), scene(), environment() and surface() all landed
+// there, telling the author nothing about where to look.
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    // volume()
+    ['volume unknown ref keyword', 'scene(camera(fov: 60), volume(vol0, geo: geo0)).write(o0)'],
+    ['volume threshold is a ref', 'scene(camera(fov: 60), volume(vol0, threshold: o2)).write(o0)'],
+    ['volume pos is a ref', 'scene(camera(fov: 60), volume(vol0, pos: o2)).write(o0)'],
+    ['volume pos holds a ref', 'scene(camera(fov: 60), volume(vol0, pos: [o2, 0, 0])).write(o0)'],
+    ['volume id is a ref', 'scene(camera(fov: 60), volume(vol0, id: o2)).write(o0)'],
+    // The same class at the sibling scene nodes.
+    ['mesh unknown ref keyword', 'scene(camera(fov: 60), mesh("box", geo: geo0)).write(o0)'],
+    ['camera unknown ref keyword', 'scene(camera(fov: 60, geo: geo0)).write(o0)'],
+    ['group unknown ref keyword', 'scene(camera(fov: 60), group(geo: geo0, mesh("box"))).write(o0)'],
+    ['scene unknown ref keyword', 'scene(geo: geo0, camera(fov: 60)).write(o0)'],
+    ['environment takes a vol ref', 'scene(camera(fov: 60), environment(vol0)).write(o0)'],
+    ['surface takes a vol ref', 'scene(camera(fov: 60), mesh("box").material(surface(vol0))).write(o0)'],
+    ['mesh type is a ref', 'scene(camera(fov: 60), mesh(o2)).write(o0)'],
+  ]
+  for (const [label, body] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${body}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${label}: expected a compile error`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `${label}: expected a real source position, got "${thrown.message}"`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// reflector() names the constraint it actually enforces.
+//
+// A volume or a group is not "not a plane mesh" — it is a node kind reflector()
+// does not apply to at all, and saying "requires a plane mesh" sent authors off
+// hunting for a mesh type keyword that was never the problem.
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    ['volume', 'scene(camera(fov: 60), volume(vol0).reflector()).write(o0)'],
+    ['group', 'scene(camera(fov: 60), group(mesh("box")).reflector()).write(o0)'],
+  ]
+  for (const [kind, body] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${body}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${kind} reflector: expected a compile error`)
+    assert.match(thrown.message, new RegExp(`reflector\\(\\) is not supported on ${kind}\\(\\)`),
+      `${kind} reflector: expected the node kind to be named, got "${thrown.message}"`)
+    assert.doesNotMatch(thrown.message, /requires a plane mesh/,
+      `${kind} reflector: names a constraint that is not the one being enforced`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `${kind} reflector: expected a real source position, got "${thrown.message}"`)
+  }
+  // A non-plane mesh is still the plane constraint, unchanged.
+  assert.throws(() => irFor('search synth\nscene(mesh("sphere").reflector()).write(o0)'),
+    /reflector\(\) requires a plane mesh.*line/s, 'non-plane mesh keeps the plane diagnostic')
+}
+
+// ---------------------------------------------------------------------------
+// An unrecognized chain link is an error, not a silent no-op.
+//
+// walkNode filtered links down to material() and reflector() and dropped the
+// rest, so `mesh("sphere").pos([0, 0, -4])` compiled clean and did nothing —
+// the mesh sat at the origin with no diagnostic to explain it.
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    ['volume', 'scene(camera(fov: 60), volume(vol0).frobnicate()).write(o0)', /frobnicate/],
+    ['mesh', 'scene(camera(fov: 60), mesh("sphere").pos([0, 0, -4])).write(o0)', /pos/],
+    ['group', 'scene(camera(fov: 60), group(mesh("box")).scale([2, 2, 2])).write(o0)', /scale/],
+  ]
+  for (const [kind, body, namePattern] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${body}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${kind} unknown link: expected a compile error`)
+    assert.match(thrown.message, namePattern, `${kind} unknown link: names the link`)
+    assert.match(thrown.message, new RegExp(`${kind}\\(\\)`),
+      `${kind} unknown link: names the node kind, got "${thrown.message}"`)
+    assert.match(thrown.message, /material\(\).*reflector\(\)/,
+      `${kind} unknown link: states which links are allowed, got "${thrown.message}"`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `${kind} unknown link: expected a real source position, got "${thrown.message}"`)
+  }
+
+  // Control: the two supported links still compile.
+  const ok = irFor(`
+    search synth
+    scene(
+      camera(fov: 60),
+      volume(vol0).material(solid(color: [1, 0, 0])),
+      mesh("plane", id: "floor").material(solid(color: [0, 1, 0])).reflector()
+    ).write(o0)
+  `)
+  const volume = ok.nodes.find(n => n.type === 'volume')
+  const floor = ok.nodes.find(n => n.id === 'floor')
+  assert.deepStrictEqual(ok.materials[volume.material].baseColor, [1, 0, 0], 'volume material still chains')
+  assert.deepStrictEqual(ok.materials[floor.material].baseColor, [0, 1, 0], 'mesh material still chains')
+  assert.strictEqual(floor.planarReflection, true, 'reflector() still chains alongside material()')
+}
+
 console.log('Scene compiler tests passed')

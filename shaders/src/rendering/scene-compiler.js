@@ -25,6 +25,9 @@ const LIGHT_TYPES = new Set(['directional', 'point', 'spot'])
 /** Keyword args that describe placement rather than geometry. */
 const TRANSFORM_KEYS = new Set(['id', 'pos', 'rot', 'scale'])
 
+/** The only chain links a mesh/volume/group node accepts. */
+const NODE_LINKS = new Set(['material', 'reflector'])
+
 /** The eight global volume atlases the pipeline allocates. */
 const VOLUME_REF = /^vol[0-7]$/
 
@@ -87,8 +90,10 @@ function sceneError(message, node) {
 }
 
 /**
- * Surface and volume references carry no `loc` of their own, so an error about
- * one anchors to the call that contains it rather than reporting line 0.
+ * Reference nodes — VolRef, OutputRef, GeoRef, MeshRef and friends — carry no
+ * `loc` of their own, so an error about one anchors to the enclosing call
+ * rather than reporting line 0 col 0. Every error that anchors to a keyword's
+ * VALUE, or to a bare positional, routes through here.
  */
 function located(node, fallback) {
     return node?.loc ? node : fallback
@@ -127,42 +132,49 @@ function canonicalOscillator(node) {
 /**
  * Evaluate a value AST node to a plain JS value.
  * Canonical osc() nodes become the same descriptors used by effect uniforms.
+ *
+ * `anchor` is the nearest node known to carry a position; it is what a loc-less
+ * value (a reference, an array element) reports against.
  */
-function litValue(node) {
+function litValue(node, anchor) {
     if (node == null) return undefined
+    const here = located(node, anchor)
     switch (node.type) {
         case 'Number':
         case 'String':
         case 'Boolean':
             return node.value
         case 'ArrayLiteral':
-            return node.elements.map(litValue)
+            return node.elements.map(element => litValue(element, here))
         case 'Oscillator':
             return canonicalOscillator(node)
         case 'Object': {
             const out = {}
             for (const [key, val] of Object.entries(node.properties)) {
-                out[key] = litValue(val)
+                out[key] = litValue(val, here)
             }
             if (out.type === 'Oscillator') {
-                throw sceneError('Oscillator object literals are invalid; use osc()', node)
+                throw sceneError('Oscillator object literals are invalid; use osc()', here)
             }
             return out
         }
         default:
-            throw sceneError(`Unsupported scene value '${node.type}'`, node)
+            throw sceneError(`Unsupported scene value '${node.type}'`, here)
     }
 }
 
 /** Read a keyword arg off a call node, or undefined. */
 function kw(call, name) {
-    return litValue(call.kwargs?.[name])
+    return litValue(call.kwargs?.[name], call)
 }
 
 function assertKnownKeywords(call, allowed) {
     for (const name of Object.keys(call.kwargs ?? {})) {
         if (!allowed.has(name)) {
-            throw sceneError(`Unknown keyword '${name}' for ${call.name}()`, call.kwargs[name])
+            throw sceneError(
+                `Unknown keyword '${name}' for ${call.name}()`,
+                located(call.kwargs[name], call)
+            )
         }
     }
 }
@@ -171,11 +183,11 @@ function numberKw(call, name, fallback, { min = -Infinity, max = Infinity, range
     const value = kw(call, name)
     if (value === undefined) return fallback
     if (typeof value !== 'number' || !Number.isFinite(value)) {
-        throw sceneError(`${name} must be a finite number`, call.kwargs?.[name] ?? call)
+        throw sceneError(`${name} must be a finite number`, located(call.kwargs?.[name], call))
     }
     if (value < min || value > max) {
         const requirement = rangeLabel ?? `between ${min} and ${max}`
-        throw sceneError(`${name} must be ${requirement}`, call.kwargs?.[name] ?? call)
+        throw sceneError(`${name} must be ${requirement}`, located(call.kwargs?.[name], call))
     }
     return value
 }
@@ -184,13 +196,13 @@ function vectorKw(call, name, fallback, length, { nonNegative = false } = {}) {
     const value = kw(call, name)
     if (value === undefined) return [...fallback]
     if (!Array.isArray(value) || value.length !== length) {
-        throw sceneError(`${name} must contain exactly ${length} values`, call.kwargs?.[name] ?? call)
+        throw sceneError(`${name} must contain exactly ${length} values`, located(call.kwargs?.[name], call))
     }
     if (!value.every(component => typeof component === 'number' && Number.isFinite(component))) {
-        throw sceneError(`${name} must contain finite numbers`, call.kwargs?.[name] ?? call)
+        throw sceneError(`${name} must contain finite numbers`, located(call.kwargs?.[name], call))
     }
     if (nonNegative && value.some(component => component < 0)) {
-        throw sceneError(`${name} values must be non-negative`, call.kwargs?.[name] ?? call)
+        throw sceneError(`${name} values must be non-negative`, located(call.kwargs?.[name], call))
     }
     return value
 }
@@ -257,7 +269,7 @@ function buildCamera(call) {
     const near = numberKw(call, 'near', DEFAULT_CAMERA.near, { min: 1e-6, rangeLabel: 'greater than zero' })
     const far = numberKw(call, 'far', DEFAULT_CAMERA.far, { min: 1e-6, rangeLabel: 'greater than zero' })
     if (far <= near) {
-        throw sceneError('far must be greater than near', call.kwargs?.far ?? call)
+        throw sceneError('far must be greater than near', located(call.kwargs?.far, call))
     }
     return {
         fov: numberKw(call, 'fov', DEFAULT_CAMERA.fov, { min: 1e-6, max: 179, rangeLabel: 'between 0 and 179 degrees' }),
@@ -271,7 +283,7 @@ function buildCamera(call) {
 function buildLight(call) {
     const type = kw(call, 'type') ?? 'directional'
     if (!LIGHT_TYPES.has(type)) {
-        throw sceneError(`Unknown light type '${type}'`, call.kwargs?.type ?? call)
+        throw sceneError(`Unknown light type '${type}'`, located(call.kwargs?.type, call))
     }
     assertKnownKeywords(call, LIGHT_KEYS[type])
     // Vectors and scalars are validated here for the same reason as the camera:
@@ -303,7 +315,7 @@ function buildLight(call) {
 function buildEnvironment(call) {
     const arg = call.args?.[0]
     if (!arg || arg.type !== 'OutputRef') {
-        throw sceneError('environment() expects a surface reference (o0..o7)', arg ?? call)
+        throw sceneError('environment() expects a surface reference (o0..o7)', located(arg, call))
     }
     assertKnownKeywords(call, ENVIRONMENT_KEYS)
     return {
@@ -341,7 +353,7 @@ function internMaterial(materialCall, materials) {
     if (!spec) {
         throw sceneError(
             'material() expects one material source (solid() or surface())',
-            materialCall.args?.[0] ?? materialCall
+            located(materialCall.args?.[0], materialCall)
         )
     }
 
@@ -372,7 +384,7 @@ function internMaterial(materialCall, materials) {
                 assertKnownKeywords(link, new Set(['tint', 'uvScale', 'uvOffset']))
                 const arg = link.args?.[0]
                 if (!arg || arg.type !== 'OutputRef') {
-                    throw sceneError('surface() expects a surface reference (o0..o7)', arg ?? link)
+                    throw sceneError('surface() expects a surface reference (o0..o7)', located(arg, link))
                 }
                 material.albedoSurface = arg.name
                 material.baseColor = vectorKw(link, 'tint', material.baseColor, 3, {
@@ -420,14 +432,14 @@ function buildTransform(call) {
         const value = kw(call, name)
         if (value === undefined) return undefined
         if (!Array.isArray(value) || value.length !== 3) {
-            throw sceneError(`${name} must contain exactly 3 values`, call.kwargs?.[name] ?? call)
+            throw sceneError(`${name} must contain exactly 3 values`, located(call.kwargs?.[name], call))
         }
         for (const component of value) {
             const number = typeof component === 'number' && Number.isFinite(component)
             const oscillator = component?.type === 'Oscillator'
                 && Number.isFinite(component.oscType)
             if (!number && !oscillator) {
-                throw sceneError(`${name} values must be finite numbers or osc()`, call.kwargs?.[name] ?? call)
+                throw sceneError(`${name} values must be finite numbers or osc()`, located(call.kwargs?.[name], call))
             }
         }
         return value
@@ -464,6 +476,19 @@ function walkNode(
     // rendered at the origin with nothing reporting why.
     if (head.name === 'group') assertKnownKeywords(head, TRANSFORM_KEYS)
 
+    // Links are filtered down to the two the scene graph understands, so
+    // anything else used to be dropped without a word: `mesh("sphere")
+    // .pos([0, 0, -4])` compiled clean and left the mesh at the origin.
+    for (const link of links) {
+        if (!NODE_LINKS.has(link.name)) {
+            throw sceneError(
+                `Unknown link '${link.name}()' on ${head.name}(); ` +
+                `a scene node accepts only .material() and .reflector()`,
+                located(link, head)
+            )
+        }
+    }
+
     const materialLinks = links.filter(link => link.name === 'material')
     if (materialLinks.length > 1) {
         throw sceneError('A node accepts only one material()', materialLinks[1])
@@ -489,21 +514,25 @@ function walkNode(
         // mesh() takes exactly one positional, the type. Anything after it was
         // read past and ignored, so `mesh("box", "sphere")` compiled clean.
         if ((head.args?.length ?? 0) > 1) {
-            throw sceneError('mesh() takes one positional argument, the mesh type', head.args[1])
+            throw sceneError(
+                'mesh() takes one positional argument, the mesh type',
+                located(head.args[1], head)
+            )
         }
-        const meshType = litValue(head.args?.[0])
+        const meshType = litValue(head.args?.[0], head)
         if (!MESH_TYPES.has(meshType)) {
-            throw sceneError(`Unknown mesh type '${meshType}'`, head.args?.[0] ?? head)
+            throw sceneError(`Unknown mesh type '${meshType}'`, located(head.args?.[0], head))
         }
         node.meshType = meshType
         node.meshParams = {}
         const shapeKeys = MESH_PARAM_KEYS[meshType]
         for (const [key, val] of Object.entries(head.kwargs ?? {})) {
             if (TRANSFORM_KEYS.has(key)) continue
+            const anchor = located(val, head)
             if (!shapeKeys.has(key)) {
-                throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, val)
+                throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, anchor)
             }
-            node.meshParams[key] = validateMeshParam(key, litValue(val), val)
+            node.meshParams[key] = validateMeshParam(key, litValue(val, head), anchor)
         }
     }
     if (head.name === 'volume') {
@@ -526,8 +555,19 @@ function walkNode(
         if ((reflector.args?.length ?? 0) > 0 || Object.keys(reflector.kwargs ?? {}).length > 0) {
             throw sceneError('reflector() takes no arguments', reflector)
         }
+        // Two distinct rejections. A volume or a group is not "not a plane" —
+        // it is a node kind planar reflection does not apply to at all, and
+        // naming the plane constraint there sent authors hunting for a mesh
+        // keyword that was never the problem.
+        if (head.name !== 'mesh') {
+            throw sceneError(
+                `reflector() is not supported on ${head.name}() nodes; ` +
+                `planar reflection applies to a plane mesh`,
+                located(reflector, head)
+            )
+        }
         if (node.meshType !== 'plane') {
-            throw sceneError('reflector() requires a plane mesh', reflector)
+            throw sceneError('reflector() requires a plane mesh', located(reflector, head))
         }
         node.planarReflection = true
         reflectorState.seen = true
@@ -582,12 +622,12 @@ export function compileScene(compilationResult) {
     const settings = {}
     for (const [key, val] of Object.entries(sceneAst.kwargs ?? {})) {
         if (!SCENE_SETTING_KEYS.has(key)) {
-            throw sceneError(`Unknown keyword '${key}' for scene()`, val)
+            throw sceneError(`Unknown keyword '${key}' for scene()`, located(val, sceneAst))
         }
-        settings[key] = litValue(val)
+        settings[key] = litValue(val, sceneAst)
     }
     const reflectionProbe = settings.reflectionProbe
-    const reflectionProbeNode = sceneAst.kwargs?.reflectionProbe ?? sceneAst
+    const reflectionProbeNode = located(sceneAst.kwargs?.reflectionProbe, sceneAst)
     if (reflectionProbe !== undefined) {
         const validProbe = Array.isArray(reflectionProbe) &&
             reflectionProbe.length === 3 &&
@@ -600,14 +640,14 @@ export function compileScene(compilationResult) {
         if (reflectionProbe === undefined) {
             throw sceneError(
                 'reflectionProbeSize requires reflectionProbe',
-                sceneAst.kwargs?.reflectionProbeSize ?? sceneAst
+                located(sceneAst.kwargs?.reflectionProbeSize, sceneAst)
             )
         }
         const size = settings.reflectionProbeSize
         if (!Number.isInteger(size) || size < 16 || size > 512) {
             throw sceneError(
                 'reflectionProbeSize must be an integer between 16 and 512',
-                sceneAst.kwargs?.reflectionProbeSize ?? sceneAst
+                located(sceneAst.kwargs?.reflectionProbeSize, sceneAst)
             )
         }
     }

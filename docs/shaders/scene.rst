@@ -58,7 +58,7 @@ Structure
    SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'
    SceneArg       ::= Setting | CameraCall | LightCall | EnvironmentCall | NodeChain
    NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) ( '.' NodeLink )*
-   VolumeCall     ::= 'volume' '(' VolRef ( ',' Kwarg )* ')'
+   VolumeCall     ::= 'volume' '(' ArgList ')'
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
    MaterialCall   ::= 'material' '(' MaterialSpec ')'
    MaterialSpec   ::= ( 'solid' | 'surface' ) '(' ArgList? ')' ( '.' MaterialTerm )*
@@ -69,6 +69,12 @@ arguments; settings are keyword arguments, and the two may be interleaved.
 
 Permitted direct children are ``camera``, ``light``, ``environment``, ``mesh``,
 ``volume`` and ``group``. Anything else raises ``Unknown scene child '<name>'``.
+
+``mesh()``, ``volume()`` and ``group()`` accept exactly the two chain links in
+``NodeLink`` — ``.material()`` and ``.reflector()``. Any other link raises
+``Unknown link '<name>()' on <kind>()``; transforms are keyword arguments on the
+node itself, so ``mesh("sphere").pos([0, 0, -4])`` is that error and not a
+placement.
 
 Name resolution
 ^^^^^^^^^^^^^^^
@@ -316,10 +322,26 @@ note at the top.
 
    render(o0)
 
-The positional argument must be a volume reference (``vol0``–``vol7``). A
-surface reference, a string, an out-of-range index, or no argument at all raises
-``volume() expects a volume reference (vol0..vol7)``, and a second positional
-raises ``volume() takes one positional argument, the volume reference``.
+``volume()`` takes an ordinary argument list; the shape of it is enforced by
+the scene compiler rather than by the grammar. Exactly one argument is
+positional, and it must be a volume reference ``( VolRef | Ident )`` naming
+``vol0``–``vol7`` — written directly as in the example above, or reached
+through a ``let`` binding:
+
+.. code-block:: none
+
+   let density = vol0
+
+   scene(volume(density, threshold: 0.5)).write(o0)
+
+Every other argument is a keyword. The two may be interleaved in any order —
+``volume(threshold: 0.5, vol0)`` is the same node as the example above — and a
+trailing comma is permitted.
+
+A surface reference, a string, an out-of-range index, or no positional argument
+at all raises ``volume() expects a volume reference (vol0..vol7)``. A second
+positional raises
+``volume() takes one positional argument, the volume reference``.
 
 .. list-table::
    :header-rows: 1
@@ -470,7 +492,10 @@ from the reflected viewpoint.
      .material(solid(color: [0.62, 0.64, 0.7]).pbr(metallic: 0.9, roughness: 0.2))
 
 It takes no arguments, requires a ``plane`` mesh, and only one reflector is
-supported per scene. Violating any of these raises a scene error.
+supported per scene. Violating any of these raises a scene error. On a
+``volume()`` or a ``group()`` the diagnostic names the node kind —
+``reflector() is not supported on volume() nodes`` — rather than the plane
+constraint, which was never the thing those nodes failed.
 
 Animation
 ---------
