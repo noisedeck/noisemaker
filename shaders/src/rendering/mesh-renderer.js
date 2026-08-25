@@ -1,5 +1,6 @@
 // shaders/src/rendering/mesh-renderer.js
 import { createSphere, createBox, createPlane, createCylinder, createTorus } from '../geometry/primitives.js'
+import { meshTextureSize } from '../geometry/geometry.js'
 import { mat4 } from '../scene/math.js'
 
 const DEFAULT_COLOR = Object.freeze([1, 1, 1])
@@ -121,8 +122,8 @@ export class MeshRenderer {
   }
 
   /**
-   * Get or create expanded (non-indexed) geometry for a mesh type,
-   * upload to GPU as textures, return handle with metadata.
+   * Get or create the packed mesh textures for a mesh type,
+   * upload them to the GPU, return handle with metadata.
    */
   getGeometry(meshType, meshParams) {
     // meshParams is fixed at compile time, so the key is derived once per
@@ -138,40 +139,16 @@ export class MeshRenderer {
     const geo = this._createPrimitive(meshType, meshParams)
     if (!geo) return null
 
-    // Expand indexed geometry to non-indexed (backend uses drawArrays)
-    const expanded = this._expandIndices(geo)
-
-    // Pack into 2D texture grid
-    const vertexCount = expanded.positions.length / 3
-    const texWidth = Math.ceil(Math.sqrt(vertexCount))
-    const texHeight = Math.ceil(vertexCount / texWidth)
-    const totalTexels = texWidth * texHeight
-
-    // Pad to fill texture (RGBA32F: xyz + w=0)
-    const posData = new Float32Array(totalTexels * 4)
-    const normData = new Float32Array(totalTexels * 4)
-    const uvData = new Float32Array(totalTexels * 4)
-
-    for (let i = 0; i < vertexCount; i++) {
-      posData[i * 4] = expanded.positions[i * 3]
-      posData[i * 4 + 1] = expanded.positions[i * 3 + 1]
-      posData[i * 4 + 2] = expanded.positions[i * 3 + 2]
-      posData[i * 4 + 3] = 1.0 // valid flag
-
-      normData[i * 4] = expanded.normals[i * 3]
-      normData[i * 4 + 1] = expanded.normals[i * 3 + 1]
-      normData[i * 4 + 2] = expanded.normals[i * 3 + 2]
-
-      if (expanded.uvs) {
-        uvData[i * 4] = expanded.uvs[i * 2]
-        uvData[i * 4 + 1] = expanded.uvs[i * 2 + 1]
-      }
-    }
+    // The backends draw with drawArrays and read vertices from a texel grid, so
+    // the geometry is de-indexed and packed by the shared Geometry path.
+    const { texWidth, texHeight } = meshTextureSize(geo.indices.length)
+    const packed = geo.toPackedTextures(texWidth, texHeight)
+    const vertexCount = packed.vertexCount
 
     const meshId = `scene_mesh_${this._meshIdCounter++}`
 
     if (this.backend) {
-      this.backend.uploadMeshData(meshId, posData, normData, uvData, texWidth, texHeight, vertexCount)
+      this.backend.uploadMeshData(meshId, packed.positionData, packed.normalData, packed.uvData, texWidth, texHeight, vertexCount)
     }
 
     const handle = { meshId, texWidth, texHeight, vertexCount }
@@ -276,33 +253,5 @@ export class MeshRenderer {
       case 'torus': return createTorus(meshParams)
       default: return null
     }
-  }
-
-  _expandIndices(geometry) {
-    const { positions, normals, uvs, indices } = geometry
-    if (!indices || indices.length === 0) {
-      return { positions, normals, uvs }
-    }
-
-    const vertexCount = indices.length
-    const expandedPos = new Float32Array(vertexCount * 3)
-    const expandedNorm = new Float32Array(vertexCount * 3)
-    const expandedUv = uvs ? new Float32Array(vertexCount * 2) : null
-
-    for (let i = 0; i < vertexCount; i++) {
-      const idx = indices[i]
-      expandedPos[i * 3] = positions[idx * 3]
-      expandedPos[i * 3 + 1] = positions[idx * 3 + 1]
-      expandedPos[i * 3 + 2] = positions[idx * 3 + 2]
-      expandedNorm[i * 3] = normals[idx * 3]
-      expandedNorm[i * 3 + 1] = normals[idx * 3 + 1]
-      expandedNorm[i * 3 + 2] = normals[idx * 3 + 2]
-      if (expandedUv && uvs) {
-        expandedUv[i * 2] = uvs[idx * 2]
-        expandedUv[i * 2 + 1] = uvs[idx * 2 + 1]
-      }
-    }
-
-    return { positions: expandedPos, normals: expandedNorm, uvs: expandedUv }
   }
 }

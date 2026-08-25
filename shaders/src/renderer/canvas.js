@@ -1891,14 +1891,11 @@ export class CanvasRenderer {
     // Mesh Loading (for meshLoader effect OBJ import)
     // =========================================================================
 
-    /** @private Pack mesh data, cache it, and upload to backend */
-    _packCacheAndUploadMesh(meshId, meshData, packMeshDataForTextures) {
+    /** @private Pack geometry, cache it, and upload to backend */
+    _packCacheAndUploadMesh(meshId, geometry) {
         const texWidth = 256
         const texHeight = 256
-        const packed = packMeshDataForTextures(
-            meshData.positions, meshData.normals, meshData.uvs,
-            texWidth, texHeight
-        )
+        const packed = geometry.toPackedTextures(texWidth, texHeight)
         this._meshCache.set(meshId, {
             positionData: packed.positionData,
             normalData: packed.normalData,
@@ -1927,11 +1924,11 @@ export class CanvasRenderer {
 
         try {
             // Dynamic import to avoid loading parser until needed
-            const { loadOBJ, packMeshDataForTextures } = await import('../runtime/obj-parser.js')
+            const { loadOBJ } = await import('../runtime/obj-parser.js')
 
-            const meshData = await loadOBJ(url)
+            const geometry = await loadOBJ(url)
 
-            const result = this._packCacheAndUploadMesh(meshId, meshData, packMeshDataForTextures)
+            const result = this._packCacheAndUploadMesh(meshId, geometry)
             return { success: true, vertexCount: result.vertexCount }
         } catch (err) {
             console.error('[Canvas] Failed to load OBJ:', err)
@@ -1952,10 +1949,10 @@ export class CanvasRenderer {
         }
 
         try {
-            const { parseOBJ, packMeshDataForTextures } = await import('../runtime/obj-parser.js')
+            const { parseOBJ } = await import('../runtime/obj-parser.js')
 
-            const meshData = parseOBJ(objText)
-            const result = this._packCacheAndUploadMesh(meshId, meshData, packMeshDataForTextures)
+            const geometry = parseOBJ(objText)
+            const result = this._packCacheAndUploadMesh(meshId, geometry)
             return { success: true, vertexCount: result.vertexCount }
         } catch (err) {
             console.error('[Canvas] Failed to parse OBJ:', err)
