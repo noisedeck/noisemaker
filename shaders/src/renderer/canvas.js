@@ -851,7 +851,33 @@ export class CanvasRenderer {
         // than starting a second pass over the same textures and queueing
         // unbounded work behind it.
         if (this._sceneRenderPending) return this._sceneRenderPending
-        const pending = (async () => {
+
+        // The promise stored in _sceneRenderPending is the *guarded* one. Every
+        // frame that reuses an in-flight render awaits this exact object, so
+        // handing back a raw one turns a scene failure into an unhandled
+        // rejection on the reusing frame: it skips that frame's pipeline run
+        // and never reaches _onError. _runSceneRender absorbs the failure, so
+        // this promise resolves, always.
+        //
+        // .finally() callbacks never run synchronously, so `pending` is always
+        // assigned by the time the field is cleared — even if the render body
+        // fails before its first await.
+        const pending = this._runSceneRender(timeMs, normalizedTime).finally(() => {
+            if (this._sceneRenderPending === pending) this._sceneRenderPending = null
+        })
+        this._sceneRenderPending = pending
+        return pending
+    }
+
+    /**
+     * Draw one scene frame. Reports failures through _onError rather than
+     * rejecting, so callers sharing this promise can still present.
+     * @private
+     * @param {number} timeMs - Timestamp to advance the scene clock with
+     * @param {number} normalizedTime - Shared animation loop position in [0, 1]
+     */
+    async _runSceneRender(timeMs, normalizedTime) {
+        try {
             if (this._clock) {
                 this._clock.tick(timeMs)
             }
@@ -860,17 +886,11 @@ export class CanvasRenderer {
             }
             this._sceneTree.updateWorldMatrices()
             await this._sceneRenderer.render(this._sceneTree, this._clock, SCENE_COLOR_TEXTURE)
-        })()
-        this._sceneRenderPending = pending
-        try {
-            await pending
         } catch (err) {
             console.error('Scene render error:', err)
             if (this._onError) {
                 this._onError(err)
             }
-        } finally {
-            if (this._sceneRenderPending === pending) this._sceneRenderPending = null
         }
     }
 
@@ -885,9 +905,19 @@ export class CanvasRenderer {
 
         // Scene programs draw into SCENE_COLOR_TEXTURE before the pipeline
         // runs, so the pipeline's blit picks the result up this frame.
-        await this._renderScene(time, normalizedTime)
-        // Teardown can land while the scene render is in flight.
-        if (!this._isRunning) return
+        //
+        // A render already in flight is deliberately NOT awaited here. One can
+        // span many frames — SceneRenderer.render() recompiles shaders when the
+        // light count changes — and blocking every rAF frame on it would stall
+        // the whole canvas for that duration. Skipping to the pipeline blits
+        // the last completed scene texture instead, and the in-flight render
+        // lands on whichever frame it finishes in. Single-shot render() keeps
+        // the strict await: a capture must see the frame it asked for.
+        if (!this._sceneRenderPending) {
+            await this._renderScene(time, normalizedTime)
+            // Teardown can land while the scene render is in flight.
+            if (!this._isRunning) return
+        }
 
         if (this._pipeline) {
             // Normal effect pipeline rendering path
@@ -996,6 +1026,10 @@ export class CanvasRenderer {
         this._isScene = false
         this._sceneTree = null
         this._sceneRenderer = null
+        // A disposed scene's in-flight render must not be handed to the first
+        // frame of whatever is compiled next: that tree was never ticked or
+        // bound for it, and its textures may be gone.
+        this._sceneRenderPending = null
         if (this._clock) {
             this._clock.reset()
             this._clock = null
@@ -1069,6 +1103,7 @@ export class CanvasRenderer {
                 this._sceneRenderer.dispose()
                 this._sceneRenderer = null
             }
+            this._sceneRenderPending = null
             this._sceneBindings = null
             this._clock = null
         }
@@ -1169,6 +1204,9 @@ export class CanvasRenderer {
             const { SceneRenderer } = await loadSceneModules()
             if (this._sceneRenderer?.backend !== this._pipeline.backend) {
                 this._sceneRenderer?.dispose?.()
+                // The retired renderer's in-flight promise belongs to a tree
+                // and a set of textures this one does not share.
+                this._sceneRenderPending = null
                 this._sceneRenderer = new SceneRenderer(this._pipeline.backend, this._pipeline)
                 await this._sceneRenderer.initialize(this._width, this._height)
             }

@@ -69,12 +69,13 @@ globalThis.GPUMapMode = globalThis.GPUMapMode ?? { READ: 0x1 }
 /**
  * @param {string} gpuFormat
  * @param {(bytesPerRow: number) => ArrayBuffer} fill - Produces the mapped bytes.
+ * @param {number} [width] - Texture width; wide enough rows expose bytes-per-pixel.
  */
-function webgpuBackend(gpuFormat, fill) {
+function webgpuBackend(gpuFormat, fill, width = WIDTH) {
     const copies = []
     const backend = Object.create(WebGPUBackend.prototype)
     backend.textures = new Map([['scene_gbuf_depth', {
-        handle: 'depth-handle', width: WIDTH, height: HEIGHT, gpuFormat
+        handle: 'depth-handle', width, height: HEIGHT, gpuFormat
     }]])
     let mapped = null
     backend.device = {
@@ -101,13 +102,29 @@ function webgpuBackend(gpuFormat, fill) {
     return { backend, copies }
 }
 
-await test('WebGPU sizes the r32float staging copy at 4 bytes per pixel', async () => {
-    const { backend, copies } = webgpuBackend('r32float', (bytesPerRow) => new ArrayBuffer(bytesPerRow * HEIGHT))
-    await backend.readPixels('scene_gbuf_depth')
-    assert.strictEqual(copies.length, 1)
-    assert.strictEqual(copies[0].dst.bytesPerRow, 256,
-        'r32float is 4 bytes per pixel, aligned up to the 256-byte row requirement')
-    assert.strictEqual(copies[0].dst.buffer.desc.size, 256 * HEIGHT)
+// A 4-pixel row rounds up to the 256-byte minimum at any of these formats, so
+// it cannot tell one bytes-per-pixel from another. 200 pixels can.
+const WIDE = 200
+
+await test('WebGPU sizes the staging copy by the format bytes per pixel', async () => {
+    const sized = async (gpuFormat) => {
+        const { backend, copies } = webgpuBackend(
+            gpuFormat, (bytesPerRow) => new ArrayBuffer(bytesPerRow * HEIGHT), WIDE)
+        await backend.readPixels('scene_gbuf_depth')
+        assert.strictEqual(copies.length, 1)
+        assert.strictEqual(copies[0].dst.buffer.desc.size, copies[0].dst.bytesPerRow * HEIGHT)
+        return copies[0].dst.bytesPerRow
+    }
+    // 200 * 2 = 400 -> 512. The rgba8unorm fall-through would give 1024, so
+    // this fails if r16float is not sized as a single half-float channel.
+    assert.strictEqual(await sized('r16float'), 512,
+        'r16float is 2 bytes per pixel')
+    assert.strictEqual(await sized('r32float'), 1024,
+        'r32float is 4 bytes per pixel')
+    assert.strictEqual(await sized('rgba8unorm'), 1024,
+        'rgba8unorm is 4 bytes per pixel')
+    assert.strictEqual(await sized('rgba16float'), 1792,
+        'rgba16float is 8 bytes per pixel')
 })
 
 await test('WebGPU decodes r32float as greyscale, not as packed rgba8', async () => {
@@ -117,6 +134,32 @@ await test('WebGPU decodes r32float as greyscale, not as packed rgba8', async ()
         for (let y = 0; y < HEIGHT; y++) {
             const rowStart = (y * bytesPerRow) / 4
             for (let x = 0; x < WIDTH; x++) view[rowStart + x] = DEPTH_ROWS[y][x]
+        }
+        return buf
+    })
+    const { width, height, data } = await backend.readPixels('scene_gbuf_depth')
+    assert.strictEqual(width, WIDTH)
+    assert.strictEqual(height, HEIGHT)
+    assert.deepStrictEqual(Array.from(data), Array.from(expectedRGBA()))
+})
+
+// IEEE-754 binary16 bit patterns for the depth values above. Each is exactly
+// representable in half precision, so the expected greyscale is unchanged.
+const HALF_BITS = new Map([
+    [0.0, 0x0000], [0.125, 0x3000], [0.25, 0x3400], [0.375, 0x3600],
+    [0.5, 0x3800], [0.625, 0x3900], [0.875, 0x3b00], [1.0, 0x3c00]
+])
+
+await test('WebGPU decodes r16float through the half-float path', async () => {
+    // r16float shares the single-channel branch with r32float but reads
+    // Uint16Array and runs each value through float16ToFloat32. Reading it as
+    // raw float32s, or skipping the conversion, yields nonsense.
+    const { backend } = webgpuBackend('r16float', (bytesPerRow) => {
+        const buf = new ArrayBuffer(bytesPerRow * HEIGHT)
+        const view = new Uint16Array(buf)
+        for (let y = 0; y < HEIGHT; y++) {
+            const rowStart = (y * bytesPerRow) / 2
+            for (let x = 0; x < WIDTH; x++) view[rowStart + x] = HALF_BITS.get(DEPTH_ROWS[y][x])
         }
         return buf
     })

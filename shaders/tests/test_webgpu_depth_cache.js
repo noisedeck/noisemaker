@@ -32,9 +32,14 @@ async function test(name, fn) {
     }
 }
 
+/** Let the deferred retirement callbacks run. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+
 function stubBackend() {
     const destroyed = []
-    let resolveWork = null
+    // One resolver per onSubmittedWorkDone() call, so a test can complete the
+    // work outstanding at one moment without completing a later one.
+    const resolvers = []
     const backend = Object.create(WebGPUBackend.prototype)
     backend.depthTextures = new Map()
     backend.device = {
@@ -43,11 +48,30 @@ function stubBackend() {
         },
         queue: {
             onSubmittedWorkDone() {
-                return new Promise(resolve => { resolveWork = resolve })
+                return new Promise(resolve => { resolvers.push(resolve) })
             }
         }
     }
-    return { backend, destroyed, flushGpu: async () => { if (resolveWork) resolveWork(); await Promise.resolve() } }
+    const flushGpu = async () => {
+        for (const resolve of resolvers.splice(0)) resolve()
+        await settle()
+    }
+    return { backend, destroyed, resolvers, flushGpu }
+}
+
+/** Widths of the textures destroyed, in order — a readable identity per texture. */
+const widths = destroyed => destroyed.map(texture => texture.desc.size.width)
+
+/** Minimal state the rest of destroy() walks, so the depth paths can be exercised. */
+function stubTeardownState(backend) {
+    backend.textures = new Map()
+    backend.programs = new Map()
+    backend.pipelines = new Map()
+    backend.bindGroups = new Map()
+    backend.samplers = new Map()
+    backend.uniformBufferPool = []
+    backend.activeUniformBuffers = []
+    backend.context = null
 }
 
 await test('the cache does not grow without bound across resize sizes', async () => {
@@ -71,6 +95,50 @@ await test('evicted depth textures are destroyed only after submitted work compl
         'nothing may be destroyed while command buffers may still reference it')
     await flushGpu()
     assert.ok(destroyed.length > 0, 'evicted textures are released once the GPU is idle')
+})
+
+await test('an eviction is not released by a promise requested before it', async () => {
+    // onSubmittedWorkDone() only covers the submits outstanding when it was
+    // requested. Coalescing every retirement behind the FIRST one lets a
+    // texture retired later be destroyed while a submit that still references
+    // it is in flight.
+    const { backend, destroyed, resolvers } = stubBackend()
+    for (let i = 0; i < 4; i++) backend.getDepthTexture(100 + i, 240)
+    assert.strictEqual(resolvers.length, 0, 'the cache is only at its limit; nothing evicted yet')
+
+    backend.getDepthTexture(200, 240)   // evicts the 100-wide texture
+    backend.getDepthTexture(201, 240)   // evicts the 101-wide texture
+    assert.strictEqual(resolvers.length, 2,
+        `each eviction needs its own onSubmittedWorkDone, got ${resolvers.length} for two evictions`)
+
+    resolvers[0]()
+    await settle()
+    assert.deepStrictEqual(widths(destroyed), [100],
+        `only the texture retired before that promise may be released by it, got ${widths(destroyed)}`)
+
+    resolvers[1]()
+    await settle()
+    assert.deepStrictEqual(widths(destroyed), [100, 101],
+        'the later eviction is released by its own promise')
+})
+
+await test('destroy() drains retirements so none fire against a torn-down device', async () => {
+    const { backend, destroyed, resolvers } = stubBackend()
+    for (let i = 0; i < 4; i++) backend.getDepthTexture(100 + i, 240)
+    backend.getDepthTexture(200, 240)   // evicts the 100-wide texture
+    assert.strictEqual(destroyed.length, 0, 'the retirement is still deferred')
+
+    stubTeardownState(backend)
+    backend.destroy()
+    const atTeardown = destroyed.length
+    assert.ok(atTeardown > 0, 'teardown releases the depth textures it still owns')
+
+    resolvers[0]()
+    await settle()
+    assert.strictEqual(destroyed.length, atTeardown,
+        `a retirement deferred past destroy() must not touch anything, got ${destroyed.length - atTeardown} late destroy call(s)`)
+    assert.strictEqual(new Set(destroyed).size, destroyed.length,
+        'no texture may be destroyed twice')
 })
 
 console.log(`\nWebGPU depth cache: ${passed} passed, ${failed} failed`)

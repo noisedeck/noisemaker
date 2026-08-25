@@ -64,6 +64,12 @@ const PROBE_GBUF_TEXTURES = [
  * only attachment 0, leaving normals, positions and depth undefined rather than
  * cleared. clearTexture zeroes each target directly and behaves the same on
  * both backends, which is also what the `depth <= 0` no-hit sentinel expects.
+ *
+ * Ordering constraint: on WebGPU, clearTexture submits its own command buffer
+ * immediately, so these clears land AHEAD of anything recorded into the frame's
+ * shared encoder — including work recorded earlier in the same frame. This
+ * helper is therefore only valid when nothing has written the targets yet this
+ * frame, which is what the zero-mesh call sites guarantee.
  * @param {object} backend - Active render backend
  * @param {object} outputs - colorN -> texture id map for the G-buffer
  */

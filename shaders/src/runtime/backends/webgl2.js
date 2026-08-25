@@ -388,6 +388,7 @@ export class WebGL2Backend extends Backend {
             if (existing.width !== width || existing.height !== height) {
                 gl.bindRenderbuffer(gl.RENDERBUFFER, existing.buffer)
                 gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height)
+                gl.bindRenderbuffer(gl.RENDERBUFFER, null)
                 existing.width = width
                 existing.height = height
             }
@@ -761,6 +762,10 @@ export class WebGL2Backend extends Backend {
             const isFloat = glFormat && (glFormat.type === gl.HALF_FLOAT || glFormat.type === gl.FLOAT)
             if (glFormat?.format === gl.RED) {
                 // One channel per pixel, expanded to greyscale on the way out.
+                // This assumes IMPLEMENTATION_COLOR_READ_FORMAT/TYPE for these
+                // attachments is RED/FLOAT, which holds on ANGLE (Chrome, every
+                // browser this runs in). A driver reporting something else
+                // would need the pair queried and a conversion here.
                 const pixels = width * height
                 const buf = isFloat ? new Float32Array(pixels) : new Uint8Array(pixels)
                 gl.readPixels(0, 0, width, height, gl.RED, isFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, buf)

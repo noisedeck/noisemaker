@@ -40,8 +40,9 @@ function stubGl() {
         DEPTH_COMPONENT24: 'DEPTH_COMPONENT24',
         FRAMEBUFFER_COMPLETE: 'COMPLETE',
         boundFramebuffer: null,
+        boundRenderbuffer: null,
         createRenderbuffer() { return { id: 'rb' } },
-        bindRenderbuffer() {},
+        bindRenderbuffer(_target, rb) { this.boundRenderbuffer = rb },
         renderbufferStorage() {},
         bindFramebuffer(_target, fbo) { this.boundFramebuffer = fbo },
         framebufferRenderbuffer() {},
@@ -84,6 +85,22 @@ test('cached path leaves the binding untouched', () => {
     backend.ensureDepthBuffer(target, 320, 240)   // cache hit
 
     assert.strictEqual(gl.boundFramebuffer, target, 'cache hit must not rebind')
+})
+
+test('the resize path leaves no renderbuffer bound', () => {
+    // The creation path finishes on null; the resize path did not, leaking a
+    // bound renderbuffer into whatever ran next.
+    const gl = stubGl()
+    const backend = backendWith(gl)
+    const target = { id: 'mesh-fbo' }
+
+    backend.ensureDepthBuffer(target, 320, 240)
+    assert.strictEqual(gl.boundRenderbuffer, null, 'precondition: creation unbinds')
+
+    backend.ensureDepthBuffer(target, 640, 480)   // resize
+
+    assert.strictEqual(gl.boundRenderbuffer, null,
+        'the resized renderbuffer must be unbound, as the creation path does')
 })
 
 test('destroying a texture releases the depth renderbuffers of its FBOs', () => {

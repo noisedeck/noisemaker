@@ -2194,6 +2194,12 @@ export class WebGPUBackend extends Backend {
                     // GPGPU passes that compute-style effects compile down to,
                     // and WebGL2 only culls when drawMode is 'triangles'. Mesh
                     // passes ask for 'back' explicitly.
+                    //
+                    // Note the asymmetry if an MRT *triangles* pass is ever
+                    // added: WebGL2 back-culls any triangles pass whose
+                    // cullMode is not 'none', while this default leaves it
+                    // unculled — so such a pass must state its cullMode
+                    // explicitly or the two backends will disagree.
                     ...resolveCullState(cullMode, 'none')
                 }
             }
@@ -2252,20 +2258,30 @@ export class WebGPUBackend extends Backend {
      * Destroy an evicted depth texture once the GPU has finished with it.
      *
      * Destroying a texture an in-flight command buffer still references is a
-     * validation error, which is why eviction cannot be immediate. Retirements
-     * are batched behind a single onSubmittedWorkDone().
+     * validation error, which is why eviction cannot be immediate.
+     *
+     * Each eviction gets its OWN onSubmittedWorkDone(). That promise covers
+     * exactly the submits outstanding when it was requested, so batching later
+     * retirements behind the first one would release a texture a subsequent
+     * submit can still reference. One promise per eviction is safe because the
+     * victim is the LRU entry — last used in a frame that has already been
+     * submitted — and eviction only happens during a resize drag, so the extra
+     * promises cost nothing.
      * @param {GPUTexture} texture - Evicted depth texture
      */
     retireDepthTexture(texture) {
         if (!texture) return
         if (!this._retiredDepthTextures) this._retiredDepthTextures = []
         this._retiredDepthTextures.push(texture)
-        if (this._depthRetireScheduled) return
-        this._depthRetireScheduled = true
         this.device.queue.onSubmittedWorkDone().then(() => {
-            for (const retired of this._retiredDepthTextures) retired.destroy()
-            this._retiredDepthTextures.length = 0
-            this._depthRetireScheduled = false
+            const pending = this._retiredDepthTextures
+            if (!pending) return
+            const index = pending.indexOf(texture)
+            // destroy() drains the list on teardown; the texture is gone and
+            // the device it belonged to may be too.
+            if (index === -1) return
+            pending.splice(index, 1)
+            texture.destroy()
         })
     }
 
@@ -3202,6 +3218,21 @@ export class WebGPUBackend extends Backend {
      * Legacy bind group creation for shaders that don't have parsed bindings.
      */
     createLegacyBindGroup(pass, program, state) {
+        // A multi-output program has no eager `pipeline`: compileRenderProgram
+        // skips it because a single-target descriptor fails interface matching
+        // against a fragment stage with several @location outputs. Its layout
+        // only exists on the pipeline resolveMRTRenderPipeline builds, which
+        // this path cannot reach — and it would build the wrong entries anyway.
+        if (!program.pipeline) {
+            const outputs = program.fragmentOutputCount ?? 'multiple'
+            throw new Error(
+                `Program '${pass.program}' has no eager pipeline to take a bind group layout from: ` +
+                `its fragment stage declares ${outputs} @location outputs, so it is MRT-only. ` +
+                `The legacy bind group path is for shaders with no @binding declarations at all; ` +
+                `declare them so the parsed-binding path builds the group instead.`
+            )
+        }
+
         const entries = []
         let binding = 0
 
@@ -3752,6 +3783,15 @@ export class WebGPUBackend extends Backend {
                 depthTexture.destroy()
             }
             this.depthTextures.clear()
+        }
+
+        // Evictions waiting on onSubmittedWorkDone() would otherwise fire after
+        // teardown, against a device that is on its way out. Release them here
+        // and empty the list, which is also how the deferred callbacks above
+        // learn there is nothing left for them to do.
+        if (this._retiredDepthTextures) {
+            for (const retired of this._retiredDepthTextures) retired.destroy()
+            this._retiredDepthTextures.length = 0
         }
 
         this.programs.clear()

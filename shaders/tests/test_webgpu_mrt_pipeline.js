@@ -163,5 +163,25 @@ await test('vertex varying @locations do not count as fragment outputs', async (
     assert.strictEqual(renderPipelines[0].fragment.targets.length, 1)
 })
 
+await test('the legacy bind group path names the program it cannot serve', async () => {
+    const { backend } = stubBackend()
+    const info = await backend.compileProgram('scene_mesh_gbuf', {
+        vertexWGSL: MESH_VERTEX,
+        fragment: MRT_FRAGMENT,
+        perBindingUniforms: true
+    })
+    assert.strictEqual(info.pipeline, null, 'precondition: an MRT program has no eager pipeline')
+    // Dereferencing the missing pipeline gives "Cannot read properties of null",
+    // which says nothing about which program or why it has no pipeline.
+    assert.throws(
+        () => backend.createLegacyBindGroup({ id: 'gbuf_pass', program: 'scene_mesh_gbuf' }, info, {}),
+        /scene_mesh_gbuf/,
+        'the failure must name the program')
+    assert.throws(
+        () => backend.createLegacyBindGroup({ id: 'gbuf_pass', program: 'scene_mesh_gbuf' }, info, {}),
+        /@location/,
+        'the failure must say why there is no pipeline to take a layout from')
+})
+
 console.log(`\nWebGPU MRT pipeline: ${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

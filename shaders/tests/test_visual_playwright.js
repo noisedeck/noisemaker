@@ -29,6 +29,7 @@ const PLANAR_REFLECTION_ONLY = process.argv.includes('--planar-reflection-only')
   || process.argv.includes('--planar-contact-only')
 const MATERIAL_BANDING_ONLY = process.argv.includes('--material-banding-only')
 const SCENE_ANIMATION_ONLY = process.argv.includes('--scene-animation-only')
+const CROSS_BACKEND_ONLY = process.argv.includes('--cross-backend-only')
 
 const MIME = {
   '.html': 'text/html',
@@ -847,6 +848,10 @@ async function litColorFor(browser, port, backendName) {
     return await page.evaluate(async () => {
       const renderer = window.__noisemakerCanvasRenderer
       renderer.stop()
+      // Reset the clock first: u_time reaches the scene passes through
+      // frameState, so an unreset clock makes "a fixed time" depend on how
+      // long the page happened to run before this point.
+      renderer._clock?.reset()
       // A fixed time so both backends render the same frame.
       await renderer.render(0.25)
       const image = await renderer.sceneRenderer.backend.readPixels('scene_lit_color')
@@ -920,6 +925,8 @@ async function main() {
     results.push(await testRoughMaterialReflectionStability(browser, port, 'webgpu'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgl2'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
+  } else if (CROSS_BACKEND_ONLY) {
+    results.push(...(await testCrossBackendParity(browser, port)))
   } else if (PLANAR_REFLECTION_ONLY) {
     results.push(await testFlatPlanarReflection(browser, port, 'webgl2'))
     results.push(await testFlatPlanarReflection(browser, port, 'webgpu'))
@@ -938,7 +945,8 @@ async function main() {
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
     results.push(...(await testCrossBackendParity(browser, port)))
   }
-  if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY) {
+  if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY
+      && !CROSS_BACKEND_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']
     const backends = ['webgl2', 'webgpu']
     for (const scene of scenes) {

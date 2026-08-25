@@ -28,18 +28,32 @@ async function test(name, fn) {
     }
 }
 
-/** A CanvasRenderer wired to fakes that record the order of operations. */
-function harness({ sceneTicks = 1 } = {}) {
+/** Let queued microtasks and timers drain. */
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+/**
+ * A CanvasRenderer wired to fakes that record the order of operations.
+ * `gate`, when supplied, is a promise the scene render waits on, so a render
+ * can be held across several frames. `sceneError` makes the render reject.
+ */
+function harness({ sceneTicks = 1, gate = null, sceneError = null } = {}) {
     const order = []
+    const errors = []
     const renderer = new CanvasRenderer({ width: 8, height: 8 })
     renderer._isScene = true
     renderer._sceneBindings = []
     renderer._clock = null
+    renderer._onError = err => errors.push(err)
     renderer._sceneTree = { updateWorldMatrices() { order.push('tree') } }
     renderer._sceneRenderer = {
         async render() {
             order.push('scene-start')
             for (let i = 0; i < sceneTicks; i++) await Promise.resolve()
+            if (gate) await gate
+            if (sceneError) {
+                order.push('scene-throw')
+                throw sceneError
+            }
             order.push('scene-end')
         }
     }
@@ -47,8 +61,10 @@ function harness({ sceneTicks = 1 } = {}) {
         lastPassCount: 0,
         render() { order.push('pipeline') }
     }
-    return { renderer, order }
+    return { renderer, order, errors }
 }
+
+const count = (order, entry) => order.filter(o => o === entry).length
 
 await test('render() completes the scene before running the pipeline', async () => {
     const { renderer, order } = harness({ sceneTicks: 3 })
@@ -76,6 +92,73 @@ await test('overlapping scene renders do not queue unbounded work', async () => 
     const starts = order.filter(o => o === 'scene-start').length
     assert.strictEqual(starts, 1,
         `expected the in-flight scene render to be reused, got ${starts} concurrent starts`)
+})
+
+await test('a failing scene render is reported once and never rejects its callers', async () => {
+    // The in-flight promise is handed to every frame that reuses it. If the
+    // stored promise is the raw one, a reusing frame gets an unguarded
+    // rejection: an unhandled rejection that skips the pipeline and never
+    // reaches _onError.
+    const boom = new Error('scene exploded')
+    const { renderer, order, errors } = harness({ sceneTicks: 4, sceneError: boom })
+    const originating = renderer.render(0.1)
+    const reusing = renderer.render(0.2)
+    await assert.doesNotReject(() => originating,
+        'the originating frame must absorb the scene failure')
+    await assert.doesNotReject(() => reusing,
+        'a frame reusing the in-flight render must absorb it too')
+    assert.strictEqual(errors.length, 1,
+        `_onError must fire exactly once per failed scene render, got ${errors.length}`)
+    assert.strictEqual(errors[0], boom, 'the original error must be reported')
+    assert.strictEqual(count(order, 'pipeline'), 2,
+        `the pipeline must still present on both frames, got ${count(order, 'pipeline')}`)
+})
+
+await test('the render loop keeps presenting while a scene render is in flight', async () => {
+    // A light-count change recompiles shaders inside SceneRenderer.render().
+    // Blocking every rAF frame on that promise freezes the canvas for its whole
+    // duration; the pipeline can keep blitting the last completed scene texture.
+    let release = null
+    const gate = new Promise(resolve => { release = resolve })
+    const { renderer, order } = harness({ gate })
+    const previousRAF = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = () => 0
+    renderer._isRunning = true
+    renderer._loopStartTime = 0
+    try {
+        const frames = [renderer._renderLoop(0)]
+        await tick()
+        frames.push(renderer._renderLoop(16))
+        await tick()
+        frames.push(renderer._renderLoop(32))
+        await tick()
+
+        assert.strictEqual(count(order, 'scene-start'), 1,
+            `only one scene render may be in flight, got ${count(order, 'scene-start')}`)
+        assert.strictEqual(count(order, 'pipeline'), 2,
+            `frames 2 and 3 must present while frame 1's scene render is in flight, got ${count(order, 'pipeline')}`)
+
+        release()
+        await Promise.all(frames)
+        assert.strictEqual(count(order, 'pipeline'), 3,
+            'the frame that owns the scene render still presents when it lands')
+        assert.strictEqual(count(order, 'scene-start'), 1,
+            'the completed render must not have been restarted')
+    } finally {
+        renderer._isRunning = false
+        globalThis.requestAnimationFrame = previousRAF
+    }
+})
+
+await test('dispose() drops the in-flight scene render', async () => {
+    // A disposed scene's promise must not be handed to the first frame of a
+    // newly compiled scene: that tree was never ticked or bound for it.
+    const { renderer } = harness()
+    renderer._pipeline = null
+    renderer._sceneRenderPending = Promise.resolve()
+    await renderer.dispose()
+    assert.strictEqual(renderer._sceneRenderPending, null,
+        'teardown must clear the in-flight scene render')
 })
 
 await test('createRuntime reuses an already-compiled graph', async () => {
