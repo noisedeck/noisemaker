@@ -737,6 +737,12 @@ export class WebGL2Backend extends Backend {
      * WebGPUBackend.readPixels(): returns top-down RGBA8 (0-255) regardless of the
      * texture's internal format. gl.readPixels is bottom-up, so the rows are flipped
      * to top-down to match the WebGPU backend's readback orientation.
+     *
+     * Single-channel attachments (R8/R16F/R32F — scene_gbuf_depth is r32f) are
+     * read as RED, which is their implementation colour read format; asking for
+     * RGBA there is an invalid operation. The one channel expands to greyscale
+     * — value in R, G and B, alpha opaque — matching WebGPUBackend.readPixels()
+     * so the two backends stay diffable.
      * @param {string} textureId
      * @returns {{width:number, height:number, data:Uint8Array}}
      */
@@ -753,7 +759,19 @@ export class WebGL2Backend extends Backend {
         const out = new Uint8Array(width * height * 4)
         if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
             const isFloat = glFormat && (glFormat.type === gl.HALF_FLOAT || glFormat.type === gl.FLOAT)
-            if (isFloat) {
+            if (glFormat?.format === gl.RED) {
+                // One channel per pixel, expanded to greyscale on the way out.
+                const pixels = width * height
+                const buf = isFloat ? new Float32Array(pixels) : new Uint8Array(pixels)
+                gl.readPixels(0, 0, width, height, gl.RED, isFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, buf)
+                for (let i = 0; i < pixels; i++) {
+                    const v = isFloat ? Math.max(0, Math.min(255, Math.round(buf[i] * 255))) : buf[i]
+                    out[i * 4] = v
+                    out[i * 4 + 1] = v
+                    out[i * 4 + 2] = v
+                    out[i * 4 + 3] = 255
+                }
+            } else if (isFloat) {
                 const buf = new Float32Array(width * height * 4)
                 gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, buf)
                 for (let i = 0; i < out.length; i++) {
@@ -1174,6 +1192,19 @@ export class WebGL2Backend extends Backend {
 
                 resolvedOutputIds.push(currentOutputId)
                 const tex = this.textures.get(currentOutputId)
+
+                // Face selection below is guarded by !isMRT, so an MRT pass
+                // aimed at a cube map would render every attachment into
+                // whichever face createMRTFBO happened to attach (+X) — wrong
+                // pixels, no diagnostic. Only single-output passes can name a
+                // face via cubeFace, so reject the MRT case outright.
+                if (tex?.cube) {
+                    throw new Error(
+                        `Pass '${effectivePass.id}' targets cube texture '${currentOutputId}' from a multiple-render-target pass. ` +
+                        'Cube render targets are supported only on single-output passes, which select a face via cubeFace.'
+                    )
+                }
+
                 if (tex) {
                     textures.push(tex.handle)
                     if (!viewportTex) viewportTex = tex

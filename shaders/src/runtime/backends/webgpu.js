@@ -60,6 +60,87 @@ function float16ToFloat32(h) {
 /** How many distinct viewport sizes keep a depth texture alive. */
 const DEPTH_TEXTURE_CACHE_LIMIT = 4
 
+/**
+ * Strip WGSL line and block comments so brace/paren scanning is not fooled by
+ * a `{`, `}` or `)` that only exists inside a comment. WGSL has no string
+ * literals, so a plain scan is safe.
+ * @param {string} source
+ * @returns {string}
+ */
+function stripWgslComments(source) {
+    return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, '')
+}
+
+/**
+ * Extract the body text of `struct <name> { ... }` by counting braces.
+ *
+ * The obvious regex — `struct\s+X\s*\{([^}]+)\}` — stops at the FIRST
+ * closing brace, so any struct whose body contains nested braces parses short
+ * (or not at all) and the caller silently falls back to a wrong layout.
+ * @param {string} source - WGSL source to search
+ * @param {string} name - Struct name
+ * @returns {string|null} The body between the outermost braces, or null when
+ *   the struct is absent or unterminated.
+ */
+export function extractWgslStructBody(source, name) {
+    if (!source || !name) return null
+    const cleaned = stripWgslComments(source)
+    const decl = new RegExp(`\\bstruct\\s+${name}\\s*\\{`)
+    const match = decl.exec(cleaned)
+    if (!match) return null
+    const start = match.index + match[0].length
+    let depth = 1
+    for (let i = start; i < cleaned.length; i++) {
+        const c = cleaned[i]
+        if (c === '{') depth++
+        else if (c === '}') {
+            depth--
+            if (depth === 0) return cleaned.slice(start, i)
+        }
+    }
+    return null
+}
+
+/**
+ * Count the `@location` outputs declared by a fragment entry point.
+ *
+ * Handles both return forms: a bare `-> @location(0) vec4f` and a struct
+ * return whose members carry the locations. Vertex-stage varyings also use
+ * `@location`, so this deliberately inspects only the fragment function's
+ * return type rather than counting occurrences across the source.
+ * @param {string} source - WGSL source containing the fragment stage
+ * @param {string} entryPoint - Fragment entry point name
+ * @returns {number} Output count; 1 when the return type cannot be resolved,
+ *   which preserves the historical single-target assumption.
+ */
+export function countFragmentOutputs(source, entryPoint) {
+    if (!source || !entryPoint) return 1
+    const cleaned = stripWgslComments(source)
+    const fnMatch = new RegExp(`@fragment\\s*fn\\s+${entryPoint}\\s*\\(`).exec(cleaned)
+    if (!fnMatch) return 1
+
+    // Skip the parameter list.
+    let depth = 1
+    let i = fnMatch.index + fnMatch[0].length
+    for (; i < cleaned.length && depth > 0; i++) {
+        if (cleaned[i] === '(') depth++
+        else if (cleaned[i] === ')') depth--
+    }
+    const bodyStart = cleaned.indexOf('{', i)
+    if (bodyStart < 0) return 1
+    const returnDecl = cleaned.slice(i, bodyStart)
+    if (!returnDecl.includes('->')) return 1
+
+    const inlineLocations = returnDecl.match(/@location\s*\(/g)
+    if (inlineLocations) return inlineLocations.length
+
+    const typeMatch = /->\s*([A-Za-z_]\w*)/.exec(returnDecl)
+    if (!typeMatch) return 1
+    const structBody = extractWgslStructBody(cleaned, typeMatch[1])
+    if (!structBody) return 1
+    return (structBody.match(/@location\s*\(/g) || []).length || 1
+}
+
 export function resolveCullState(cullMode, fallback = 'none') {
     const mode = cullMode ?? fallback
     if (mode === 'none') return { cullMode: 'none' }
@@ -895,39 +976,53 @@ export class WebGPUBackend extends Backend {
         const fragmentEntryPoint = spec.fragmentEntryPoint || spec.entryPoint || DEFAULT_FRAGMENT_ENTRY_POINT
         const outputFormat = this.resolveFormat(spec?.outputFormat || 'rgba16float')
 
-        // Create initial pipeline
-        //const _tBeforePipeline = performance.now()
-        const pipeline = this.device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: vertexModule,
-                entryPoint: vertexEntryPoint
-            },
-            fragment: {
-                module: fragmentModule,
-                entryPoint: fragmentEntryPoint,
-                targets: [{
-                    format: outputFormat,
-                    blend: this.resolveBlendState(spec?.blend)
-                }]
-            },
-            primitive: {
-                topology: spec?.topology || 'triangle-list'
-            }
-        })
-        //const _tPipeline = performance.now()
-
-        // Knob 1: per-phase compile timings (logging only — see HANDOFF-shader-compile.md)
-        //console.log(`[compile-wgsl-render ${id}] module=${(_tModule - _t0).toFixed(1)}ms info=${(_tInfo - _tModule).toFixed(1)}ms pipeline=${(_tPipeline - _tBeforePipeline).toFixed(1)}ms total=${(_tPipeline - _t0).toFixed(1)}ms src=${source.length}b`)
+        // A fragment stage with more than one @location output (the scene
+        // G-buffer pass writes four) cannot be described by the single-target
+        // pipeline below: interface matching fails and the device raises an
+        // uncaptured validation error at every program load. Those passes go
+        // through executeMRTRenderPass, which builds a correctly shaped
+        // pipeline via resolveMRTRenderPipeline on first use, so the eager
+        // build is skipped. Single-output programs — every 2D effect — keep
+        // it: it warms the shader before the first frame.
+        const fragmentOutputCount = countFragmentOutputs(source, fragmentEntryPoint)
 
         // Create pipeline cache for different output formats/blend modes
         const pipelineCache = new Map()
-        const initialKey = this.getPipelineKey({
-            topology: spec?.topology,
-            blend: spec?.blend,
-            format: outputFormat
-        })
-        pipelineCache.set(initialKey, pipeline)
+        let pipeline = null
+
+        if (fragmentOutputCount <= 1) {
+            // Create initial pipeline
+            //const _tBeforePipeline = performance.now()
+            pipeline = this.device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: vertexModule,
+                    entryPoint: vertexEntryPoint
+                },
+                fragment: {
+                    module: fragmentModule,
+                    entryPoint: fragmentEntryPoint,
+                    targets: [{
+                        format: outputFormat,
+                        blend: this.resolveBlendState(spec?.blend)
+                    }]
+                },
+                primitive: {
+                    topology: spec?.topology || 'triangle-list'
+                }
+            })
+            //const _tPipeline = performance.now()
+
+            // Knob 1: per-phase compile timings (logging only — see HANDOFF-shader-compile.md)
+            //console.log(`[compile-wgsl-render ${id}] module=${(_tModule - _t0).toFixed(1)}ms info=${(_tInfo - _tModule).toFixed(1)}ms pipeline=${(_tPipeline - _tBeforePipeline).toFixed(1)}ms total=${(_tPipeline - _t0).toFixed(1)}ms src=${source.length}b`)
+
+            const initialKey = this.getPipelineKey({
+                topology: spec?.topology,
+                blend: spec?.blend,
+                format: outputFormat
+            })
+            pipelineCache.set(initialKey, pipeline)
+        }
 
         const programInfo = {
             module: fragmentModule,
@@ -939,6 +1034,9 @@ export class WebGPUBackend extends Backend {
             fragmentEntryPoint,
             outputFormat,
             pipelineCache,
+            // Number of @location outputs the fragment stage declares. > 1
+            // means the program is MRT-only and has no eager `pipeline`.
+            fragmentOutputCount,
             bindings, // Store parsed bindings for bind group creation
             // Per-binding uniform packing (opt-in via spec.perBindingUniforms).
             // The default path packs ONE program-wide uniform buffer and binds
@@ -984,10 +1082,8 @@ export class WebGPUBackend extends Backend {
         while ((bindingMatch = bindingRegex.exec(source)) !== null) {
             const structName = bindingMatch[1]
             // Find the matching struct declaration.
-            const structRegex = new RegExp(`struct\\s+${structName}\\s*\\{([^}]+)\\}`, 'g')
-            const structMatch = structRegex.exec(source)
-            if (!structMatch) continue
-            const body = structMatch[1]
+            const body = extractWgslStructBody(source, structName)
+            if (body === null) continue
             // Compute the byte size of the struct body.
             const size = this.computeWgslStructSize(body)
             if (size > largestSize) largestSize = size
@@ -1013,12 +1109,26 @@ export class WebGPUBackend extends Backend {
         let structBody = null
         let structSource = null
         for (const src of sources) {
-            const m = new RegExp(`struct\\s+${typeDecl}\\s*\\{([^}]+)\\}`).exec(src)
-            if (m) { structBody = m[1]; structSource = src; break }
+            const body = extractWgslStructBody(src, typeDecl)
+            if (body !== null) { structBody = body; structSource = src; break }
         }
-        if (!structBody) return null
 
-        const layout = this._layoutStructBody(structBody, structSource, '')
+        // A null layout sends createBindGroup to the shared program-wide
+        // uniform buffer, which cannot represent scene structs — so say why
+        // rather than rendering something wrong in silence. The result (null
+        // included) is cached, so this warns once per program, not per frame.
+        let layout = null
+        if (structBody === null) {
+            console.warn(`[webgpu] uniform struct '${typeDecl}' is not declared in this program's WGSL; ` +
+                'falling back to the shared program-wide uniform buffer, which cannot represent scene structs')
+        } else {
+            layout = this._layoutStructBody(structBody, structSource, '')
+            if (!layout) {
+                console.warn(`[webgpu] uniform struct '${typeDecl}' is declared but could not be laid out ` +
+                    '(unresolvable member type); falling back to the shared program-wide uniform buffer, ' +
+                    'which cannot represent scene structs')
+            }
+        }
         program._bindingLayoutCache?.set(typeDecl, layout)
         return layout
     }
@@ -1062,9 +1172,9 @@ export class WebGPUBackend extends Backend {
                 const elemType = arrayMatch[1]
                 const count = parseInt(arrayMatch[2], 10)
                 // Resolve element: scalar/vec stride 16, or a nested struct
-                const structMatch = new RegExp(`struct\\s+${elemType}\\s*\\{([^}]+)\\}`).exec(source)
-                if (structMatch) {
-                    const elemLayout = this._layoutStructBody(structMatch[1], source, '')
+                const elemBody = extractWgslStructBody(source, elemType)
+                if (elemBody !== null) {
+                    const elemLayout = this._layoutStructBody(elemBody, source, '')
                     if (!elemLayout) return null
                     // Array element stride rounds up to 16
                     const stride = Math.ceil(elemLayout.structSize / 16) * 16
@@ -1961,6 +2071,18 @@ export class WebGPUBackend extends Backend {
             if (!tex) {
                 console.warn(`[executeMRTRenderPass] Texture not found for ${outputId} in pass ${pass.id}`)
                 continue
+            }
+
+            // A cube texture's `view` has dimension 'cube', which is not a
+            // legal colour attachment: attaching it fails render-pass
+            // validation a long way from the cause. The single-output path
+            // picks one face via pass.cubeFace, but an MRT pass has no way to
+            // say which face each attachment writes, so reject it here.
+            if (tex.cube) {
+                throw new Error(
+                    `Pass '${pass.id}' targets cube texture '${outputId}' from a multiple-render-target pass. ` +
+                    'Cube render targets are supported only on single-output passes, which select a face via cubeFace.'
+                )
             }
 
             if (!viewportTex) viewportTex = tex
@@ -3970,6 +4092,14 @@ export class WebGPUBackend extends Backend {
     /**
      * Read pixels from a texture for testing purposes.
      * Note: This is async due to WebGPU's buffer mapping requirements.
+     *
+     * Always returns top-down RGBA8 (0-255), whatever the texture's internal
+     * format. Single-channel formats (r32float, r16float — scene_gbuf_depth is
+     * r32f) expand to greyscale: the value in R, G and B with alpha opaque,
+     * rather than R-only, so the same RGB-mean helpers that consume the colour
+     * surfaces read a depth surface as the greyscale image it is. Float values
+     * are scaled by 255 and clamped, matching the existing rgba16float and
+     * rgba32float paths.
      * @param {string} textureId - The texture ID to read from
      * @returns {Promise<{width: number, height: number, data: Uint8Array}>}
      */
@@ -3987,6 +4117,10 @@ export class WebGPUBackend extends Backend {
             bytesPerPixel = 8 // 2 bytes per channel * 4 channels
         } else if (gpuFormat === 'rgba32float') {
             bytesPerPixel = 16 // 4 bytes per channel * 4 channels
+        } else if (gpuFormat === 'r32float') {
+            bytesPerPixel = 4 // 4 bytes per channel * 1 channel
+        } else if (gpuFormat === 'r16float') {
+            bytesPerPixel = 2 // 2 bytes per channel * 1 channel
         }
 
         const bytesPerRow = Math.ceil(width * bytesPerPixel / 256) * 256 // Align to 256 bytes
@@ -4042,6 +4176,27 @@ export class WebGPUBackend extends Backend {
                         const f32 = srcData[srcPixel + c]
                         data[dstPixel + c] = Math.max(0, Math.min(255, Math.round(f32 * 255)))
                     }
+                }
+            }
+        } else if (gpuFormat === 'r32float' || gpuFormat === 'r16float') {
+            // Single-channel float: ONE value per pixel, not four. Falling
+            // through to the rgba8unorm branch below reinterpreted the float's
+            // raw bytes as four unorm channels.
+            const isHalf = gpuFormat === 'r16float'
+            const bytesPerElement = isHalf ? 2 : 4
+            const srcData = isHalf ? new Uint16Array(mappedRange) : new Float32Array(mappedRange)
+            const elementsPerRow = bytesPerRow / bytesPerElement
+            for (let row = 0; row < height; row++) {
+                const srcRowOffset = row * elementsPerRow
+                for (let col = 0; col < width; col++) {
+                    const raw = srcData[srcRowOffset + col]
+                    const f32 = isHalf ? float16ToFloat32(raw) : raw
+                    const v = Math.max(0, Math.min(255, Math.round(f32 * 255)))
+                    const dstPixel = (row * width + col) * 4
+                    data[dstPixel] = v
+                    data[dstPixel + 1] = v
+                    data[dstPixel + 2] = v
+                    data[dstPixel + 3] = 255
                 }
             }
         } else {
