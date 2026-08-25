@@ -148,7 +148,11 @@ export function validate(ast) {
         // Add source location if available
         let location = null
         if (node?.loc) {
-            location = { line: node.loc.line, column: node.loc.column }
+            // The parser writes `col`; reading `column` here made every
+            // diagnostic carry `column: undefined`, which the demo UI printed
+            // verbatim as "col undefined". The external field name stays
+            // `column` — consumers interpolate it.
+            location = { line: node.loc.line, column: node.loc.col }
         }
         diagnosticsList.push({
             code,
@@ -248,6 +252,11 @@ export function validate(ast) {
                     for (const [k, v] of Object.entries(call.kwargs)) mergedKw[k] = v
                 }
                 const merged = {type:'Call', name: val.name, args: mergedArgs}
+                // Carry a source position across the rebuild, preferring the
+                // call site over the binding. Without it every diagnostic about
+                // a `let`-aliased call reported "line 0 col 0".
+                const loc = call.loc ?? val.loc
+                if (loc) merged.loc = loc
                 if (mergedKw) merged.kwargs = mergedKw
                 if (call.namespace) {
                     merged.namespace = {...call.namespace}
@@ -713,6 +722,15 @@ export function validate(ast) {
                     // scene() passes through the validator without an ops
                     // registration; the scene compiler interprets it later.
                     if (call.name === 'scene') {
+                        // scene() renders the scene it describes; it has no
+                        // input. Mid-chain it compiled clean and silently threw
+                        // the incoming surface away. This also catches a second
+                        // scene() in one chain before the scene compiler's
+                        // one-scene-per-program check.
+                        if (current !== null) {
+                            pushDiag('S001', original, 'scene() is a generator and must start a chain')
+                            continue
+                        }
                         const sceneAst = substitute(clone(original))
                         const idx = tempIndex++
                         const step = {
@@ -782,9 +800,18 @@ export function validate(ast) {
                 // — otherwise the first keyword shifts every later positional
                 // and the trailing one falls off the end.
                 let posCursor = 0
+                // Members a positional hex colour has claimed but not yet
+                // reached, by parameter name. See the splat branch below.
+                let splatValues = null
                 for (let i = 0; i < specArgs.length; i++) {
                     const def = specArgs[i]
                     const fromKeyword = kw && kw[def.name] !== undefined
+                    // A splatted colour supplies this slot: take the component
+                    // rather than consuming a positional for it.
+                    if (!fromKeyword && splatValues && splatValues[def.name] !== undefined) {
+                        args[def.name] = splatValues[def.name]
+                        continue
+                    }
                     let node
                     if (fromKeyword) {
                         node = kw[def.name]
@@ -795,16 +822,15 @@ export function validate(ast) {
                     node = substitute(node)
                     const argKey = def.name
                     // A single positional hex colour splats across an r/g/b
-                    // triple. An explicit `g:`/`b:` keyword always wins, so the
-                    // splat stands down rather than overwriting it.
-                    if (!fromKeyword && node && node.type === 'Color' && def.type !== 'color' && def.name === 'r' && specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b' && !(kw && kw.g !== undefined) && !(kw && kw.b !== undefined)) {
+                    // triple, filling exactly the members no keyword claimed.
+                    // Standing the splat down wholesale — the old behaviour —
+                    // dropped the Color into the float path, so
+                    // `tint(#804020, g: 0.25)` clamped r to 1, left b at its
+                    // default and reported a bogus S002 about 'r'.
+                    if (!fromKeyword && node && node.type === 'Color' && def.type !== 'color' && def.name === 'r' && specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b') {
                         const [r, g, b] = node.value
                         args[argKey] = r
-                        const defG = specArgs[i + 1]
-                        args[defG.name] = g
-                        const defB = specArgs[i + 2]
-                        args[defB.name] = b
-                        i += 2
+                        splatValues = { [specArgs[i + 1].name]: g, [specArgs[i + 2].name]: b }
                         continue
                     }
                     if (kw && kw[def.name] !== undefined) seen.add(def.name)

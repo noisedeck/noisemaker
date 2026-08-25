@@ -580,4 +580,78 @@ function irFor(src) {
   assert.strictEqual(ok.nodes.find(n => n.type === 'mesh').meshParams.tube, 0.5, 'valid params pass through')
 }
 
+// ---------------------------------------------------------------------------
+// Scene diagnostics must point at real source positions.
+//
+// sceneError reads `node.loc`, but the parser attached one only to calls and
+// array literals — so every error anchored to a literal value (a keyword's
+// argument, a mesh type string) reported "line 0 col 0" and told the author
+// nothing about where to look.
+// ---------------------------------------------------------------------------
+{
+  const located = [
+    ['unknown camera keyword', 'scene(camera(fov: 60, fow: 1)).write(o0)', /Unknown keyword 'fow'/],
+    ['mesh param out of range', 'scene(camera(fov: 60), mesh("sphere", segments: 100000)).write(o0)', /segments must be/],
+    ['unknown mesh type', 'scene(camera(fov: 60), mesh("blob")).write(o0)', /Unknown mesh type/],
+    ['unknown light type', 'scene(camera(fov: 60), light(type: "laser")).write(o0)', /Unknown light type/],
+    ['far behind near', 'scene(camera(near: 10, far: 5)).write(o0)', /far must be greater than near/],
+    ['unknown scene keyword', 'scene(ambiant: 0.2, camera(fov: 60)).write(o0)', /Unknown keyword 'ambiant'/],
+  ]
+  for (const [label, body, messagePattern] of located) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${body}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${label}: expected a compile error`)
+    assert.match(thrown.message, messagePattern, `${label}: unexpected message`)
+    assert.match(thrown.message, /line [1-9]\d* col \d+/,
+      `${label}: expected a real source position, got "${thrown.message}"`)
+  }
+}
+
+// An aliased call keeps its call-site location. resolveCall rebuilt the merged
+// call from scratch and dropped `loc`, so anything the scene compiler reported
+// about a `let`-aliased node landed at line 0.
+{
+  let thrown = null
+  try {
+    irFor('search synth\nlet w = widget()\nscene(camera(fov: 60), w()).write(o0)')
+  } catch (err) {
+    thrown = err
+  }
+  assert.ok(thrown, 'aliased unknown scene child: expected a compile error')
+  assert.match(thrown.message, /line [1-9]\d* col \d+/,
+    `aliased call: expected a real source position, got "${thrown.message}"`)
+}
+
+// ---------------------------------------------------------------------------
+// group() keywords are checked, and mesh() takes exactly one positional.
+//
+// group() went through buildTransform without a keyword check, so `idd:` was
+// dropped in silence; mesh() read args[0] and ignored everything after it, so
+// `mesh("box", "sphere")` rendered a box with no complaint.
+// ---------------------------------------------------------------------------
+{
+  assert.throws(
+    () => irFor('search synth\nscene(camera(fov: 60), group(idd: "x", mesh("box"))).write(o0)'),
+    /Unknown keyword 'idd' for group\(\)/,
+    'a mistyped group keyword is an error')
+
+  assert.throws(
+    () => irFor('search synth\nscene(camera(fov: 60), mesh("box", "sphere")).write(o0)'),
+    /mesh/,
+    'a second positional argument to mesh() is an error')
+
+  // The legitimate forms still compile: group() positionals are its children,
+  // and its transform keywords are unaffected.
+  const ok = irFor('search synth\nscene(camera(fov: 60), group(id: "g", pos: [0, 1, 0], mesh("box"))).write(o0)')
+  const group = ok.nodes.find(n => n.type === 'group')
+  assert.ok(group, 'group node built')
+  assert.strictEqual(group.id, 'g', 'group id kept')
+  assert.deepStrictEqual(group.transform.position, [0, 1, 0], 'group transform kept')
+  assert.strictEqual(group.children.length, 1, 'group child kept')
+}
+
 console.log('Scene compiler tests passed')

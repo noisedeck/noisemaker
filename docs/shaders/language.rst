@@ -142,6 +142,25 @@ its child nodes as positional arguments.
 
   scene(ambient: 0.15, camera(fov: 60), background: [0, 0, 0]).write(o0)
 
+The binding rule: keywords claim their own parameter slots by name, wherever
+they appear in the call. The positionals are then bound **in source order to the
+slots no keyword claimed**, left to right. A positional never occupies a slot a
+keyword already holds — where it would have landed on one, it shifts to the next
+unfilled slot instead. This is deliberate, and it is what makes the interleaving
+above work at all.
+
+Given ``blur(amount, angle, quality)``, all three of these bind ``amount: 0.9``,
+``angle: 0.5`` and ``quality: 4``:
+
+.. code-block:: none
+
+  blur(0.9, 0.5, 4)
+  blur(0.9, angle: 0.5, 4)
+  blur(angle: 0.5, 0.9, 4)
+
+In the second call, ``4`` would have reached ``angle`` by position; because
+``angle:`` is already claimed, it shifts to ``quality``.
+
 Numeric arguments support inline arithmetic (``+``, ``-``, ``*``, ``/``) and constants like ``Math.PI``. Color arguments accept unquoted ``#RGB`` or ``#RRGGBB`` hex codes.
 
 **Vector parameters:**
@@ -305,11 +324,18 @@ The scene vocabulary is ``scene``, ``camera``, ``light``, ``environment``,
 ``mesh``, ``group``, ``material``, ``solid``, ``surface``, ``pbr``, ``emit`` and
 ``reflector``.
 
-These names are a **fallback, not a reservation**. Every call is first resolved
-against the registered effects in the active search order; only when no effect
-matches does a name fall through to the scene layer. ``solid`` is both a scene
-material source and the ``synth/solid`` generator, and a top-level ``solid()``
-under ``search synth`` still compiles to the 2D effect.
+Every call is first resolved against the registered effects in the active search
+order. ``solid`` is both a scene material source and the ``synth/solid``
+generator, and a top-level ``solid()`` under ``search synth`` still compiles to
+the 2D effect.
+
+Only ``scene`` falls through to the scene layer when no effect matches, and it
+must start its chain — ``noise().scene(...)`` would discard the incoming surface
+and instead raises ``scene() is a generator and must start a chain``. The other
+ten names are scene *children*; they live inside a ``scene()`` call and never
+reach the chain. Used as a chain element with no effect behind them they raise
+``Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside
+scene().``
 
 Arguments inside ``scene()`` are preserved as AST and handed to the scene
 compiler rather than validated against the effect registry, which is why terms

@@ -217,14 +217,84 @@ test('hex color still splats across r/g/b when another keyword is present',
 
 test('a scene child name used as a chain element is an unknown effect',
     'search synth, filter\nnoise().camera(fov: 60).write(o0)', (result) => {
-        const diag = result.diagnostics.find(d => d.code === 'S001' && /camera/.test(d.message || ''))
-        if (!diag) throw new Error(`Expected S001 for 'camera' as a chain element, got ${JSON.stringify(result.diagnostics)}`)
+        const diag = result.diagnostics.find(d => d.code === 'S001'
+            && /camera/.test(d.message || '')
+            && /only valid inside scene\(\)/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 naming 'camera' and the scene() constraint, got ${JSON.stringify(result.diagnostics)}`)
     })
 
 test('solid() with no synth in scope is still an unknown effect',
     'search filter\nsolid(r: 1).write(o0)', (result) => {
-        const diag = result.diagnostics.find(d => d.code === 'S001' && /solid/.test(d.message || ''))
-        if (!diag) throw new Error(`Expected S001 for 'solid' under 'search filter', got ${JSON.stringify(result.diagnostics)}`)
+        const diag = result.diagnostics.find(d => d.code === 'S001'
+            && /solid/.test(d.message || '')
+            && /only valid inside scene\(\)/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 naming 'solid' and the scene() constraint, got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+// ---------------------------------------------------------------------------
+// Diagnostics report a usable column.
+//
+// The parser writes `loc.col`; pushDiag read `loc.column`, so every location
+// it built carried `column: undefined` and the demo UI printed "col undefined".
+// ---------------------------------------------------------------------------
+
+test('a diagnostic carries a numeric column',
+    'search synth, filter\nnoise().bogusEffect(1).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001')
+        if (!diag) throw new Error(`Expected S001, got ${JSON.stringify(result.diagnostics)}`)
+        if (!diag.location) throw new Error(`Expected a location on ${JSON.stringify(diag)}`)
+        if (typeof diag.location.line !== 'number') throw new Error(`line: expected a number, got ${diag.location.line}`)
+        if (typeof diag.location.column !== 'number') throw new Error(`column: expected a number, got ${diag.location.column}`)
+    })
+
+// ---------------------------------------------------------------------------
+// A positional hex colour fills exactly the r/g/b slots no keyword claimed.
+//
+// The splat used to stand down entirely when g: or b: was present, dropping
+// the Color into the float path: r clamped to 1, b left at its default, and a
+// bogus S002 about 'r' on top. The colour the author typed simply vanished.
+// ---------------------------------------------------------------------------
+
+test('hex splat fills only the r/g/b slots no keyword claimed',
+    'search synth, filter\nnoise().tint(#804020, g: 0.25).write(o0)', (result) => {
+        const a = argsOf(result, 'filter.tint')
+        if (Math.abs(a.r - 0.502) > 0.01) throw new Error(`r: expected ~0.502 from the hex, got ${a.r}`)
+        if (a.g !== 0.25) throw new Error(`g: expected the keyword 0.25 to win, got ${a.g}`)
+        if (Math.abs(a.b - 0.125) > 0.01) throw new Error(`b: expected ~0.125 from the hex, got ${a.b}`)
+        if (result.diagnostics.length > 0) {
+            throw new Error(`Expected no diagnostics, got ${JSON.stringify(result.diagnostics)}`)
+        }
+    })
+
+test('a bare hex splat still fills all three slots',
+    'search synth, filter\nnoise().tint(#804020).write(o0)', (result) => {
+        const a = argsOf(result, 'filter.tint')
+        if (Math.abs(a.r - 0.502) > 0.01) throw new Error(`r: expected ~0.502, got ${a.r}`)
+        if (Math.abs(a.g - 0.251) > 0.01) throw new Error(`g: expected ~0.251, got ${a.g}`)
+        if (Math.abs(a.b - 0.125) > 0.01) throw new Error(`b: expected ~0.125, got ${a.b}`)
+        if (result.diagnostics.length > 0) {
+            throw new Error(`Expected no diagnostics, got ${JSON.stringify(result.diagnostics)}`)
+        }
+    })
+
+// ---------------------------------------------------------------------------
+// scene() is a generator and must start its chain.
+//
+// Mid-chain it compiled clean and silently discarded the incoming surface, so
+// `noise().scene(...).write(o0)` rendered the scene and threw the noise away
+// with nothing said about it.
+// ---------------------------------------------------------------------------
+
+test('scene() mid-chain is diagnosed instead of eating its input',
+    'search synth, filter\nnoise().scene(camera(fov: 60)).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001' && /scene\(\)/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 for a mid-chain scene(), got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+test('a second scene() in the same chain is diagnosed',
+    'search synth, filter\nscene(camera(fov: 60)).scene(camera(fov: 30)).write(o0)', (result) => {
+        const diag = result.diagnostics.find(d => d.code === 'S001' && /scene\(\)/.test(d.message || ''))
+        if (!diag) throw new Error(`Expected S001 for a second scene(), got ${JSON.stringify(result.diagnostics)}`)
     })
 
 test('scene() itself still passes through to the scene compiler',
@@ -232,4 +302,7 @@ test('scene() itself still passes through to the scene compiler',
         const step = result.plans[0].chain.find(s => s.op === '_scene.scene')
         if (!step) throw new Error(`Expected a _scene.scene step, got ${result.plans[0].chain.map(s => s.op).join(', ')}`)
         if (!step.args || !step.args._ast) throw new Error('Expected the original AST to be preserved on the step')
+        if (result.diagnostics.length > 0) {
+            throw new Error(`Expected a chain-initial scene() to be clean, got ${JSON.stringify(result.diagnostics)}`)
+        }
     })

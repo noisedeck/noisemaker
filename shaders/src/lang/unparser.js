@@ -100,6 +100,11 @@ function formatOscillator(osc) {
  */
 function formatSceneAst(node) {
     if (node === null || node === undefined) return 'null'
+    // A let binding that reached this arg was inlined by the validator's
+    // substitute(), which tags the copy with the name it came from. Emitting
+    // the literal instead dissolves the binding the user wrote; the 2D path
+    // has honoured this tag all along.
+    if (typeof node._varRef === 'string') return node._varRef
     switch (node.type) {
         case 'Call': {
             const parts = (node.args ?? []).map(formatSceneAst)
@@ -127,6 +132,23 @@ function formatSceneAst(node) {
             }
             return `osc(${parts.join(', ')})`
         }
+        case 'Audio': {
+            // Field order matches the parser's parameter order (band, min,
+            // max) so the emitted call reparses to the same node.
+            const parts = []
+            for (const key of ['band', 'min', 'max']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `audio(${parts.join(', ')})`
+        }
+        case 'Midi': {
+            // Parser parameter order: channel, mode, min, max, sensitivity.
+            const parts = []
+            for (const key of ['channel', 'mode', 'min', 'max', 'sensitivity']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `midi(${parts.join(', ')})`
+        }
         case 'Member':
             return (node.path ?? []).join('.')
         case 'Ident':
@@ -135,9 +157,16 @@ function formatSceneAst(node) {
         case 'VolRef':
         case 'GeoRef':
         case 'SourceRef':
+        case 'MeshRef':
+        case 'RgbaRef':
+        case 'VelRef':
+        case 'XyzRef':
             return node.name
         case 'String':
-            return JSON.stringify(node.value)
+            // The lexer stores the raw slice between the quotes and never
+            // decodes escapes, so re-escaping here would double every
+            // backslash on each pass through the unparser.
+            return `"${node.value}"`
         case 'Boolean':
             return node.value ? 'true' : 'false'
         case 'Number':
@@ -145,16 +174,49 @@ function formatSceneAst(node) {
         case 'Color':
             return formatColorLiteral(node.value)
         default:
-            if (typeof node.value === 'number') return formatNumber(node.value)
-            if (typeof node.value === 'string') return JSON.stringify(node.value)
-            return String(node.name ?? node.value ?? '')
+            // Returning '' here spliced the node out of the emitted source —
+            // `intensity: audio(...)` became `intensity: )` — silently
+            // corrupting the user's program. A loud failure is strictly
+            // better than a mangled round-trip.
+            throw new Error(`unparse: no scene emitter for AST node type '${node.type}'`)
     }
 }
 
 /** Shortest representation that reparses to the same number. */
 function formatNumber(value) {
     if (!Number.isFinite(value)) return '0'
-    return Number.isInteger(value) ? String(value) : String(parseFloat(value.toPrecision(10)))
+    const shortest = Number.isInteger(value) ? value : parseFloat(value.toPrecision(10))
+    return toPlainDecimal(shortest)
+}
+
+/**
+ * Expand exponent notation into plain decimal digits.
+ *
+ * String() switches to exponent form outside [1e-6, 1e21), and the number
+ * lexer reads only `digits[.digits]` — so `1e-7` and `1e+21` round-tripped
+ * into source that does not parse at all. The expansion is exact: it only
+ * moves the decimal point, so the text still reparses to the same value.
+ */
+function toPlainDecimal(value) {
+    const text = String(value)
+    if (!/[eE]/.test(text)) return text
+    const negative = text.startsWith('-')
+    const [mantissa, exponentText] = (negative ? text.slice(1) : text).split(/[eE]/)
+    const exponent = Number(exponentText)
+    const [intPart, fracPart = ''] = mantissa.split('.')
+    const digits = intPart + fracPart
+    // Where the decimal point lands inside `digits` once the exponent applies.
+    const point = intPart.length + exponent
+    let out
+    if (point <= 0) {
+        out = `0.${'0'.repeat(-point)}${digits}`
+    } else if (point >= digits.length) {
+        out = digits + '0'.repeat(point - digits.length)
+    } else {
+        out = `${digits.slice(0, point)}.${digits.slice(point)}`
+    }
+    if (out.includes('.')) out = out.replace(/0+$/, '').replace(/\.$/, '')
+    return negative ? `-${out}` : out
 }
 
 /** Format an [r,g,b,a] colour back to a #RRGGBB / #RRGGBBAA literal. */
@@ -739,7 +801,9 @@ function formatLetExpr(expr, options = {}) {
 
     switch (expr.type) {
         case 'Number':
-            return String(expr.value)
+            // Plain decimals only: String() switches to exponent notation
+            // outside [1e-6, 1e21), which the number lexer cannot read.
+            return toPlainDecimal(expr.value)
         case 'String':
             return JSON.stringify(expr.value)
         case 'Boolean':
@@ -748,6 +812,10 @@ function formatLetExpr(expr, options = {}) {
             return expr.name
         case 'Member':
             return expr.path.join('.')
+        case 'ArrayLiteral':
+            // Without a case here an array binding fell to formatValue and
+            // stringified as `let p = [object Object]`.
+            return formatSceneAst(expr)
         case 'Object':
             // Object literals were added to serve scene(), but they are a
             // general expression form and can appear in a let binding, where

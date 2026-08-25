@@ -921,6 +921,17 @@ export function parse(tokens) {
         return call
     }
 
+    /**
+     * Source position of the token a literal starts at.
+     *
+     * Value nodes carried no `loc`, so every scene diagnostic anchored to one
+     * — an unknown keyword's argument, a mesh type string, a rejected mesh
+     * parameter — reported "line 0 col 0".
+     */
+    function locOf(token) {
+        return { line: token.line, col: token.col }
+    }
+
     function parseArg() {
         return parseAdditive()
     }
@@ -932,7 +943,7 @@ export function parse(tokens) {
             const right = parseMultiplicative()
             const l = toNumber(node)
             const r = toNumber(right)
-            node = {type: 'Number', value: op === 'PLUS' ? l + r : l - r}
+            node = {type: 'Number', value: op === 'PLUS' ? l + r : l - r, loc: node.loc}
         }
         return node
     }
@@ -944,7 +955,7 @@ export function parse(tokens) {
             const right = parseUnary()
             const l = toNumber(node)
             const r = toNumber(right)
-            node = {type: 'Number', value: op === 'STAR' ? l * r : l / r}
+            node = {type: 'Number', value: op === 'STAR' ? l * r : l / r, loc: node.loc}
         }
         return node
     }
@@ -957,7 +968,7 @@ export function parse(tokens) {
         if (peek().type === 'MINUS') {
             advance()
             const val = parseUnary()
-            return {type: 'Number', value: -toNumber(val)}
+            return {type: 'Number', value: -toNumber(val), loc: val.loc}
         }
         return parsePrimary()
     }
@@ -967,10 +978,10 @@ export function parse(tokens) {
         switch (token.type) {
             case 'NUMBER':
                 advance()
-                return {type: 'Number', value: parseFloat(token.lexeme)}
+                return {type: 'Number', value: parseFloat(token.lexeme), loc: locOf(token)}
             case 'STRING':
                 advance()
-                return {type: 'String', value: token.lexeme}
+                return {type: 'String', value: token.lexeme, loc: locOf(token)}
             case 'HEX': {
                 advance()
                 const hex = token.lexeme.slice(1)
@@ -989,7 +1000,7 @@ export function parse(tokens) {
                     b = parseInt(hex.slice(4, 6), 16)
                     a = parseInt(hex.slice(6, 8), 16) / 255
                 }
-                return {type: 'Color', value: [r / 255, g / 255, b / 255, a]}
+                return {type: 'Color', value: [r / 255, g / 255, b / 255, a], loc: locOf(token)}
             }
             case 'LBRACKET': {
                 // Array literal — comma-separated arg expressions, used as
@@ -1020,16 +1031,16 @@ export function parse(tokens) {
                 return {type: 'Func', src: token.lexeme}
             case 'TRUE':
                 advance()
-                return {type: 'Boolean', value: true}
+                return {type: 'Boolean', value: true, loc: locOf(token)}
             case 'FALSE':
                 advance()
-                return {type: 'Boolean', value: false}
+                return {type: 'Boolean', value: false, loc: locOf(token)}
             case 'IDENT': {
                 if (token.lexeme === 'Math' && tokens[current + 1]?.type === 'DOT' && tokens[current + 2]?.type === 'IDENT' && tokens[current + 2].lexeme === 'PI') {
                     advance()
                     advance()
                     advance()
-                    return {type: 'Number', value: Math.PI}
+                    return {type: 'Number', value: Math.PI, loc: locOf(token)}
                 }
                 if (tokens[current + 1]?.type === 'LPAREN' || hasCallAfterDot(current)) {
                     const chain = parseChain('expression')
@@ -1105,7 +1116,7 @@ export function parse(tokens) {
                     }
                 }
                 expect('RBRACE', "Expect '}'")
-                return {type: 'Object', properties}
+                return {type: 'Object', properties, loc: locOf(token)}
             }
             default:
                 throw new SyntaxError(`Unexpected token ${token.type} at line ${token.line} col ${token.col}`)

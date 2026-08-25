@@ -422,6 +422,11 @@ function walkNode(
     const { head, links } = resolved
     if (head.name !== 'mesh' && head.name !== 'group') return null
 
+    // group() takes only placement keywords; its positionals are its children.
+    // Unchecked, a mistyped keyword was dropped in silence and the group
+    // rendered at the origin with nothing reporting why.
+    if (head.name === 'group') assertKnownKeywords(head, TRANSFORM_KEYS)
+
     const materialLinks = links.filter(link => link.name === 'material')
     if (materialLinks.length > 1) {
         throw sceneError('A node accepts only one material()', materialLinks[1])
@@ -444,6 +449,11 @@ function walkNode(
     }
 
     if (head.name === 'mesh') {
+        // mesh() takes exactly one positional, the type. Anything after it was
+        // read past and ignored, so `mesh("box", "sphere")` compiled clean.
+        if ((head.args?.length ?? 0) > 1) {
+            throw sceneError('mesh() takes one positional argument, the mesh type', head.args[1])
+        }
         const meshType = litValue(head.args?.[0])
         if (!MESH_TYPES.has(meshType)) {
             throw sceneError(`Unknown mesh type '${meshType}'`, head.args?.[0] ?? head)

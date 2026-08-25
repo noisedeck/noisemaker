@@ -71,12 +71,23 @@ and ``group``. Anything else raises ``Unknown scene child '<name>'``.
 Name resolution
 ^^^^^^^^^^^^^^^
 
-Scene function names are a *fallback*, not a reservation. The validator first
-tries to resolve every call against the registered effects in the active
-:ref:`search order <shader-language>`; only when no effect matches does the name
-fall through to the scene layer. ``solid`` is both a scene material source and
-the ``synth/solid`` generator, and a top-level ``solid()`` under ``search synth``
-still compiles to the 2D effect.
+The validator first resolves every chain call against the registered effects in
+the active :ref:`search order <shader-language>`. ``solid`` is both a scene
+material source and the ``synth/solid`` generator, and a top-level ``solid()``
+under ``search synth`` still compiles to the 2D effect.
+
+Only ``scene`` falls through to the scene layer when no effect matches. The
+other ten names — ``camera``, ``light``, ``environment``, ``mesh``, ``group``,
+``material``, ``solid``, ``surface``, ``pbr`` and ``emit`` — are children
+*inside* a ``scene()`` call and never reach the chain. Written as a chain
+element with no effect behind them they raise
+``Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside
+scene().`` Passing them through instead turned a typo into a no-op that compiled
+clean and rendered nothing.
+
+``scene()`` is a generator: it must start its chain. ``noise().scene(...)`` has
+no meaning — the incoming surface would simply be discarded — and raises
+``scene() is a generator and must start a chain``.
 
 Everything inside the parentheses of ``scene()`` is preserved as argument AST and
 is never validated against the effect registry, which is why terms like
@@ -129,6 +140,14 @@ Keyword arguments on ``scene()`` configure the renderer. All are optional.
 
 Camera
 ------
+
+``camera()`` is optional. Every keyword has a default, so the node as a whole
+does too: a scene that declares no camera gets ``fov: 60``, ``near: 0.1``,
+``far: 1000``, ``pos: [0, 0, 5]`` and ``target: [0, 0, 0]``. Declaring
+``camera()`` with no keywords is the same thing written out.
+
+Unknown keywords are errors. ``near`` and ``far`` must both be greater than
+zero, and ``far`` must be greater than ``near``.
 
 .. code-block:: none
 
@@ -236,8 +255,16 @@ types are ``sphere``, ``box``, ``plane``, ``cylinder`` and ``torus``; anything
 else raises ``Unknown mesh type``.
 
 Keywords split into two groups. ``id``, ``pos``, ``rot`` and ``scale`` describe
-placement; every other keyword is forwarded to the primitive builder as a shape
-parameter.
+placement; the rest are shape parameters, and each primitive accepts only the
+ones listed below. A keyword outside both groups raises
+``Unknown keyword '<name>' for mesh("<type>")`` rather than being dropped in
+silence, and ``mesh()`` takes exactly one positional argument — a second one
+raises ``mesh() takes one positional argument, the mesh type``.
+
+Shape parameter values are checked before they reach the geometry builders:
+``radius``, ``tube``, ``width`` and ``height`` must be greater than zero,
+``segments`` and ``tubeSegments`` must be integers in ``3..512``, and ``size``
+must be a vec3 of finite numbers.
 
 .. list-table::
    :header-rows: 1
@@ -264,7 +291,9 @@ Groups and transforms
 ---------------------
 
 ``group()`` nests nodes. Its positional arguments are child ``mesh()`` or
-``group()`` chains, and its transform applies to the whole subtree.
+``group()`` chains, and its transform applies to the whole subtree. Its only
+keywords are the four transform keywords below; anything else raises
+``Unknown keyword '<name>' for group()``.
 
 .. code-block:: none
 
