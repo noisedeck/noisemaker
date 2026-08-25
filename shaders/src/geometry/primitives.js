@@ -1,15 +1,29 @@
 import { Geometry } from './geometry.js'
 
 /**
+ * Clamp a segment count to a whole number of at least three.
+ *
+ * Three is the smallest closed cross-section — the same floor the scene
+ * compiler enforces on `segments`/`tubeSegments` — and anything below it
+ * divides by zero and fills the buffers with NaN.
+ * @param {number} n
+ * @returns {number}
+ */
+function segmentCount(n) {
+  return Math.max(3, Math.floor(n))
+}
+
+/**
  * Create a UV sphere.
  * @param {object} opts
  * @param {number} [opts.radius=1]
- * @param {number} [opts.segments=32] - Number of longitude segments (and half for latitude)
+ * @param {number} [opts.segments=32] - Number of longitude segments (and half for
+ *   latitude), clamped to a whole number of at least 3
  * @returns {Geometry}
  */
 export function createSphere({ radius = 1, segments = 32 } = {}) {
-  const widthSegments = segments
-  const heightSegments = Math.max(2, Math.floor(segments / 2))
+  const widthSegments = segmentCount(segments)
+  const heightSegments = Math.max(2, Math.floor(widthSegments / 2))
 
   const positions = []
   const normals = []
@@ -153,10 +167,11 @@ export function createPlane({ width = 1, height = 1 } = {}) {
  * @param {object} opts
  * @param {number} [opts.radius=1]
  * @param {number} [opts.height=2]
- * @param {number} [opts.segments=32]
+ * @param {number} [opts.segments=32] - Clamped to a whole number of at least 3
  * @returns {Geometry}
  */
-export function createCylinder({ radius = 1, height = 2, segments = 32 } = {}) {
+export function createCylinder({ radius = 1, height = 2, segments: segmentsIn = 32 } = {}) {
+  const segments = segmentCount(segmentsIn)
   const positions = []
   const normals = []
   const uvs = []
@@ -243,11 +258,18 @@ export function createCylinder({ radius = 1, height = 2, segments = 32 } = {}) {
  * @param {object} opts
  * @param {number} [opts.radius=1] - Distance from center of torus to center of tube
  * @param {number} [opts.tube=0.4] - Radius of the tube
- * @param {number} [opts.segments=32] - Main ring segments
- * @param {number} [opts.tubeSegments=16] - Tube cross-section segments
+ * @param {number} [opts.segments=32] - Main ring segments, clamped to at least 3
+ * @param {number} [opts.tubeSegments=16] - Tube cross-section segments, clamped to at least 3
  * @returns {Geometry}
  */
-export function createTorus({ radius = 1, tube = 0.4, segments = 32, tubeSegments = 16 } = {}) {
+export function createTorus({
+  radius = 1,
+  tube = 0.4,
+  segments: segmentsIn = 32,
+  tubeSegments: tubeSegmentsIn = 16
+} = {}) {
+  const segments = segmentCount(segmentsIn)
+  const tubeSegments = segmentCount(tubeSegmentsIn)
   const positions = []
   const normals = []
   const uvs = []
@@ -278,7 +300,14 @@ export function createTorus({ radius = 1, tube = 0.4, segments = 32, tubeSegment
       const nz = z - cz
 
       const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
-      normals.push(nx / len, ny / len, nz / len)
+      if (len > 0) {
+        normals.push(nx / len, ny / len, nz / len)
+      } else {
+        // A zero-radius tube collapses the surface onto the ring, where the
+        // surface normal is undefined; point it outward instead of dividing
+        // by zero.
+        normals.push(Math.cos(theta), 0, Math.sin(theta))
+      }
 
       uvs.push(u, v)
     }
@@ -305,10 +334,11 @@ export function createTorus({ radius = 1, tube = 0.4, segments = 32, tubeSegment
  * @param {object} opts
  * @param {number} [opts.radius=1] - Base radius
  * @param {number} [opts.height=2]
- * @param {number} [opts.segments=32]
+ * @param {number} [opts.segments=32] - Clamped to a whole number of at least 3
  * @returns {Geometry}
  */
-export function createCone({ radius = 1, height = 2, segments = 32 } = {}) {
+export function createCone({ radius = 1, height = 2, segments: segmentsIn = 32 } = {}) {
+  const segments = segmentCount(segmentsIn)
   const positions = []
   const normals = []
   const uvs = []
@@ -378,11 +408,20 @@ export function createCone({ radius = 1, height = 2, segments = 32 } = {}) {
  * @param {object} opts
  * @param {number} [opts.radius=0.5]
  * @param {number} [opts.height=2] - Total height including both caps
- * @param {number} [opts.segments=32] - Segments around the axis
- * @param {number} [opts.rings=8] - Latitude rings per hemisphere
+ * @param {number} [opts.segments=32] - Segments around the axis, clamped to at least 3
+ * @param {number} [opts.rings=8] - Latitude rings per hemisphere, clamped to at least 1
  * @returns {Geometry}
  */
-export function createCapsule({ radius = 0.5, height = 2, segments = 32, rings = 8 } = {}) {
+export function createCapsule({
+  radius = 0.5,
+  height = 2,
+  segments: segmentsIn = 32,
+  rings: ringsIn = 8
+} = {}) {
+  const segments = segmentCount(segmentsIn)
+  // One ring per hemisphere is the minimum: fewer leaves no latitude band at
+  // all, and row/rings divides by zero.
+  const rings = Math.max(1, Math.floor(ringsIn))
   const positions = []
   const normals = []
   const uvs = []
@@ -446,10 +485,13 @@ export function createCapsule({ radius = 0.5, height = 2, segments = 32, rings =
  * sizes than a UV sphere, and no pole pinching.
  * @param {object} opts
  * @param {number} [opts.radius=1]
- * @param {number} [opts.subdivisions=2] - Vertex count is 10 * 4^n + 2
+ * @param {number} [opts.subdivisions=2] - Vertex count is 10 * 4^n + 2; clamped to a
+ *   whole number of at least 0
  * @returns {Geometry}
  */
-export function createIcosphere({ radius = 1, subdivisions = 2 } = {}) {
+export function createIcosphere({ radius = 1, subdivisions: subdivisionsIn = 2 } = {}) {
+  // Zero is the bare icosahedron; fractional levels do not exist.
+  const subdivisions = Math.max(0, Math.floor(subdivisionsIn))
   const t = (1 + Math.sqrt(5)) / 2
 
   const normalize = (v) => {

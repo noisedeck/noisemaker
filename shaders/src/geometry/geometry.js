@@ -14,16 +14,31 @@
  * @returns {{ texWidth: number, texHeight: number }}
  */
 export function meshTextureSize(vertexCount) {
+  // An empty mesh would divide zero by zero and hand the backend a NaN height.
+  // A 1x1 grid is the harmless empty upload: its single texel is zeroed, so its
+  // position w is 0 and the shader reads it as an invalid vertex.
+  if (!(vertexCount > 0)) return { texWidth: 1, texHeight: 1 }
   const texWidth = Math.ceil(Math.sqrt(vertexCount))
   const texHeight = Math.ceil(vertexCount / texWidth)
   return { texWidth, texHeight }
 }
 
 export class Geometry {
+  /**
+   * @param {object} attrs
+   * @param {ArrayLike<number>} attrs.positions - xyz per vertex
+   * @param {ArrayLike<number>} attrs.normals - xyz per vertex
+   * @param {ArrayLike<number>} [attrs.uvs] - uv per vertex; omitted means a
+   *   zeroed uv per vertex, because deindex() reading past a missing uv array
+   *   would write undefined (NaN) into the packed uv texture.
+   * @param {ArrayLike<number>} attrs.indices
+   */
   constructor({ positions, normals, uvs, indices }) {
     this.positions = positions instanceof Float32Array ? positions : new Float32Array(positions)
     this.normals = normals instanceof Float32Array ? normals : new Float32Array(normals)
-    this.uvs = uvs instanceof Float32Array ? uvs : new Float32Array(uvs)
+    this.uvs = uvs?.length
+      ? (uvs instanceof Float32Array ? uvs : new Float32Array(uvs))
+      : new Float32Array((this.positions.length / 3) * 2)
     this.indices = indices instanceof Uint32Array ? indices : new Uint32Array(indices)
   }
 

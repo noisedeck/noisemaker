@@ -113,6 +113,20 @@ These are serialized by `share/meshes/generate.cjs` from the scene graph's own g
 `shaders/src/geometry/primitives.js`, and bundled into `dist/shaders/share/meshes/` for deployment.
 Re-run `node share/meshes/generate.cjs` after changing a primitive.
 
+Three differences from the pre-`primitives.js` assets are deliberate:
+
+- **`cube.obj` and `icosphere.obj` used to render inside-out.** `runtime/obj-parser.js` reverses
+  face order on read (OBJ CW to GL CCW), and the old generator wrote those two shapes already
+  counter-clockwise — 100% of their triangles (12/12 and 320/320) reached the GPU wound against
+  their normals, so back-face culling showed the far interior. Regeneration fixed both; all seven
+  assets now parse with zero inverted triangles.
+- **`sphere.obj` and `capsule.obj` are mirrored in x.** `primitives.js` negates the x term of the
+  normal formula (`-sin(phi) * cos(theta)` where the old generator used `+`). The silhouette is
+  unchanged — these shapes are symmetric about the axis — but the `u = 0` seam sits on the
+  opposite side, so uv columns land mirrored. The old assets carried no `vt` lines at all.
+- **`torus.obj` is no longer rotated 90°** — the ring lies in XZ with the tube axis on Y, matching
+  `createTorus`.
+
 ## [Architecture](https://docs.noisemaker.app/shaders/pipeline/)
 
 The pipeline operates in three main phases:

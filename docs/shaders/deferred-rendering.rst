@@ -33,7 +33,9 @@ Every pass is written twice — once in GLSL and once in WGSL.
    threshold quantises the result by one twelfth of the kernel. It is not
    reducible without softening the occlusion test itself.
    ``test_visual_playwright.js`` gates the delta against a tight ceiling so it
-   cannot silently widen.
+   cannot silently widen. It drives a real browser against a real GPU, so it is
+   not part of the headless ``npm run test:shaders`` suites; run it with
+   ``npm run test:shaders:visual`` on a machine with a display and a GPU.
 
 .. note::
 

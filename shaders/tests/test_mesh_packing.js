@@ -63,6 +63,41 @@ function assertSameFloats(actual, expected, label) {
     new Float32Array([0.25, 0.75, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 'packed uvs')
 }
 
+// A geometry built without uvs gets zeroed ones, not NaN.
+// deindex() reads uvs[idx * 2]; against an empty array that is undefined, which
+// lands in the Float32Array as NaN and uploads garbage to the uv texture.
+{
+  const geo = new Geometry({
+    positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+    normals: [0, 0, 1, 0, 0, 1, 0, 0, 1],
+    indices: [0, 1, 2]
+  })
+  assert.strictEqual(geo.uvs.length, geo.vertexCount * 2, 'missing uvs default to two per vertex')
+  assertSameFloats(geo.uvs, new Float32Array(6), 'defaulted uvs are zero')
+
+  const expanded = geo.deindex()
+  assertSameFloats(expanded.uvs, new Float32Array(6), 'deindexed uvs stay zero, not NaN')
+
+  const packed = geo.toPackedTextures(2, 2)
+  assertSameFloats(packed.uvData, new Float32Array(16), 'packed uvs stay zero, not NaN')
+}
+
+// Empty geometry packs into a harmless 1x1 zero texel instead of a NaN grid.
+// meshTextureSize(0) used to return { texWidth: 0, texHeight: NaN }.
+{
+  assert.deepStrictEqual(meshTextureSize(0), { texWidth: 1, texHeight: 1 },
+    'empty meshes get a 1x1 grid')
+
+  const geo = new Geometry({ positions: [], normals: [], uvs: [], indices: [] })
+  const { texWidth, texHeight } = meshTextureSize(geo.deindex().vertexCount)
+  const packed = geo.toPackedTextures(texWidth, texHeight)
+  assert.strictEqual(packed.vertexCount, 0, 'empty packed vertexCount')
+  // One texel, position w=0: the backend reads it as an invalid vertex.
+  assertSameFloats(packed.positionData, new Float32Array(4), 'empty positions are one zero texel')
+  assertSameFloats(packed.normalData, new Float32Array(4), 'empty normals are one zero texel')
+  assertSameFloats(packed.uvData, new Float32Array(4), 'empty uvs are one zero texel')
+}
+
 // Meshes larger than the texture grid are truncated, not overflowed
 {
   const vertexCount = 5

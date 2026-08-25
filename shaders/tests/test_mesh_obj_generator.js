@@ -26,6 +26,26 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const generator = path.join(repoRoot, 'share', 'meshes', 'generate.cjs')
 
+// Every vertex the generator writes is serialized with `%.6f`, so a value that
+// round-trips intact still moves by up to half a decimal ULP plus the float32
+// step — 5.1e-7 measured across all seven assets. Anything larger is real drift.
+const SERIALIZATION_TOLERANCE = 1e-6
+
+/**
+ * Compare a parsed attribute against the generator's own de-indexed data.
+ * @param {Float32Array} actual - Parsed out of the OBJ file
+ * @param {Float32Array} expectedValues - From primitives.js
+ * @param {string} label
+ */
+function assertSameAttribute(actual, expectedValues, label) {
+  assert.strictEqual(actual.length, expectedValues.length, `${label}: same length`)
+  for (let i = 0; i < expectedValues.length; i++) {
+    const delta = Math.abs(actual[i] - expectedValues[i])
+    assert.ok(delta <= SERIALIZATION_TOLERANCE,
+      `${label}: element ${i} is ${actual[i]}, expected ${expectedValues[i]} (delta ${delta})`)
+  }
+}
+
 // Mirrors the recipes in generate.cjs; a drift here means the generator no
 // longer produces what the committed assets claim to be.
 const expected = {
@@ -61,6 +81,16 @@ try {
     assert.strictEqual(mesh.positions.length, mesh.vertexCount * 3, `${name}: position count`)
     assert.strictEqual(mesh.normals.length, mesh.vertexCount * 3, `${name}: normal count`)
     assert.strictEqual(mesh.uvs.length, mesh.vertexCount * 2, `${name}: uv count`)
+
+    // Vertex for vertex against the recipe above. The generator writes faces in
+    // reverse index order and the parser reverses them again on read, so the
+    // parsed soup lands in the same order as the recipe's own de-indexed data —
+    // and a changed recipe parameter in generate.cjs fails right here instead of
+    // passing on a matching triangle count.
+    const soup = geo.deindex()
+    assertSameAttribute(mesh.positions, soup.positions, `${name}: positions match the recipe`)
+    assertSameAttribute(mesh.normals, soup.normals, `${name}: normals match the recipe`)
+    assertSameAttribute(mesh.uvs, soup.uvs, `${name}: uvs match the recipe`)
 
     for (let i = 0; i < mesh.positions.length; i++) {
       assert.ok(Number.isFinite(mesh.positions[i]), `${name}: position[${i}] finite`)

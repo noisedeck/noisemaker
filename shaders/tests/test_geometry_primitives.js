@@ -160,6 +160,70 @@ function assertGeometry(geo, label) {
   assert.strictEqual(base.indices.length, 60, 'icosahedron has 20 faces')
 }
 
+// Degenerate parameters must still produce finite geometry.
+//
+// A segment or ring count below the minimum closed cross-section used to divide
+// by zero and fill the buffers with NaN — createCapsule({ rings: 0 }) alone
+// produced 198 NaN components. The generators clamp instead of trusting the
+// caller, so every one of these lands on the floor count.
+{
+  const sameSize = (a, b, label) => {
+    assert.strictEqual(a.positions.length, b.positions.length, `${label}: same vertex count`)
+    assert.strictEqual(a.indices.length, b.indices.length, `${label}: same index count`)
+  }
+
+  const cone0 = createCone({ segments: 0 })
+  assertGeometry(cone0, 'cone-segments-0')
+  sameSize(cone0, createCone({ segments: 3 }), 'cone-segments-0 clamps to 3')
+
+  const capsuleRings0 = createCapsule({ rings: 0 })
+  assertGeometry(capsuleRings0, 'capsule-rings-0')
+  sameSize(capsuleRings0, createCapsule({ rings: 1 }), 'capsule-rings-0 clamps to 1')
+
+  const capsule0 = createCapsule({ segments: 0, rings: 0 })
+  assertGeometry(capsule0, 'capsule-segments-rings-0')
+  sameSize(capsule0, createCapsule({ segments: 3, rings: 1 }), 'capsule-segments-0 clamps to 3')
+
+  const sphere0 = createSphere({ segments: 0 })
+  assertGeometry(sphere0, 'sphere-segments-0')
+  sameSize(sphere0, createSphere({ segments: 3 }), 'sphere-segments-0 clamps to 3')
+
+  const cylinder0 = createCylinder({ segments: 0 })
+  assertGeometry(cylinder0, 'cylinder-segments-0')
+  sameSize(cylinder0, createCylinder({ segments: 3 }), 'cylinder-segments-0 clamps to 3')
+
+  const torus0 = createTorus({ segments: 0, tubeSegments: 0 })
+  assertGeometry(torus0, 'torus-segments-0')
+  sameSize(torus0, createTorus({ segments: 3, tubeSegments: 3 }), 'torus-segments-0 clamps to 3')
+
+  // A zero-radius tube collapses the surface onto the ring, where the normal
+  // direction is undefined; it must not normalize a zero-length vector.
+  assertGeometry(createTorus({ tube: 0 }), 'torus-tube-0')
+
+  // Negative and fractional counts land on the same floors
+  assertGeometry(createSphere({ segments: -8 }), 'sphere-segments-negative')
+  sameSize(createCone({ segments: 8.7 }), createCone({ segments: 8 }), 'cone-segments-fractional')
+  sameSize(createTorus({ segments: 8.7, tubeSegments: 6.2 }), createTorus({ segments: 8, tubeSegments: 6 }),
+    'torus-segments-fractional')
+  sameSize(createCapsule({ segments: 8.7, rings: 3.4 }), createCapsule({ segments: 8, rings: 3 }),
+    'capsule-rings-fractional')
+
+  // Subdivision counts below zero or between integers land on whole levels
+  const icoNeg = createIcosphere({ subdivisions: -1 })
+  assertGeometry(icoNeg, 'icosphere-subdivisions-negative')
+  sameSize(icoNeg, createIcosphere({ subdivisions: 0 }), 'icosphere-subdivisions-negative clamps to 0')
+  sameSize(createIcosphere({ subdivisions: 2.5 }), createIcosphere({ subdivisions: 2 }),
+    'icosphere-subdivisions-fractional')
+
+  // Clamped geometry is still wound correctly
+  assertWindingMatchesNormals(cone0, 'cone-segments-0')
+  assertWindingMatchesNormals(capsule0, 'capsule-segments-rings-0')
+  assertWindingMatchesNormals(sphere0, 'sphere-segments-0')
+  assertWindingMatchesNormals(cylinder0, 'cylinder-segments-0')
+  assertWindingMatchesNormals(torus0, 'torus-segments-0')
+  assertWindingMatchesNormals(icoNeg, 'icosphere-subdivisions-negative')
+}
+
 // Default params
 {
   const geo = createSphere({})
