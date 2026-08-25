@@ -523,7 +523,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
   let P = textureSampleLevel(u_positionEmission, u_sampler, input.v_texCoord, 0.0).rgb;
   let N = normalize(textureSampleLevel(u_normalRoughness, u_sampler, input.v_texCoord, 0.0).rgb * 2.0 - 1.0);
 
-  let angle = ign(input.position.xy) * 6.2831853;
+  // GLSL feeds ign() gl_FragCoord.xy, whose origin is bottom-left; WGSL's
+  // @builtin(position) origin is top-left, so passing it straight through
+  // mirrors the noise rotation vertically and the two backends compute
+  // different AO for the same surface point. v_texCoord * dimensions is
+  // gl_FragCoord.xy exactly, on both backends.
+  let angle = ign(input.v_texCoord * vec2f(textureDimensions(u_depth))) * 6.2831853;
   let randVec = vec3f(cos(angle), sin(angle), 0.0);
   let T = normalize(randVec - N * dot(randVec, N));
   let B = cross(N, T);
@@ -1229,7 +1234,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
 
   // Ambient: a DSL-surface environment sampled at the normal when present,
   // else hemisphere sky/ground — either way occluded by SSAO.
-  let ao = mix(1.0, textureSampleLevel(u_ssao, u_sampler, input.v_texCoord, 0.0).r, scene.u_ssaoStrength);
+  // The SSAO buffer is written by a fullscreen pass, so on WebGPU its rows
+  // are stored flipped relative to the G-buffer (which the mesh vertex stage
+  // negates into GL row order). Sampling it with the G-buffer's uv applies
+  // the occlusion upside down; invert v, the same compensation the SSR
+  // shader makes for u_litColor and u_planarReflection.
+  let ssaoUV = vec2f(input.v_texCoord.x, 1.0 - input.v_texCoord.y);
+  let ao = mix(1.0, textureSampleLevel(u_ssao, u_sampler, ssaoUV, 0.0).r, scene.u_ssaoStrength);
   var ambientLight: vec3f;
   if (scene.u_envIntensity > 0.0) {
     ambientLight = sampleEnvironmentDiffuse(normal) * scene.u_envIntensity;

@@ -10,15 +10,30 @@ presents into a texture the 2D pipeline then treats as an ordinary source.
 
 Every pass is written twice — once in GLSL and once in WGSL.
 
-.. warning::
+.. note::
 
-   **The two backends are not bit-identical.** A cross-backend comparison of
-   ``scene_lit_color`` on a fixed scene measures a maximum channel delta of 35
-   across roughly 14.5% of channels. Some drift is inherent — the G-buffer and
-   lighting run in float, and the two shader compilers reassociate differently —
-   but that magnitude is well beyond float noise and is an open divergence, not
-   an accepted tolerance. ``test_visual_playwright.js`` gates the delta against
-   a ceiling so it cannot silently widen while the causes are tracked down.
+   **The two backends are not bit-identical, but the gap is now float noise.**
+   A cross-backend comparison of ``scene_lit_color`` on a fixed scene measures
+   a maximum channel delta of 4 across 0.0004% of channels — 16 channels out of
+   4.19 million. The G-buffer itself (albedo/metallic, normal/roughness,
+   position/emission) is bit-identical between the backends.
+
+   The earlier figure of 35 across 14.5% of channels was two orientation bugs
+   in the WGSL path, both since fixed. On WebGPU the mesh vertex stage negates
+   clip-space Y so the G-buffer lands in GL row order, which means any buffer
+   produced by a *fullscreen* pass is stored flipped relative to it. The WGSL
+   lighting shader sampled ``u_ssao`` with the G-buffer's own uv and so applied
+   occlusion upside down, and the WGSL SSAO shader fed ``@builtin(position)``
+   (top-left origin) to its noise function where GLSL feeds ``gl_FragCoord``
+   (bottom-left origin), mirroring the per-pixel rotation.
+
+   What remains is a single SSAO sample crossing the hard
+   ``gbufDist < sampleDist - 0.02`` occlusion test on 13 pixels: the two shader
+   compilers reassociate the reprojection arithmetic differently, and that hard
+   threshold quantises the result by one twelfth of the kernel. It is not
+   reducible without softening the occlusion test itself.
+   ``test_visual_playwright.js`` gates the delta against a tight ceiling so it
+   cannot silently widen.
 
 .. note::
 

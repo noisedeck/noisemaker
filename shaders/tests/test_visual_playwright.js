@@ -873,14 +873,17 @@ async function testCrossBackendParity(browser, port) {
   const pct = (differing / a.data.length) * 100
   console.log(`  Cross-backend: maxDelta=${maxDelta} differing=${pct.toFixed(4)}%`)
 
-  // This is a ceiling, not a parity assertion. The scene path is NOT
-  // bit-identical across backends: measured at maxDelta 35 over ~14.5% of
-  // channels on this scene. The G-buffer and lighting run in float and the two
-  // shader compilers reassociate differently, so some drift is expected — but
-  // 35/255 is well beyond float noise and is a real divergence still to be
-  // tracked down. The gate exists so it cannot silently get worse in the
-  // meantime; tighten it as the causes are found.
-  const CEILING = 40
+  // This is a ceiling, not a parity assertion. Measured maxDelta 4 over
+  // 0.0004% of channels on this scene (16 channels of 4.19M) — down from 35
+  // over 14.5% once the WGSL lighting shader stopped sampling the SSAO buffer
+  // upside down and the WGSL SSAO shader stopped mirroring its noise rotation.
+  // The G-buffer itself is bit-identical across backends. What is left is one
+  // SSAO sample crossing the hard `gbufDist < sampleDist - 0.02` occlusion
+  // threshold on 13 pixels: float reassociation between the two shader
+  // compilers moves the comparison across the edge, which quantises AO by one
+  // twelfth of the kernel and shows up as <=4/255 in the ambient term. That is
+  // irreducible without softening the occlusion test itself.
+  const CEILING = 6
   const withinCeiling = maxDelta <= CEILING
   return [{
     scene: sceneName,
