@@ -42,6 +42,11 @@
  * SSR reconstructs to compare against. The 1e-6 floor keeps a near-plane hit
  * from writing an exact 0 and being read back as sky by the `depth <= 0`
  * sentinel.
+ *
+ * A hit in front of the near plane is DISCARDED rather than clamped, in both
+ * languages, before that expression runs — the rasterizer near-clips a mesh and
+ * the marcher must do the same for its hits or a volume enclosing the camera
+ * hides the whole scene. See the test at the site.
  */
 
 /** Marcher constants, matching render3d so the same iso level resolves alike. */
@@ -205,6 +210,14 @@ void main() {
   }
 
   vec4 clip = u_projectionMatrix * u_viewMatrix * worldHit;
+  // The near-plane test, in clip space. The projection matrix is GL-convention
+  // in both languages, so the near plane is z == -w and a hit in FRONT of it
+  // has z < -w. Such a hit has no window-space depth: clamping it would pin it
+  // to the front of the depth range and let a volume body enclosing the camera
+  // occlude the entire scene, where a same-extent mesh is near-clipped away by
+  // the rasterizer. w <= 0 covers the hit landing at or behind the eye, whose
+  // z/w is a division by zero and would put a NaN into frag depth.
+  if (clip.w <= 0.0 || clip.z < -clip.w) discard;
   float depth = clamp(clip.z / clip.w * 0.5 + 0.5, 1e-6, 1.0);
 
   gAlbedoMetallic = vec4(albedo, u_metallic);
@@ -399,6 +412,18 @@ fn fs_main(input: FragmentInput) -> GBufferOutput {
   }
 
   let clip = u.u_projectionMatrix * u.u_viewMatrix * worldHit;
+  // The near-plane test, in clip space. The projection matrix is GL-convention
+  // in both languages (the mesh vertex stage remaps z to [0,w] only AFTER its
+  // own projection), so the near plane is z == -w and a hit in FRONT of it has
+  // z < -w. Such a hit has no window-space depth: clamping it would pin it to
+  // the front of the depth range and let a volume body enclosing the camera
+  // occlude the entire scene, where a same-extent mesh is near-clipped away by
+  // the rasterizer. w <= 0 covers the hit landing at or behind the eye, whose
+  // z/w is a division by zero and would put a NaN into frag depth.
+  if (clip.w <= 0.0 || clip.z < -clip.w) {
+    discard;
+    return output;
+  }
   let depth = clamp(clip.z / clip.w * 0.5 + 0.5, 1e-6, 1.0);
 
   output.albedoMetallic = vec4f(albedo, u.u_metallic);

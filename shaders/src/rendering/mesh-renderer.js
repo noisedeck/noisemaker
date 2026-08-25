@@ -3,6 +3,16 @@ import { createSphere, createBox, createPlane, createCylinder, createTorus } fro
 import { meshTextureSize } from '../geometry/geometry.js'
 import { mat4 } from '../scene/math.js'
 
+/**
+ * Shared stand-ins for "this node has no material" / "no pbr block".
+ *
+ * `mat.pbr || {}` and `materials[id] || {}` each minted a fresh object per node
+ * per frame on the no-material path. They are only ever read, and freezing them
+ * makes that a guarantee rather than a convention.
+ */
+const EMPTY_MATERIAL = Object.freeze({})
+const EMPTY_PBR = Object.freeze({})
+
 const DEFAULT_COLOR = Object.freeze([1, 1, 1])
 const DEFAULT_UV_SCALE = Object.freeze([1, 1])
 const DEFAULT_UV_OFFSET = Object.freeze([0, 0])
@@ -33,6 +43,43 @@ const DEFAULT_OUTPUTS = Object.freeze({
  * each probe face — pass their own passId, as they always have.
  */
 export const SCENE_GBUFFER_PASS_ID = 'scene_gbuf_pass'
+
+/** Nodes already reported as having a singular world transform. */
+const SINGULAR_WARNED = new WeakSet()
+
+/**
+ * Invert `modelMatrix` into `out`, falling back to identity when it is singular.
+ *
+ * gl-matrix's `invert` returns null on a singular matrix and leaves `out`
+ * UNTOUCHED. Because these output buffers are reused across frames, an
+ * unchecked call does not fail loudly: frame 1 keeps whatever `mat4.create()`
+ * left, and every frame after it keeps the PREVIOUS frame's inverse. For a
+ * volume that inverse IS the ray transform, so the node quietly renders from a
+ * stale camera-relative pose. A degenerate scale — any axis at 0, e.g. a mesh
+ * flattened to a card — is the way this is normally reached.
+ *
+ * Identity is the honest fallback: it draws the untransformed body rather than
+ * a lie. The warning is once per node because this sits on the per-frame path.
+ * @param {Float32Array} out - Destination matrix, written in every case
+ * @param {Float32Array} modelMatrix - World matrix to invert
+ * @param {object} node - Node being drawn, for the diagnostic
+ * @param {string} kind - 'volume' or 'mesh', for the diagnostic
+ * @returns {boolean} Whether the inverse was well-defined
+ */
+export function invertOrIdentity(out, modelMatrix, node, kind) {
+  if (mat4.invert(out, modelMatrix)) return true
+  mat4.identity(out)
+  if (!SINGULAR_WARNED.has(node)) {
+    SINGULAR_WARNED.add(node)
+    const scale = Array.isArray(node._scale) ? node._scale.join(', ') : 'unknown'
+    console.warn(
+      `Scene ${kind} '${node.id}' has a singular world transform (scale [${scale}]) ` +
+      'and cannot be inverted; falling back to an identity transform. ' +
+      'A scale with a zero axis is the usual cause.'
+    )
+  }
+  return false
+}
 
 function finiteVector(value, length, fallback) {
   if (!Array.isArray(value) || value.length !== length) return fallback
@@ -204,8 +251,8 @@ export class MeshRenderer {
       const modelMatrix = node.getWorldMatrix()
 
       // Resolve material
-      const mat = (node.materialId && materials[node.materialId]) || {}
-      const pbr = mat.pbr || {}
+      const mat = (node.materialId && materials[node.materialId]) || EMPTY_MATERIAL
+      const pbr = mat.pbr || EMPTY_PBR
       const baseColor = finiteVector(mat.baseColor, 3, DEFAULT_COLOR)
       const uvScale = finiteVector(mat.uvScale, 2, DEFAULT_UV_SCALE)
       const uvOffset = finiteVector(mat.uvOffset, 2, DEFAULT_UV_OFFSET)
@@ -220,7 +267,7 @@ export class MeshRenderer {
       const state = this._passState(passId, node, handle)
       const { pass, uniforms, inputs, normalMatrix, baseColorRgba } = state
 
-      mat4.invert(normalMatrix, modelMatrix)
+      invertOrIdentity(normalMatrix, modelMatrix, node, 'mesh')
       mat4.transpose(normalMatrix, normalMatrix)
 
       let hasAlbedoTexture = 0

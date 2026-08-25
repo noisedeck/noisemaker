@@ -71,6 +71,7 @@ const testEntries = [
   { file: 'shaders/tests/test_scene_integration.js', parity: false },
   { file: 'shaders/tests/test_gbuffer.js', parity: false },
   { file: 'shaders/tests/test_volume_shaders.js', parity: false },
+  { file: 'shaders/tests/test_volume_atlas_size.js', parity: false },
   { file: 'shaders/tests/test_scene_renderer.js', parity: false },
   { file: 'shaders/tests/test_procedural.js', parity: false },
   { file: 'shaders/tests/test_clock.js', parity: false },

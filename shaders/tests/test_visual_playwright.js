@@ -1132,6 +1132,368 @@ async function testVolumeCrossBackendParity(browser, port) {
   }
 }
 
+/**
+ * A volume body that encloses the camera, with a legitimately-visible mesh
+ * behind it.
+ *
+ * The camera sits at z 0.5 inside a 2x2x2 volume spanning [-1,1]^3, so every
+ * marched hit is within ~2.06 units (the far corner) and almost all of them are
+ * nearer than the 1.5 near plane. The sphere at z -4 is 3.5 units away and
+ * plainly in front of nothing.
+ *
+ * A mesh of the volume's extent would be near-clipped by the rasterizer and the
+ * sphere would show through. The marcher has no rasterizer to do that for it:
+ * clamping such a hit's window depth pins it to the front of the depth range,
+ * where it beats every real surface. Sphere blue, volume red, so the albedo
+ * target says outright which won.
+ * @param {number} near - Camera near plane. 1.5 puts the volume inside it;
+ *   0.01 is the control, where the volume legitimately occludes the sphere.
+ */
+function nearPlaneVolumeScene(near) {
+  return `search synth3d
+noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0.02, 0.02, 0.03],
+  ambient: 0.25,
+  camera(fov: 55, near: ${near}, pos: [0, 0, 0.5], target: [0, 0, -1]),
+  light(type: "directional", dir: [0.4, -1, 0.6], intensity: 2.2),
+  mesh("sphere", radius: 1, pos: [0, 0, -4])
+    .material(solid(color: [0.05, 0.1, 0.9]).pbr(metallic: 0, roughness: 0.9)),
+  volume(vol0, threshold: 0.5, pos: [0, 0, 0])
+    .material(solid(color: [0.95, 0.15, 0.05]).pbr(metallic: 0, roughness: 0.6))
+).write(o0)
+render(o0)`
+}
+
+async function loadSceneSource(page, source) {
+  if (!(await page.getByRole('textbox').isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: 'Edit DSL program' }).click()
+  }
+  await page.getByRole('textbox').fill(source)
+  await page.getByRole('button', { name: 'run', exact: true }).click()
+  await page.waitForFunction(
+    () => document.getElementById('status')?.textContent === 'compiled successfully',
+    { timeout: 20000 }
+  )
+  // The scene renders BEFORE the pipeline each tick, so global_vol0 needs a
+  // couple of frames before it holds anything at all.
+  await page.waitForTimeout(700)
+}
+
+/**
+ * Fraction of covered pixels won by the volume (red) and by the mesh (blue).
+ *
+ * A census, not a positional diff: the MRT targets read back with opposite row
+ * order on the two backends.
+ */
+async function nearPlaneCensus(page) {
+  return page.evaluate(async () => {
+    const renderer = window.__noisemakerCanvasRenderer
+    const albedo = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_albedo_metallic')
+    const depth = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_depth')
+    let volume = 0
+    let mesh = 0
+    let sky = 0
+    const total = albedo.width * albedo.height
+    for (let pixel = 0; pixel < total; pixel++) {
+      const offset = pixel * 4
+      if (depth.data[offset] === 0) { sky++; continue }
+      if (albedo.data[offset] > albedo.data[offset + 2]) volume++
+      else if (albedo.data[offset + 2] > albedo.data[offset]) mesh++
+    }
+    return { volume, mesh, sky, total }
+  })
+}
+
+/**
+ * F1: a volume hit inside the near plane must be discarded, not clamped.
+ *
+ * Measured on both backends in one case, because the finding is precisely that
+ * the two must agree — and that they must agree with what the rasterizer does
+ * to a mesh of the same extent.
+ *
+ * The near 0.01 control is what keeps the near 1.5 assertion from passing
+ * vacuously: it proves the volume really does cover the screen from inside, so
+ * "the sphere is visible at near 1.5" can only mean the near-plane reject fired.
+ */
+async function testVolumeNearPlaneReject(browser, port) {
+  const sceneName = 'volume hits inside the near plane are rejected'
+  console.log(`\n--- Testing ${sceneName} ---`)
+
+  const measure = async (backendName) => {
+    const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+    const page = await context.newPage()
+    try {
+      await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+        { waitUntil: 'domcontentloaded', timeout: 15000 })
+      await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+      await loadSceneSource(page, nearPlaneVolumeScene(0.01))
+      const enclosing = await nearPlaneCensus(page)
+      await loadSceneSource(page, nearPlaneVolumeScene(1.5))
+      const clipped = await nearPlaneCensus(page)
+      return { enclosing, clipped }
+    } finally {
+      await context.close()
+    }
+  }
+
+  const results = {}
+  for (const backendName of ['webgl2', 'webgpu']) {
+    results[backendName] = await measure(backendName)
+    const { enclosing, clipped } = results[backendName]
+    console.log(`  ${backendName}: near0.01=${JSON.stringify(enclosing)}`)
+    console.log(`  ${backendName}: near1.5 =${JSON.stringify(clipped)}`)
+  }
+
+  const fail = (reason) => ({ scene: sceneName, backend: 'webgl2+webgpu', status: 'fail', reason, metrics: results })
+
+  for (const backendName of ['webgl2', 'webgpu']) {
+    const { enclosing, clipped } = results[backendName]
+    // Control: with the near plane out of the way the volume genuinely owns
+    // the screen, so the sphere behind it is hidden.
+    if (enclosing.volume < enclosing.total * 0.5) {
+      return fail(`${backendName}: the enclosing volume does not cover the screen at near 0.01: ${JSON.stringify(enclosing)}`)
+    }
+    if (enclosing.mesh > enclosing.total * 0.02) {
+      return fail(`${backendName}: the sphere should be occluded at near 0.01: ${JSON.stringify(enclosing)}`)
+    }
+    // The finding: at near 1.5 the volume is inside the near plane and must
+    // stop occluding. The sphere subtends roughly 85% of the frame height, so
+    // 5% coverage is a floor with a lot of room under it.
+    if (clipped.mesh < clipped.total * 0.05) {
+      return fail(`${backendName}: the sphere is hidden by a volume inside the near plane: ${JSON.stringify(clipped)}`)
+    }
+  }
+
+  // And the two backends must reach the same answer, not merely each pass.
+  const a = results.webgl2.clipped
+  const b = results.webgpu.clipped
+  const spread = Math.abs(a.mesh - b.mesh) / a.total
+  console.log(`  cross-backend sphere coverage spread: ${(spread * 100).toFixed(3)}%`)
+  if (spread > 0.02) {
+    return fail(`backends disagree on sphere coverage by ${(spread * 100).toFixed(2)}% of the frame`)
+  }
+
+  return { scene: sceneName, backend: 'webgl2+webgpu', status: 'pass', metrics: results }
+}
+
+/**
+ * A centred, radially symmetric volume with nothing else in the scene.
+ *
+ * shape3d's sphere field is a function of |p - centre| only, and at speedA /
+ * speedB 0 it has no time term, so the isosurface is a set of concentric shells
+ * centred on the volume's own centre — on BOTH backends, on every frame.
+ *
+ * That centre is the whole point. shape3d normalizes its grid as
+ * `vec3(x,y,z) / (volumeSize - 1)`, putting the field's centre at texel index
+ * 31.5 of 64; the marcher's `uvw * (volSizeF - 1.0)` maps local 0 to exactly
+ * 31.5 too. The two conventions agree, and the silhouette is centred because
+ * they do. Under `uvw * volSizeF` local 0 would land on index 32 instead — half
+ * a texel, which is 1/63 of the body and several pixels on screen.
+ */
+const CENTRED_VOLUME_SCENE = `search synth3d
+shape3d(loopAOffset: sphere, loopBOffset: sphere, speedA: 0, speedB: 0)
+  .write3d(vol0, geo0)
+scene(
+  background: [0, 0, 0],
+  ambient: 0.5,
+  camera(fov: 45, pos: [0, 0, 5], target: [0, 0, 0]),
+  light(type: "directional", dir: [0, -1, -0.5], intensity: 2),
+  volume(vol0, threshold: 0.5, pos: [0, 0, 0])
+    .material(solid(color: [0.9, 0.9, 0.9]).pbr(metallic: 0, roughness: 0.8))
+).write(o0)
+render(o0)`
+
+/**
+ * Centroid and bounding box of everything the volume covered, in pixels.
+ *
+ * Read from the depth target, where 0 is the no-hit sentinel. The scene holds
+ * nothing else, so every covered pixel is the volume's.
+ */
+async function volumeSilhouette(page) {
+  return page.evaluate(async () => {
+    const renderer = window.__noisemakerCanvasRenderer
+    const depth = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_depth')
+    const normal = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_normal_roughness')
+    let count = 0, sumX = 0, sumY = 0, sumNX = 0, sumNY = 0
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (let y = 0; y < depth.height; y++) {
+      for (let x = 0; x < depth.width; x++) {
+        const offset = (y * depth.width + x) * 4
+        if (depth.data[offset] === 0) continue
+        count++; sumX += x; sumY += y
+        // RT1 stores normal * 0.5 + 0.5, so an x or y component of zero is 127.5.
+        sumNX += normal.data[offset]
+        sumNY += normal.data[offset + 1]
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    }
+    return {
+      width: depth.width, height: depth.height, count,
+      centroidX: count ? sumX / count : 0,
+      centroidY: count ? sumY / count : 0,
+      meanNormalX: count ? sumNX / count : 0,
+      meanNormalY: count ? sumNY / count : 0,
+      minX, maxX, minY, maxY
+    }
+  })
+}
+
+/**
+ * F4: a numeric gate on the atlas texel convention.
+ *
+ * The source-contract tests pin strings and the cross-backend gate shifts
+ * identically on both sides, so neither would notice
+ * `uvw * (volSize - 1)` becoming `uvw * volSize`. This would: the silhouette of
+ * a centred field stops being centred, and its extent changes by 64/63.
+ *
+ * Everything asserted here is derived from the camera math, not from a golden
+ * image. Camera at [0,0,5] on the -Z axis, looking at the origin: the body
+ * centre projects to the principal point, i.e. the exact centre of the frame,
+ * whatever the readback row order. The containment bound is the projection of
+ * the body box's nearest face (z = +1, so 4 units away).
+ */
+async function testVolumeSamplingConvention(browser, port) {
+  const sceneName = 'volume atlas sampling convention (numeric)'
+  console.log(`\n--- Testing ${sceneName} ---`)
+
+  const measure = async (backendName) => {
+    const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+    const page = await context.newPage()
+    try {
+      await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+        { waitUntil: 'domcontentloaded', timeout: 15000 })
+      await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+      await loadSceneSource(page, CENTRED_VOLUME_SCENE)
+      const first = await volumeSilhouette(page)
+      // Twice, in the same page: the field has no time term, so a second
+      // reading that differs would mean this gate is not deterministic.
+      const second = await volumeSilhouette(page)
+      return { first, second }
+    } finally {
+      await context.close()
+    }
+  }
+
+  const results = {}
+  const fail = (reason) => ({ scene: sceneName, backend: 'webgl2+webgpu', status: 'fail', reason, metrics: results })
+
+  for (const backendName of ['webgl2', 'webgpu']) {
+    const { first, second } = await measure(backendName)
+    results[backendName] = first
+    const s = first
+
+    if (Math.abs(first.centroidX - second.centroidX) > 0.5 ||
+        Math.abs(first.centroidY - second.centroidY) > 0.5 || first.count !== second.count) {
+      return fail(`${backendName}: not deterministic across two readings: ${JSON.stringify({ first, second })}`)
+    }
+
+    // The projection of the body box's NEAREST face, in pixels. Camera 5 units
+    // out, face at z = +1, so 4 units away; fov 45 gives tan(22.5) per unit of
+    // half-height. Nothing the volume draws may fall outside it.
+    const tanHalfFov = Math.tan((45 * Math.PI / 180) / 2)
+    const aspect = s.width / s.height
+    const boxHalfH = (1 / (4 * tanHalfFov)) * (s.height / 2)
+    const boxHalfW = (1 / (4 * tanHalfFov * aspect)) * (s.width / 2)
+    const cx = s.width / 2
+    const cy = s.height / 2
+    console.log(`  ${backendName}: ${JSON.stringify(s)}`)
+    console.log(`  ${backendName}: box half-extent ${boxHalfW.toFixed(1)} x ${boxHalfH.toFixed(1)} px`)
+
+    if (s.count < s.width * s.height * 0.02) {
+      return fail(`${backendName}: the volume barely drew anything: ${JSON.stringify(s)}`)
+    }
+    // The centroid pin. A half-texel shift in the sampling convention is 1/63
+    // of the body, several pixels here, so 2px has room and no slack.
+    if (Math.abs(s.centroidX - cx) > 2 || Math.abs(s.centroidY - cy) > 2) {
+      return fail(
+        `${backendName}: silhouette centroid (${s.centroidX.toFixed(2)}, ${s.centroidY.toFixed(2)}) ` +
+        `is more than 2px from the frame centre (${cx}, ${cy}) — the field is centred, so the ` +
+        'atlas texel convention has shifted')
+    }
+    // Containment: a marched hit is always inside the body box, so its
+    // projection is always inside the box's. One pixel of slack, because the
+    // measured index is a pixel's lower corner, not its centre.
+    if (s.minX < cx - boxHalfW - 1 || s.maxX > cx + boxHalfW + 1 ||
+        s.minY < cy - boxHalfH - 1 || s.maxY > cy + boxHalfH + 1) {
+      return fail(
+        `${backendName}: silhouette [${s.minX}..${s.maxX}] x [${s.minY}..${s.maxY}] escapes the ` +
+        `body box's projection [${(cx - boxHalfW).toFixed(1)}..${(cx + boxHalfW).toFixed(1)}] x ` +
+        `[${(cy - boxHalfH).toFixed(1)}..${(cy + boxHalfH).toFixed(1)}]`)
+    }
+    // ...and it fills a sensible share of that box. A silhouette that collapsed
+    // or exploded is a sampling change even when it stayed centred.
+    const fillW = (s.maxX - s.minX) / (2 * boxHalfW)
+    const fillH = (s.maxY - s.minY) / (2 * boxHalfH)
+    console.log(`  ${backendName}: box fill ${(fillW * 100).toFixed(1)}% x ${(fillH * 100).toFixed(1)}%`)
+    if (fillW < 0.3 || fillH < 0.3) {
+      return fail(`${backendName}: silhouette fills only ${(fillW * 100).toFixed(1)}% x ${(fillH * 100).toFixed(1)}% of the body box`)
+    }
+    // Radial symmetry: the field depends on |p - centre| alone, so the
+    // silhouette's bounding box is symmetric about the centre. A scaled texel
+    // convention (64/63) shows up here even if it were somehow centred.
+    const skewX = Math.abs((cx - s.minX) - (s.maxX - cx))
+    const skewY = Math.abs((cy - s.minY) - (s.maxY - cy))
+    if (skewX > 4 || skewY > 4) {
+      return fail(`${backendName}: silhouette is not symmetric about the centre (skew ${skewX} x ${skewY} px)`)
+    }
+    // Normals come from central differences of the sampled field, so the mean
+    // normal over a radially symmetric field seen head-on is analytically
+    // (0, 0, +z) — 127.5 in x and y once RT1 has encoded it as n * 0.5 + 0.5.
+    // Measured 127.46 with the correct convention (the 0.04 is encoding bias),
+    // so 1.0 is twenty times the real floor.
+    console.log(`  ${backendName}: mean normal x=${s.meanNormalX.toFixed(3)} y=${s.meanNormalY.toFixed(3)} (symmetry -> 127.5)`)
+    if (Math.abs(s.meanNormalX - 127.5) > 1 || Math.abs(s.meanNormalY - 127.5) > 1) {
+      return fail(
+        `${backendName}: mean G-buffer normal (${s.meanNormalX.toFixed(3)}, ${s.meanNormalY.toFixed(3)}) ` +
+        'is more than 1/255 off the 127.5 a centred, radially symmetric field must produce — ' +
+        'the atlas texel convention is sampling off centre')
+    }
+    // The sharp one, and the reason this case can see a SUB-texel shift at all.
+    //
+    // The silhouette is bounded by the body box, which masks a small sampling
+    // shift in the extent — but nothing masks the field's own symmetry. It is
+    // symmetric under x <-> y and the camera is on the axis, so the x and y
+    // statistics are not merely near 127.5 / near the centre: they are equal to
+    // each other. Measured with the correct convention they are equal to the
+    // last bit on both backends (centroid 511.5 / 511.5, mean normal
+    // 127.45642278974864 / 127.45642278974864).
+    //
+    // Sampling half a texel off centre — `uvw * volSizeF` for
+    // `uvw * (volSizeF - 1.0)`, which puts local 0 on texel 32 instead of the
+    // field's own centre at 31.5 — breaks it: measured mean-normal diagonal
+    // splits of 0.37 (WebGL2) and 0.42 (WebGPU), against a floor of exactly 0.
+    const centroidSplit = Math.abs(s.centroidX - s.centroidY)
+    const normalSplit = Math.abs(s.meanNormalX - s.meanNormalY)
+    console.log(`  ${backendName}: diagonal split centroid=${centroidSplit.toFixed(3)}px normal=${normalSplit.toFixed(3)}`)
+    if (centroidSplit > 0.5 || normalSplit > 0.2) {
+      return fail(
+        `${backendName}: the x and y statistics of a field symmetric under x <-> y have split ` +
+        `(centroid by ${centroidSplit.toFixed(3)}px, mean normal by ${normalSplit.toFixed(3)}/255) — ` +
+        'the atlas texel convention is off centre')
+    }
+  }
+
+  // The two backends decode the same atlas, so their silhouettes must agree.
+  const dx = Math.abs(results.webgl2.centroidX - results.webgpu.centroidX)
+  const dy = Math.abs(results.webgl2.centroidY - results.webgpu.centroidY)
+  const dCount = Math.abs(results.webgl2.count - results.webgpu.count) / results.webgl2.count
+  // Measured at exactly 0 on all three with the correct convention — the two
+  // backends decode the same atlas to the same pixels. The regression above
+  // pushes coverage to 0.500% and the y centroid to 1.33px.
+  console.log(`  cross-backend centroid delta ${dx.toFixed(3)} x ${dy.toFixed(3)} px, coverage delta ${(dCount * 100).toFixed(3)}%`)
+  if (dx > 0.5 || dy > 0.5 || dCount > 0.0005) {
+    return fail(`backends disagree: centroid ${dx.toFixed(3)} x ${dy.toFixed(3)} px, coverage ${(dCount * 100).toFixed(3)}%`)
+  }
+
+  return { scene: sceneName, backend: 'webgl2+webgpu', status: 'pass', metrics: results }
+}
+
 async function main() {
   const { server, port } = await startServer()
   console.log(`Server on port ${port}`)
@@ -1160,6 +1522,8 @@ async function main() {
   } else if (VOLUME_ONLY) {
     results.push(await testVolumeScene(browser, port, 'webgl2'))
     results.push(await testVolumeScene(browser, port, 'webgpu'))
+    results.push(await testVolumeNearPlaneReject(browser, port))
+    results.push(await testVolumeSamplingConvention(browser, port))
     results.push(await testVolumeCrossBackendParity(browser, port))
   } else if (PLANAR_REFLECTION_ONLY) {
     results.push(await testFlatPlanarReflection(browser, port, 'webgl2'))
@@ -1179,6 +1543,8 @@ async function main() {
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
     results.push(await testVolumeScene(browser, port, 'webgl2'))
     results.push(await testVolumeScene(browser, port, 'webgpu'))
+    results.push(await testVolumeNearPlaneReject(browser, port))
+    results.push(await testVolumeSamplingConvention(browser, port))
     results.push(...(await testCrossBackendParity(browser, port)))
     results.push(await testVolumeCrossBackendParity(browser, port))
   }

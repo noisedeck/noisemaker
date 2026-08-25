@@ -54,10 +54,40 @@ const wgsl = volumeFragmentWGSL()
 {
   assert.ok(glsl.includes('discard;'), 'GLSL discards on miss')
   assert.ok(wgsl.includes('discard;'), 'WGSL discards on miss')
-  // Two discards each: the ray missing the box entirely, and the march
-  // reaching the exit without crossing the threshold.
-  assert.strictEqual((glsl.match(/discard;/g) || []).length, 2, 'GLSL: box miss and march miss')
-  assert.strictEqual((wgsl.match(/discard;/g) || []).length, 2, 'WGSL: box miss and march miss')
+  // Three discards each: the ray missing the box entirely, the march reaching
+  // the exit without crossing the threshold, and the hit landing inside the
+  // near plane (see the near-plane clip test below).
+  assert.strictEqual((glsl.match(/discard;/g) || []).length, 3, 'GLSL: box miss, march miss, near-plane reject')
+  assert.strictEqual((wgsl.match(/discard;/g) || []).length, 3, 'WGSL: box miss, march miss, near-plane reject')
+}
+
+// A hit INSIDE the near plane must be discarded, not clamped to the front of
+// the depth range.
+//
+// The clamp alone turns every such fragment into depth 1e-6 — nearer than
+// anything else in the scene — so a volume body enclosing the camera occludes
+// the whole scene. That is the exact opposite of a same-extent mesh, which the
+// rasterizer near-clips away. clip.w <= 0 is reachable too (camera exactly on
+// the isosurface gives tHit 0 and, with a hit at the eye, w 0 -> 0/0 NaN into
+// frag depth), and NaN depth is undefined behaviour on both backends.
+//
+// `clip.w <= 0.0 || clip.z < -clip.w` IS the near-plane test in clip space:
+// both backends' projection matrices are GL-convention here (the WGSL vertex
+// stage remaps z to [0,w] afterwards), so the near plane is z == -w and a point
+// in front of it has z < -w. Identical text in both languages.
+{
+  const NEAR_CLIP_EXPR = 'clip.w <= 0.0 || clip.z < -clip.w'
+  assert.ok(glsl.includes(NEAR_CLIP_EXPR), `GLSL near-plane reject: ${NEAR_CLIP_EXPR}`)
+  assert.ok(wgsl.includes(NEAR_CLIP_EXPR), `WGSL near-plane reject: ${NEAR_CLIP_EXPR}`)
+
+  // ...and it must come BEFORE the depth is computed, or the clamp has already
+  // manufactured the bogus value the test exists to prevent.
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    const rejectAt = src.indexOf(NEAR_CLIP_EXPR)
+    const depthAt = src.indexOf('clamp(clip.z / clip.w * 0.5 + 0.5, 1e-6, 1.0)')
+    assert.ok(rejectAt > 0 && depthAt > 0, `${lang} precondition: both expressions present`)
+    assert.ok(rejectAt < depthAt, `${lang} rejects the near-plane hit before writing depth`)
+  }
 }
 
 // The scene renderer supplies no u_time to G-buffer passes and the marcher must

@@ -1,6 +1,16 @@
 // shaders/src/rendering/volume-renderer.js
 import { mat4 } from '../scene/math.js'
-import { SCENE_GBUFFER_PASS_ID } from './mesh-renderer.js'
+import { SCENE_GBUFFER_PASS_ID, invertOrIdentity } from './mesh-renderer.js'
+
+/**
+ * Shared stand-ins for "this node has no material" / "no pbr block".
+ *
+ * `materialRecord || {}` and `mat.pbr || {}` each minted a fresh object per
+ * volume per frame on the no-material path. They are only ever read, and
+ * freezing them makes that a guarantee rather than a convention.
+ */
+const EMPTY_MATERIAL = Object.freeze({})
+const EMPTY_PBR = Object.freeze({})
 
 const DEFAULT_COLOR = Object.freeze([1, 1, 1])
 const DEFAULT_OUTPUTS = Object.freeze({
@@ -168,8 +178,8 @@ export class VolumeRenderer {
       const modelMatrix = node.getWorldMatrix()
 
       const materialRecord = node.materialId ? materials?.[node.materialId] : undefined
-      const mat = materialRecord || {}
-      const pbr = mat.pbr || {}
+      const mat = materialRecord || EMPTY_MATERIAL
+      const pbr = mat.pbr || EMPTY_PBR
       const baseColor = finiteVector(mat.baseColor, 3, DEFAULT_COLOR)
       const metallic = boundedNumber(pbr.metallic, 0, 0, 1)
       const roughness = boundedNumber(pbr.roughness, 1, 0.045, 1)
@@ -178,8 +188,12 @@ export class VolumeRenderer {
       const state = this._passState(node, handle)
       const { pass, uniforms, invModelMatrix, normalMatrix, baseColorRgba } = state
 
-      // World -> local carries the ray into the box's own [-1,1] space.
-      mat4.invert(invModelMatrix, modelMatrix)
+      // World -> local carries the ray into the box's own [-1,1] space. A
+      // singular transform has no such inverse; identity (and one warning) is
+      // the honest answer, because an unchecked invert would leave the reused
+      // buffer holding the PREVIOUS frame's ray transform. See
+      // invertOrIdentity.
+      invertOrIdentity(invModelMatrix, modelMatrix, node, 'volume')
       // Local -> world for the field gradient. transpose(inverse(model)) is the
       // normal matrix, which is exactly what the mesh vertex shader uses to
       // carry ITS local vertex normals to world; the gradient is no different.

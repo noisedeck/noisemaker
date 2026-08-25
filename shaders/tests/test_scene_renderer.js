@@ -1,8 +1,18 @@
 import assert from 'assert'
+import { readFileSync } from 'fs'
 import { SceneRenderer } from '../src/rendering/scene-renderer.js'
 import { MeshRenderer } from '../src/rendering/mesh-renderer.js'
 
 import { SceneTree } from '../src/scene/tree.js'
+
+/**
+ * The world matrix an untransformed node actually produces.
+ *
+ * An all-zero Float32Array — what these mocks used to hand back — is singular,
+ * so it now (correctly) trips the singular-transform fallback and its warning.
+ * Identity is what a real SceneNode with no transform yields.
+ */
+const IDENTITY_WORLD = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 
 /**
  * Minimal backend stub recording the passes SceneRenderer submits.
@@ -215,7 +225,7 @@ async function makeRenderer() {
     meshType: 'sphere',
     meshParams: { segments: 8 },
     materialId: 'mat_0',
-    getWorldMatrix: () => new Float32Array(16)
+    getWorldMatrix: () => IDENTITY_WORLD
   }
   const mockMaterials = {
     mat_0: { baseColor: [1, 0, 0], pbr: { metallic: 0.5, roughness: 0.3 } }
@@ -243,13 +253,13 @@ async function makeRenderer() {
     id: 'floor',
     meshType: 'plane',
     meshParams: {},
-    getWorldMatrix: () => new Float32Array(16)
+    getWorldMatrix: () => IDENTITY_WORLD
   }
   const object = {
     id: 'object',
     meshType: 'box',
     meshParams: {},
-    getWorldMatrix: () => new Float32Array(16)
+    getWorldMatrix: () => IDENTITY_WORLD
   }
   const outputs = {
     color0: 'planar_albedo',
@@ -1163,6 +1173,126 @@ function volumeTree(nodes, materials = {}) {
   renderer.dispose()
   const leaked = [...backend.textures.keys()].filter(id => /_positions$|_normals$|_uvs$/.test(id))
   assert.deepStrictEqual(leaked, [], `dispose() left the volume box geometry behind: ${leaked.join(', ')}`)
+}
+
+// A degenerate scale makes the world matrix singular, and mat4.invert then
+// returns null WITHOUT touching its output. For a volume the inverse IS the ray
+// transform, so an untouched output means frame 1 marches through a zeroed
+// matrix and every later frame silently marches through the PREVIOUS frame's
+// transform — a stale image with no signal at all. Fall back to identity and
+// say so, once per node, since this sits on the per-frame path.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'flat', type: 'volume', surface: 'vol0', threshold: 0.5,
+      transform: { scale: [2, 4, 8] }, children: [], parent: null }
+  ])
+  const volumeNodes = tree.getVolumeNodes()
+
+  // Frame 1 is healthy, so the reused buffer holds a REAL inverse. Only then
+  // does a stale carry-over differ from the identity mat4.create() left there,
+  // which is what makes this assertion mean anything.
+  const first = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, tree.camera, 320, 240, {})[0]
+  assert.strictEqual(first.uniforms.u_invModelMatrix[0], 0.5, 'precondition: frame 1 inverted cleanly')
+
+  volumeNodes[0].scale = [1, 1, 0]
+
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, tree.camera, 320, 240, {})
+    renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, tree.camera, 320, 240, {})
+  } finally {
+    console.warn = realWarn
+  }
+
+  const pass = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, tree.camera, 320, 240, {})[0]
+  const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+  assert.deepStrictEqual(
+    Array.from(pass.uniforms.u_invModelMatrix), IDENTITY,
+    'a singular volume transform falls back to identity, not an untouched buffer')
+  assert.deepStrictEqual(
+    Array.from(pass.uniforms.u_normalMatrix), IDENTITY,
+    'the normal matrix follows the same fallback')
+  assert.strictEqual(warnings.length, 1, `warn once per node across frames, got ${warnings.length}`)
+  assert.ok(warnings[0].includes('flat'), `the warning names the node: ${warnings[0]}`)
+  assert.ok(warnings[0].includes('1,1,0') || warnings[0].includes('1, 1, 0'),
+    `the warning names the degenerate scale: ${warnings[0]}`)
+}
+
+// Same hazard on the mesh side: a singular world matrix leaves the normal
+// matrix untouched, so lighting reads the previous frame's normals.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = SceneTree.fromIR({
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    materials: {},
+    settings: {},
+    nodes: [{ id: 'squashed', type: 'mesh', meshType: 'box', meshParams: {},
+      transform: { scale: [2, 4, 8] }, children: [], parent: null }]
+  })
+  const meshNodes = tree.getMeshNodes()
+
+  const healthy = renderer.meshRenderer.buildMeshPasses(meshNodes, {}, tree.camera, 320, 240, {})[0]
+  assert.strictEqual(healthy.uniforms.u_normalMatrix[0], 0.5, 'precondition: frame 1 inverted cleanly')
+  meshNodes[0].scale = [1, 1, 0]
+
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (...args) => warnings.push(args.join(' '))
+  try {
+    renderer.meshRenderer.buildMeshPasses(meshNodes, {}, tree.camera, 320, 240, {})
+    renderer.meshRenderer.buildMeshPasses(meshNodes, {}, tree.camera, 320, 240, {})
+  } finally {
+    console.warn = realWarn
+  }
+
+  const pass = renderer.meshRenderer.buildMeshPasses(meshNodes, {}, tree.camera, 320, 240, {})[0]
+  assert.deepStrictEqual(
+    Array.from(pass.uniforms.u_normalMatrix), [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    'a singular mesh transform falls back to an identity normal matrix')
+  assert.strictEqual(warnings.length, 1, `warn once per node across frames, got ${warnings.length}`)
+  assert.ok(warnings[0].includes('squashed'), `the warning names the node: ${warnings[0]}`)
+}
+
+// The no-material path must not allocate. `mat.pbr || {}` and
+// `materials[id] || {}` each minted a fresh object per node per frame; shared
+// frozen empties cost nothing and cannot be written through.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'a', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }
+  ])
+  const volumeNodes = tree.getVolumeNodes()
+
+  for (const source of [
+    readFileSync(new URL('../src/rendering/volume-renderer.js', import.meta.url), 'utf8'),
+    readFileSync(new URL('../src/rendering/mesh-renderer.js', import.meta.url), 'utf8')
+  ]) {
+    assert.ok(source.includes('const EMPTY_MATERIAL = Object.freeze({})'),
+      'a module-level frozen empty material')
+    assert.ok(source.includes('const EMPTY_PBR = Object.freeze({})'),
+      'a module-level frozen empty pbr block')
+    assert.ok(!/const mat = .*\|\|\s*\{\}/.test(source),
+      'the material fallback is the shared frozen empty, not a fresh literal')
+    assert.ok(!/const pbr = .*\|\|\s*\{\}/.test(source),
+      'the pbr fallback is the shared frozen empty, not a fresh literal')
+  }
+
+  // And the defaults the frozen empties feed through are unchanged.
+  const pass = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, tree.camera, 320, 240, {})[0]
+  assert.strictEqual(pass.uniforms.u_hasMaterial, 0)
+  assert.strictEqual(pass.uniforms.u_metallic, 0)
+  assert.strictEqual(pass.uniforms.u_roughness, 1)
+  assert.deepStrictEqual(Array.from(pass.uniforms.u_baseColor), [1, 1, 1, 1])
 }
 
 // An empty scene still clears the G-buffer exactly once — the zero-content
