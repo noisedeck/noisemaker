@@ -30,6 +30,22 @@ const PLANAR_REFLECTION_ONLY = process.argv.includes('--planar-reflection-only')
 const MATERIAL_BANDING_ONLY = process.argv.includes('--material-banding-only')
 const SCENE_ANIMATION_ONLY = process.argv.includes('--scene-animation-only')
 const CROSS_BACKEND_ONLY = process.argv.includes('--cross-backend-only')
+const VOLUME_ONLY = process.argv.includes('--volume-only')
+
+/**
+ * Cross-backend maxDelta ceiling for the volume scene's lit colour.
+ *
+ * Measured 7 over 0.0026% of channels. The marcher itself contributes nothing:
+ * diffing the four G-buffer targets directly (allowing for the MRT readback's
+ * row-order difference — WebGL2's readPixels flips rows, the WGSL vertex stage
+ * having already flipped clip Y) gives maxDelta 0 on albedo, position and
+ * depth, and 1 on 0.00005% of the normal buffer. The residual is the same SSAO
+ * effect the mesh case documents: samples crossing the hard
+ * `gbufDist < sampleDist - 0.02` occlusion test land on either side depending
+ * on float reassociation between the two shader compilers, quantising AO by one
+ * twelfth of the kernel. The mesh case's own ceiling stays at 6.
+ */
+const VOLUME_PARITY_CEILING = 8
 
 const MIME = {
   '.html': 'text/html',
@@ -902,6 +918,220 @@ async function testCrossBackendParity(browser, port) {
   }]
 }
 
+/**
+ * A volume() node in the scene graph, half-buried in a ground plane.
+ *
+ * Deliberately deterministic: noise3d at speed 0 has no time term, so the atlas
+ * is the same on every frame and on both backends.
+ *
+ * The geometry is chosen to make the depth compositing test discriminating. The
+ * camera looks steeply down, so a ray that hits the isosurface in the volume's
+ * upper half leaves the bounding box through its BOTTOM face — below the ground
+ * plane, and therefore behind it. The box's back face (the fragment the
+ * rasterizer produces, since the pass culls front faces) loses the depth test
+ * against the plane; only the marched hit distance, written to gl_FragDepth /
+ * @builtin(frag_depth), wins it. A volume drawn at its box depth would be
+ * swallowed whole by the plane.
+ *
+ * Albedo does the identifying: the plane is blue, the volume red, so RT0 says
+ * outright which surface won each pixel.
+ * @param {number} volumeY - Height of the volume's centre. 0 buries the lower
+ *   half in the plane; 1.05 lifts the whole box clear of it.
+ */
+function volumeScene(volumeY) {
+  return `search synth3d
+noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0.02, 0.02, 0.03],
+  ambient: 0.25,
+  camera(fov: 55, pos: [0, 4, -1.6], target: [0, 0, 0]),
+  light(type: "directional", dir: [0.4, -1, 0.6], intensity: 2.2),
+  mesh("plane", width: 12, height: 12)
+    .material(solid(color: [0.05, 0.1, 0.9]).pbr(metallic: 0, roughness: 0.9)),
+  volume(vol0, threshold: 0.5, pos: [0, ${volumeY}, 0])
+    .material(solid(color: [0.95, 0.15, 0.05]).pbr(metallic: 0, roughness: 0.6))
+).write(o0)
+render(o0)`
+}
+
+/**
+ * Count red (volume) vs blue (plane) fragments in the G-buffer albedo target.
+ *
+ * Counts, not per-pixel comparisons: the MRT targets read back with opposite
+ * row order on the two backends (WebGL2's readPixels flips rows, and the WGSL
+ * vertex stage has already flipped clip Y so the buffers themselves agree), so
+ * a positional diff of these targets would compare mirrored images. A census is
+ * orientation-independent and still catches a volume that failed to draw.
+ */
+async function volumeAlbedoCensus(page) {
+  return page.evaluate(async () => {
+    const renderer = window.__noisemakerCanvasRenderer
+    const albedo = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_albedo_metallic')
+    const depth = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_depth')
+    let volume = 0
+    let plane = 0
+    let sky = 0
+    for (let pixel = 0; pixel < albedo.width * albedo.height; pixel++) {
+      const offset = pixel * 4
+      // depth == 0 is the no-hit sentinel every downstream pass reads as sky.
+      if (depth.data[offset] === 0) { sky++; continue }
+      const r = albedo.data[offset]
+      const b = albedo.data[offset + 2]
+      if (r > b) volume++
+      else if (b > r) plane++
+    }
+    return { volume, plane, sky, total: albedo.width * albedo.height }
+  })
+}
+
+async function loadVolumeScene(page, volumeY) {
+  // 'Edit DSL program' toggles the editor, so opening it a second time closes
+  // it and every later fill() waits forever on a hidden textbox.
+  if (!(await page.getByRole('textbox').isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: 'Edit DSL program' }).click()
+  }
+  await page.getByRole('textbox').fill(volumeScene(volumeY))
+  await page.getByRole('button', { name: 'run', exact: true }).click()
+  await page.waitForFunction(
+    () => document.getElementById('status')?.textContent === 'compiled successfully',
+    { timeout: 20000 }
+  )
+  // The scene renders BEFORE the pipeline each tick, so the atlas it binds is
+  // the previous frame's write side. A couple of frames must elapse before
+  // global_vol0 holds anything at all.
+  await page.waitForTimeout(700)
+}
+
+async function testVolumeScene(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const url = `http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`
+  const sceneName = 'volume() in the scene G-buffer'
+  console.log(`\n--- Testing ${sceneName} on ${backendName.toUpperCase()} ---`)
+
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message || String(error)))
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+
+  const fail = (reason, metrics) => ({ scene: sceneName, backend: backendName, status: 'fail', reason, metrics, errors })
+
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+
+    await loadVolumeScene(page, 0)
+    const buried = await volumeAlbedoCensus(page)
+    await loadVolumeScene(page, 1.05)
+    const raised = await volumeAlbedoCensus(page)
+    const metrics = { buried, raised }
+    console.log(`  buried=${JSON.stringify(buried)}\n  raised=${JSON.stringify(raised)}`)
+
+    await context.close()
+
+    // Non-flat: the marcher found an isosurface and it survived compositing
+    // against the plane behind it.
+    if (buried.volume < buried.total * 0.01) {
+      return fail(`the volume produced almost no G-buffer coverage: ${JSON.stringify(buried)}`, metrics)
+    }
+    if (buried.plane < buried.total * 0.2) {
+      return fail(`the ground plane is missing: ${JSON.stringify(buried)}`, metrics)
+    }
+    // ...and the plane genuinely occludes the half of the volume beneath it:
+    // lifting the box clear of the plane must expose materially more of it.
+    if (raised.volume < buried.volume * 1.2) {
+      return fail(
+        `the plane does not occlude the buried half: buried=${buried.volume} raised=${raised.volume}`,
+        metrics
+      )
+    }
+    if (errors.length > 0) {
+      return { scene: sceneName, backend: backendName, status: 'fail', reason: errors.slice(0, 3).join(' / '), metrics, errors }
+    }
+    return { scene: sceneName, backend: backendName, status: 'pass', metrics }
+  } catch (error) {
+    await context.close()
+    return {
+      scene: sceneName,
+      backend: backendName,
+      status: 'error',
+      reason: [error.message, ...errors].filter(Boolean).join(' / '),
+      errors
+    }
+  }
+}
+
+async function volumeLitColorFor(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const url = `http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+    await loadVolumeScene(page, 0)
+    return await page.evaluate(async () => {
+      const renderer = window.__noisemakerCanvasRenderer
+      renderer.stop()
+      renderer._clock?.reset()
+      await renderer.render(0.25)
+      const image = await renderer.sceneRenderer.backend.readPixels('scene_lit_color')
+      return { width: image.width, height: image.height, data: Array.from(image.data) }
+    })
+  } finally {
+    await context.close()
+  }
+}
+
+/**
+ * Cross-backend gate for the volume marcher.
+ *
+ * The volume fill is a hand-written GLSL/WGSL pair and lives under
+ * shaders/src/rendering/, outside the per-effect parity attestation harness.
+ * This is its parity gate: without it the pair would be the only shader pair in
+ * the repo with none.
+ */
+async function testVolumeCrossBackendParity(browser, port) {
+  const sceneName = 'volume cross-backend lit colour parity'
+  console.log(`\n--- Testing ${sceneName} ---`)
+  const [a, b] = [
+    await volumeLitColorFor(browser, port, 'webgl2'),
+    await volumeLitColorFor(browser, port, 'webgpu')
+  ]
+
+  if (a.width !== b.width || a.height !== b.height) {
+    return { scene: sceneName, backend: 'both', status: 'fail',
+      reason: `size mismatch: ${a.width}x${a.height} vs ${b.width}x${b.height}` }
+  }
+
+  let maxDelta = 0
+  let differing = 0
+  for (let i = 0; i < a.data.length; i++) {
+    const delta = Math.abs(a.data[i] - b.data[i])
+    if (delta > 0) differing++
+    if (delta > maxDelta) maxDelta = delta
+  }
+  const pct = (differing / a.data.length) * 100
+  console.log(`  Volume cross-backend: maxDelta=${maxDelta} differing=${pct.toFixed(4)}%`)
+
+  // A ceiling, not a parity assertion, and its own — separate from the mesh
+  // case's, which stays at 6. A raymarched isosurface amplifies float
+  // reassociation between the two shader compilers: the bisection converges on
+  // a slightly different t, which moves the hit point, its central-difference
+  // normal and therefore its shading. The ceiling is set from the measured
+  // value; see the report accompanying this change.
+  const CEILING = VOLUME_PARITY_CEILING
+  const withinCeiling = maxDelta <= CEILING
+  return {
+    scene: sceneName,
+    backend: 'webgl2-vs-webgpu',
+    status: withinCeiling ? 'pass' : 'fail',
+    reason: `maxDelta=${maxDelta} over ${pct.toFixed(4)}% of channels (ceiling ${CEILING}; not bit-identical)`
+  }
+}
+
 async function main() {
   const { server, port } = await startServer()
   console.log(`Server on port ${port}`)
@@ -927,6 +1157,10 @@ async function main() {
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
   } else if (CROSS_BACKEND_ONLY) {
     results.push(...(await testCrossBackendParity(browser, port)))
+  } else if (VOLUME_ONLY) {
+    results.push(await testVolumeScene(browser, port, 'webgl2'))
+    results.push(await testVolumeScene(browser, port, 'webgpu'))
+    results.push(await testVolumeCrossBackendParity(browser, port))
   } else if (PLANAR_REFLECTION_ONLY) {
     results.push(await testFlatPlanarReflection(browser, port, 'webgl2'))
     results.push(await testFlatPlanarReflection(browser, port, 'webgpu'))
@@ -943,10 +1177,13 @@ async function main() {
     results.push(await testRoughMaterialReflectionStability(browser, port, 'webgpu'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgl2'))
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
+    results.push(await testVolumeScene(browser, port, 'webgl2'))
+    results.push(await testVolumeScene(browser, port, 'webgpu'))
     results.push(...(await testCrossBackendParity(browser, port)))
+    results.push(await testVolumeCrossBackendParity(browser, port))
   }
   if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY
-      && !CROSS_BACKEND_ONLY) {
+      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']
     const backends = ['webgl2', 'webgpu']
     for (const scene of scenes) {

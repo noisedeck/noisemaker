@@ -940,4 +940,241 @@ function treeWithLights(lights, settings = {}) {
   assert.deepStrictEqual(leaked, [], `dispose() left mesh geometry textures behind: ${leaked.join(', ')}`)
 }
 
+const GBUF_OUTPUTS = {
+  color0: 'scene_gbuf_albedo_metallic',
+  color1: 'scene_gbuf_normal_roughness',
+  color2: 'scene_gbuf_position_emission',
+  color3: 'scene_gbuf_depth'
+}
+
+function volumeTree(nodes, materials = {}) {
+  return SceneTree.fromIR({
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    materials,
+    settings: {},
+    nodes
+  })
+}
+
+// A volume is not a mesh, but it does reach the G-buffer: its bounding box is
+// rasterized as a triangles MRT pass so both backends attach a depth buffer,
+// and the marcher fills the same four targets a mesh fills.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'cloud', type: 'volume', surface: 'vol3', threshold: 0.4, transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  assert.strictEqual(tree.getMeshNodes().length, 0, 'a volume is never a mesh node')
+  assert.strictEqual(tree.getVolumeNodes().length, 1, 'the volume is reachable on its own accessor')
+  assert.deepStrictEqual(
+    backend.passes.filter(p => p.program === 'scene_mesh_gbuf'), [],
+    'no mesh pass is built for a volume node')
+
+  assert.ok(backend.programs.has('scene_volume_gbuf'), 'the volume fill program is compiled up front')
+
+  const volumePasses = backend.passes.filter(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(volumePasses.length, 1, 'one pass per volume node')
+  const pass = volumePasses[0]
+  assert.strictEqual(pass.drawMode, 'triangles', 'triangles is what buys the depth attachment on both backends')
+  assert.strictEqual(pass.cullMode, 'front',
+    'back faces only: one fragment per pixel, and still drawn with the camera inside the box')
+  assert.strictEqual(pass.drawBuffers, 4, 'writes the whole G-buffer')
+  assert.strictEqual(pass.count, 36, 'a non-indexed unit box')
+  assert.deepStrictEqual(pass.outputs, GBUF_OUTPUTS, 'the same four targets the mesh pass writes')
+  assert.strictEqual(pass.inputs.u_volumeAtlas, 'global_vol3', 'binds the node\'s own atlas')
+  assert.ok(/^global_scene_mesh_\d+_positions$/.test(pass.inputs.u_positions), 'box geometry from the shared cache')
+  assert.ok(/^global_scene_mesh_\d+_normals$/.test(pass.inputs.u_normals), 'box normals bound')
+  assert.ok(/^global_scene_mesh_\d+_uvs$/.test(pass.inputs.u_uvs), 'box uvs bound')
+  assert.strictEqual(pass.uniforms.u_threshold, 0.4, 'the node\'s iso level reaches the marcher')
+  assert.strictEqual(pass.uniforms.u_volumeSize, 64, 'the global vol atlases are 64 cubed')
+  assert.strictEqual(pass.uniforms.u_invModelMatrix.length, 16, 'world -> local for the ray')
+  assert.strictEqual(pass.uniforms.u_normalMatrix.length, 16, 'local -> world for the gradient')
+  assert.deepStrictEqual(
+    Array.from(pass.uniforms.u_cameraPos), [0, 0, 5],
+    'the ray origin is the camera')
+
+  // A volume-only scene must clear the G-buffer exactly once, and the volume
+  // pass itself is what does it — clearTexture would land ahead of the frame's
+  // recorded work on WebGPU.
+  assert.strictEqual(pass.clear, true, 'the first content pass clears')
+  assert.deepStrictEqual(backend.clearedTextures, [], 'no separate zero-content clear when a volume drew')
+
+  assert.ok(backend.passes.some(p => p.id === 'scene_lighting'), 'the frame still completes')
+  assert.ok(
+    backend.passes.indexOf(pass) < backend.passes.findIndex(p => p.id === 'scene_lighting'),
+    'the volume fills the G-buffer before lighting reads it')
+}
+
+// Volume passes run after mesh passes, and only the very first pass into the
+// G-buffer clears it. Depth handles the real compositing; the order is fixed so
+// the clear decision is deterministic.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'ground', type: 'mesh', meshType: 'plane', meshParams: {}, transform: {}, children: [], parent: null },
+    { id: 'cloud', type: 'volume', surface: 'vol1', threshold: 0.5, transform: {}, children: [], parent: null },
+    { id: 'smoke', type: 'volume', surface: 'vol2', threshold: 0.5, transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const gbufPasses = backend.passes.filter(
+    p => p.program === 'scene_mesh_gbuf' || p.program === 'scene_volume_gbuf'
+  )
+  assert.deepStrictEqual(
+    gbufPasses.map(p => p.program),
+    ['scene_mesh_gbuf', 'scene_volume_gbuf', 'scene_volume_gbuf'],
+    'volumes execute after meshes into the same G-buffer')
+  assert.deepStrictEqual(
+    gbufPasses.map(p => p.clear), [true, false, false],
+    'only the first content pass clears')
+  assert.deepStrictEqual(
+    gbufPasses.map(p => p.outputs), [GBUF_OUTPUTS, GBUF_OUTPUTS, GBUF_OUTPUTS],
+    'one G-buffer, one depth attachment')
+  // Not cosmetic: the WebGL2 backend keys its MRT framebuffer — and therefore
+  // the depth renderbuffer attached to it — on `mrt_${pass.id}_${outputs}`.
+  // Distinct ids over identical outputs gave mesh and volume passes separate
+  // depth buffers, so the volume tested against depth the mesh never wrote and
+  // vanished entirely on WebGL2 while rendering correctly on WebGPU (which keys
+  // its depth texture by size).
+  assert.strictEqual(
+    new Set(gbufPasses.map(p => p.id)).size, 1,
+    `mesh and volume passes must share one framebuffer: ${gbufPasses.map(p => p.id).join(', ')}`)
+  assert.deepStrictEqual(
+    gbufPasses.slice(1).map(p => p.inputs.u_volumeAtlas), ['global_vol1', 'global_vol2'],
+    'each volume binds its own atlas')
+  assert.deepStrictEqual(backend.clearedTextures, [], 'the mesh pass already cleared')
+}
+
+// Phase 1 scope: volumes do not appear in the planar reflection or the probe.
+// Both pass lists are built from getMeshNodes().
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'mirror', type: 'mesh', meshType: 'plane', meshParams: {}, transform: {}, planarReflection: true, children: [], parent: null },
+    { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: { position: [0, 1, 0] }, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const volumePasses = backend.passes.filter(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(volumePasses.length, 1, 'the volume is drawn once, into the main G-buffer only')
+  assert.deepStrictEqual(volumePasses[0].outputs, GBUF_OUTPUTS, 'never into the planar or probe G-buffer')
+}
+
+// Material uniforms on a volume are the mesh material set. surface() albedo is
+// rejected upstream, so a volume never carries an albedo texture.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree(
+    [{ id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, material: 'mat0', transform: {}, children: [], parent: null }],
+    { mat0: { baseColor: [0.2, 0.7, 0.3], pbr: { metallic: 0.4, roughness: 0.25 }, emission: 1.5 } }
+  )
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const pass = backend.passes.find(p => p.program === 'scene_volume_gbuf')
+  assert.deepStrictEqual(pass.uniforms.u_baseColor, [0.2, 0.7, 0.3, 1], 'solid() colour')
+  assert.strictEqual(pass.uniforms.u_metallic, 0.4)
+  assert.strictEqual(pass.uniforms.u_roughness, 0.25)
+  assert.strictEqual(pass.uniforms.u_emissionStrength, 1.5)
+  assert.strictEqual(pass.uniforms.u_hasMaterial, 1, 'the material replaces the atlas-derived albedo')
+  assert.strictEqual(pass.inputs.u_albedoTexture, undefined, 'a volume has no UVs and no albedo texture')
+}
+
+// Without a material the marcher falls back to the atlas RGB, so the shader
+// needs to know which case it is in.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const pass = backend.passes.find(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(pass.uniforms.u_hasMaterial, 0, 'no material: atlas RGB drives albedo')
+  assert.strictEqual(pass.uniforms.u_metallic, 0, 'internMaterial defaults')
+  assert.strictEqual(pass.uniforms.u_roughness, 1)
+  assert.strictEqual(pass.uniforms.u_emissionStrength, 0)
+}
+
+// Volume passes follow the mesh convention: built once per node and rewritten
+// in place. Rebuilding them per frame allocated matrices, texture-name strings
+// and three object literals per volume per frame.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'a', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null },
+    { id: 'b', type: 'volume', surface: 'vol1', threshold: 0.6, transform: {}, children: [], parent: null }
+  ])
+  const volumeNodes = tree.getVolumeNodes()
+  const camera = tree.camera
+
+  const first = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})
+  const second = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})
+
+  assert.strictEqual(first.length, 2, 'two volume passes')
+  for (let i = 0; i < first.length; i++) {
+    assert.strictEqual(first[i], second[i], `pass ${i} must be reused between frames, not rebuilt`)
+    assert.strictEqual(first[i].uniforms, second[i].uniforms, `pass ${i} uniforms must be reused`)
+    assert.strictEqual(first[i].inputs, second[i].inputs, `pass ${i} inputs must be reused`)
+    assert.strictEqual(first[i].uniforms.u_invModelMatrix, second[i].uniforms.u_invModelMatrix,
+      `pass ${i} inverse world matrix must be written into a reused buffer`)
+    assert.strictEqual(first[i].uniforms.u_normalMatrix, second[i].uniforms.u_normalMatrix,
+      `pass ${i} normal matrix must be written into a reused buffer`)
+    assert.strictEqual(first[i].uniforms.u_baseColor, second[i].uniforms.u_baseColor,
+      `pass ${i} base colour must be written into a reused buffer`)
+  }
+  assert.notStrictEqual(first[0], first[1], 'each node gets its own pass object')
+}
+
+// One box for every volume in the program: the geometry cache is shared with
+// the mesh renderer, so N volumes upload three textures, not 3N.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'a', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null },
+    { id: 'b', type: 'volume', surface: 'vol1', threshold: 0.5, transform: {}, children: [], parent: null },
+    { id: 'c', type: 'volume', surface: 'vol2', threshold: 0.5, transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const geometryTextures = [...backend.textures.keys()].filter(id => /_positions$|_normals$|_uvs$/.test(id))
+  assert.strictEqual(geometryTextures.length, 3, `one shared box, got ${geometryTextures.join(', ')}`)
+
+  const passes = backend.passes.filter(p => p.program === 'scene_volume_gbuf')
+  const positionInputs = new Set(passes.map(p => p.inputs.u_positions))
+  assert.strictEqual(positionInputs.size, 1, 'all three volumes draw the same box')
+
+  renderer.dispose()
+  const leaked = [...backend.textures.keys()].filter(id => /_positions$|_normals$|_uvs$/.test(id))
+  assert.deepStrictEqual(leaked, [], `dispose() left the volume box geometry behind: ${leaked.join(', ')}`)
+}
+
+// An empty scene still clears the G-buffer exactly once — the zero-content
+// branch now covers meshes AND volumes.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  await renderer.render(volumeTree([]), { elapsed: 0 }, 'scene_color')
+  assert.deepStrictEqual(
+    backend.clearedTextures, Object.values(GBUF_OUTPUTS),
+    'nothing drew, so the four targets are zeroed directly')
+}
+
 console.log('Scene renderer tests passed')

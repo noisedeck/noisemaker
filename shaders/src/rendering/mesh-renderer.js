@@ -14,6 +14,26 @@ const DEFAULT_OUTPUTS = Object.freeze({
   color3: 'scene_gbuf_depth'
 })
 
+/**
+ * Pass id shared by every pass that fills the main scene G-buffer — mesh and
+ * volume alike.
+ *
+ * It is not cosmetic. The WebGL2 backend keys its MRT framebuffer cache on
+ * `mrt_${pass.id}_${outputIds.join('_')}`, and the depth renderbuffer hangs off
+ * the framebuffer. Two passes writing the same four colour targets under
+ * DIFFERENT ids therefore get two framebuffers with two independent depth
+ * buffers: colour accumulates, depth does not, and the second pass tests
+ * against a depth buffer the first never wrote (and, at clear:false, never
+ * cleared either). WebGPU does not have this failure mode — it keys its depth
+ * texture by size alone — so the two backends silently disagree.
+ *
+ * Sharing the id puts both renderers on one framebuffer and one depth buffer,
+ * which is what "the volume composites against the mesh for free" depends on.
+ * Pass variants that genuinely want their own depth — the planar reflection,
+ * each probe face — pass their own passId, as they always have.
+ */
+export const SCENE_GBUFFER_PASS_ID = 'scene_gbuf_pass'
+
 function finiteVector(value, length, fallback) {
   if (!Array.isArray(value) || value.length !== length) return fallback
   for (let i = 0; i < length; i++) {
@@ -171,7 +191,7 @@ export class MeshRenderer {
     const projMatrix = camera.getProjectionMatrix(aspect)
     const albedoFallback = opts.albedoFallbackTexture ?? null
     const outputs = opts.outputs ?? DEFAULT_OUTPUTS
-    const passId = opts.passId ?? 'scene_mesh_gbuf_pass'
+    const passId = opts.passId ?? SCENE_GBUFFER_PASS_ID
     const clipPlane = opts.clipPlane ?? DEFAULT_CLIP_PLANE
     const clipEnabled = opts.clipPlane ? 1 : 0
 

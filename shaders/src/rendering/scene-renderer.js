@@ -5,6 +5,8 @@
 
 import { GBufferConfig } from './gbuffer.js'
 import { MeshRenderer } from './mesh-renderer.js'
+import { VolumeRenderer } from './volume-renderer.js'
+import { volumeFragmentGLSL, volumeFragmentWGSL } from './volume-shaders.js'
 import { presentShader, tonemapPresentShader } from './post-shaders.js'
 import { CameraNode } from '../scene/camera.js'
 import { CUBE_FACES } from '../renderer/cubeCamera.js'
@@ -97,6 +99,9 @@ export class SceneRenderer {
     this.backend = backend
     this.pipeline = existingPipeline
     this.meshRenderer = new MeshRenderer(backend)
+    // Shares the mesh renderer's geometry cache: the bounding box every volume
+    // rasterizes is an ordinary primitive.
+    this.volumeRenderer = new VolumeRenderer(this.meshRenderer)
     this.gbufferConfig = null
     this._shaderLang = backend?.device ? 'wgsl' : 'glsl'
     this._width = 0
@@ -166,6 +171,14 @@ export class SceneRenderer {
       : { vertex: this.gbufferConfig.getMeshVertexShader(lang), fragment: this.gbufferConfig.getMeshFragmentShader(lang) }
     await this.backend.compileProgram('scene_mesh_gbuf', meshShaderSpec)
 
+    // Volume nodes rasterize their bounding box with the SAME vertex shader and
+    // fill the SAME four targets; only the fragment stage differs, marching the
+    // density atlas instead of shading an interpolated surface.
+    const volumeShaderSpec = lang === 'wgsl'
+      ? { vertexWGSL: this.gbufferConfig.getMeshVertexShader(lang), fragment: volumeFragmentWGSL(), perBindingUniforms: true }
+      : { vertex: this.gbufferConfig.getMeshVertexShader(lang), fragment: volumeFragmentGLSL() }
+    await this.backend.compileProgram('scene_volume_gbuf', volumeShaderSpec)
+
     await this.backend.compileProgram('scene_present', {
       fragment: presentShader(lang),
       perBindingUniforms: true
@@ -219,6 +232,7 @@ export class SceneRenderer {
 
     const camera = sceneTree.camera
     const meshNodes = sceneTree.getMeshNodes()
+    const volumeNodes = sceneTree.getVolumeNodes()
     const lights = sceneTree.lights || []
     const settings = sceneTree.settings || {}
     const materials = sceneTree.materials || {}
@@ -268,6 +282,7 @@ export class SceneRenderer {
       this._renderPasses(
         frameState,
         meshNodes,
+        volumeNodes,
         materials,
         camera,
         lights,
@@ -284,7 +299,7 @@ export class SceneRenderer {
   }
 
   /** @private All per-frame pass execution; must contain no awaits. */
-  _renderPasses(frameState, meshNodes, materials, camera, lights, settings, environment, target, width, height, probeActive) {
+  _renderPasses(frameState, meshNodes, volumeNodes, materials, camera, lights, settings, environment, target, width, height, probeActive) {
     const reflStrength = settings.reflections ?? 1
     const aspect = width / height
     const reflector = reflStrength > 0
@@ -329,8 +344,27 @@ export class SceneRenderer {
       this.backend.executePass(pass, frameState)
     }
 
-    // If no meshes, clear the G-buffer
-    if (meshPasses.length === 0) {
+    // --- 1a. Volume passes ---
+    // Each volume node rasterizes its bounding box into the SAME four targets
+    // with the SAME depth attachment, so the hardware depth test composites
+    // volumes against meshes for free on both backends. Depth alone would make
+    // the order irrelevant; volumes run after meshes so the clear decision
+    // below is deterministic rather than order-dependent.
+    //
+    // Phase 1 scope: the planar reflection and the reflection probe are built
+    // from getMeshNodes() and therefore contain no volumes. A volume is lit,
+    // occluded and occluding in the main view, but does not appear in a
+    // mirror or in the probe cube.
+    const volumePasses = this.volumeRenderer.buildVolumePasses(volumeNodes, materials, camera, width, height, {
+      firstClear: meshPasses.length === 0
+    })
+    for (const pass of volumePasses) {
+      this.backend.executePass(pass, frameState)
+    }
+
+    // Nothing filled the G-buffer, so zero it directly — the `depth <= 0`
+    // no-hit sentinel every downstream pass reads is backed by this clear.
+    if (meshPasses.length === 0 && volumePasses.length === 0) {
       clearGBuffer(this.backend, {
         color0: 'scene_gbuf_albedo_metallic',
         color1: 'scene_gbuf_normal_roughness',
@@ -730,7 +764,9 @@ export class SceneRenderer {
     }
     this.backend.destroyTexture(REFLECTION_PROBE_TEXTURE)
     this.backend.destroyTexture(REFLECTION_PROBE_FALLBACK)
-    // Mesh geometry lives in textures the mesh renderer owns.
+    // Mesh geometry lives in textures the mesh renderer owns — including the
+    // bounding box the volume renderer draws, which shares that cache.
+    if (this.volumeRenderer) this.volumeRenderer.dispose()
     if (this.meshRenderer) this.meshRenderer.dispose()
   }
 }
