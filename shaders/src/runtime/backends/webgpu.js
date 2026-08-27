@@ -151,6 +151,9 @@ export class WebGPUBackend extends Backend {
             colorBufferFloat: true,  // WebGPU always supports float render targets
             maxDrawBuffers: 8,  // WebGPU supports many color attachments
             maxTextureSize: this.device.limits.maxTextureDimension2D || 8192,
+            // Color-attachment byte budget for MRT passes — the device limit
+            // is authoritative here (default 32 unless raised at requestDevice)
+            maxColorBytesPerSample: this.device.limits.maxColorAttachmentBytesPerSample || 32,
             // Cap particle state texture size on mobile to prevent OOM
             maxStateSize: isMobile ? 512 : 2048
         }

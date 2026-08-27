@@ -128,6 +128,14 @@ export class WebGL2Backend extends Backend {
         const maxDrawBuffers = gl.getParameter(gl.MAX_DRAW_BUFFERS)
         const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE)
 
+        // Measure the MRT color-attachment byte budget. Apple GPUs enforce
+        // Metal's 32-bytes-per-sample rule on WebGL2 framebuffers (anything
+        // past it is FRAMEBUFFER_UNSUPPORTED); desktop GL allows 64+. The
+        // pipeline demotes over-budget MRT attachment formats against this.
+        const maxColorBytesPerSample = colorBufferFloat
+            ? this.probeColorBytesPerSample()
+            : undefined
+
         // Populate capabilities for graceful degradation
         this.capabilities = {
             isMobile,
@@ -136,6 +144,7 @@ export class WebGL2Backend extends Backend {
             colorBufferFloat,
             maxDrawBuffers,
             maxTextureSize,
+            maxColorBytesPerSample,
             // Cap particle state texture size on mobile to prevent OOM
             // 512x512 = 262k particles, uses ~48MB for state textures
             maxStateSize: isMobile ? 512 : 2048
@@ -148,6 +157,57 @@ export class WebGL2Backend extends Backend {
         this.defaultTexture = this.createDefaultTexture()
 
         return Promise.resolve()
+    }
+
+    /**
+     * Empirically measure the color-attachment byte budget by binding tiny
+     * MRT framebuffers from the largest known budget down and returning the
+     * first combination the driver reports complete. Returns 16 when even
+     * the 32-byte combination is unsupported.
+     * @returns {number} Usable color-attachment bytes per sample
+     */
+    probeColorBytesPerSample() {
+        const gl = this.gl
+        const combos = [
+            [64, ['rgba32f', 'rgba32f', 'rgba32f', 'rgba32f']],
+            [48, ['rgba32f', 'rgba32f', 'rgba32f']],
+            [40, ['rgba32f', 'rgba32f', 'rgba16f']],
+            [32, ['rgba32f', 'rgba16f', 'rgba16f']]
+        ]
+        const maxDrawBuffers = gl.getParameter(gl.MAX_DRAW_BUFFERS)
+        let budget = 16
+        const fbo = gl.createFramebuffer()
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+        for (const [bytes, formats] of combos) {
+            if (formats.length > maxDrawBuffers) continue
+            const textures = []
+            const buffers = []
+            for (let i = 0; i < formats.length; i++) {
+                const texture = gl.createTexture()
+                gl.bindTexture(gl.TEXTURE_2D, texture)
+                const glFormat = this.resolveFormat(formats[i])
+                gl.texImage2D(gl.TEXTURE_2D, 0, glFormat.internalFormat, 2, 2, 0, glFormat.format, glFormat.type, null)
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, texture, 0)
+                textures.push(texture)
+                buffers.push(gl.COLOR_ATTACHMENT0 + i)
+            }
+            gl.drawBuffers(buffers)
+            const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE
+            for (let i = 0; i < formats.length; i++) {
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, null, 0)
+            }
+            for (const texture of textures) gl.deleteTexture(texture)
+            if (complete) {
+                budget = bytes
+                break
+            }
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        gl.deleteFramebuffer(fbo)
+        // Drain any error state the probe raised so the deferred GL error
+        // check window doesn't attribute it to real passes.
+        while (gl.getError() !== gl.NO_ERROR) { /* drain */ }
+        return budget
     }
 
     createDefaultTexture() {

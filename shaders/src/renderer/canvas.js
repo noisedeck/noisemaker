@@ -639,7 +639,7 @@ export class CanvasRenderer {
     /**
      * Get device capabilities from the current pipeline.
      * Returns default capabilities if no pipeline is active.
-     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxStateSize: number}}
+     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxColorBytesPerSample: number, maxStateSize: number}}
      */
     get capabilities() {
         return this._pipeline?.getCapabilities() || {
@@ -649,6 +649,7 @@ export class CanvasRenderer {
             colorBufferFloat: true,
             maxDrawBuffers: 8,
             maxTextureSize: 4096,
+            maxColorBytesPerSample: 64,
             maxStateSize: 2048
         }
     }

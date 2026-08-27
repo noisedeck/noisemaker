@@ -332,7 +332,7 @@ export class Pipeline {
     /**
      * Get device capabilities from the backend.
      * Useful for UI to show/hide options or adjust defaults.
-     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxStateSize: number}}
+     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxColorBytesPerSample: number, maxStateSize: number}}
      */
     getCapabilities() {
         return this.backend?.capabilities || {
@@ -342,6 +342,7 @@ export class Pipeline {
             colorBufferFloat: true,
             maxDrawBuffers: 8,
             maxTextureSize: 4096,
+            maxColorBytesPerSample: 64,
             maxStateSize: 2048
         }
     }
@@ -653,10 +654,67 @@ export class Pipeline {
         }
     }
 
+    /**
+     * Byte cost per sample of a color attachment format, for the MRT
+     * attachment budget. Unlisted formats (including defaulted rgba16f
+     * surfaces) cost 8.
+     * @param {string|undefined} format - Texture format name
+     * @returns {number} Bytes per sample
+     */
+    mrtFormatBytes(format) {
+        switch (format) {
+            case 'rgba32f':
+            case 'rgba32float':
+                return 16
+            case 'rgba8':
+            case 'rgba8unorm':
+                return 4
+            default:
+                return 8
+        }
+    }
+
+    /**
+     * Demote trailing rgba32f attachments of over-budget MRT passes to
+     * rgba16f so the framebuffer stays within the device's color-attachment
+     * byte budget. Apple GPUs enforce Metal's 32-bytes-per-sample rule on
+     * WebGL2 framebuffers (FRAMEBUFFER_UNSUPPORTED past it, measured on
+     * iOS 26.5), where pointsEmit's xyz+vel+rgba MRT (16+16+4 = 36 bytes)
+     * fails every frame. Demoting from the last attachment backward keeps
+     * the highest-precision-need attachments (agent positions) intact.
+     * No-op when the backend reports no maxColorBytesPerSample or every
+     * group already fits.
+     */
+    applyMrtFormatBudget() {
+        const budget = this.backend?.capabilities?.maxColorBytesPerSample
+        if (!budget || !this.graph || !this.graph.passes || !this.graph.textures) return
+        for (const pass of this.graph.passes) {
+            if (!pass.outputs) continue
+            const texIds = Object.values(pass.outputs)
+            if (texIds.length <= 1) continue
+            const entries = texIds.map((texId) => ({ texId, spec: this.graph.textures.get(texId) }))
+            let total = entries.reduce((sum, entry) => sum + this.mrtFormatBytes(entry.spec?.format), 0)
+            if (total <= budget) continue
+            for (let i = entries.length - 1; i >= 0 && total > budget; i--) {
+                const spec = entries[i].spec
+                if (!spec) continue
+                if (spec.format === 'rgba32f' || spec.format === 'rgba32float') {
+                    console.warn(`[Pipeline] Demoting MRT attachment ${entries[i].texId} from ${spec.format} to rgba16f: pass ${pass.id} needs ${total} bytes/sample, device allows ${budget}`)
+                    spec.format = 'rgba16f'
+                    total -= 8
+                }
+            }
+        }
+    }
+
     createSurfaces() {
         // Volume atlas sizing reads volumeSize out of pass uniforms — clamp
         // them to the device limit before any dimension is resolved.
         this.clampGraphVolumeSizes()
+
+        // MRT attachment formats must fit the device's color byte budget
+        // before any texture spec is read for allocation.
+        this.applyMrtFormatBudget()
 
         const surfaceNames = new Set(['o0', 'o1', 'o2', 'o3', 'o4', 'o5', 'o6', 'o7'])
 
