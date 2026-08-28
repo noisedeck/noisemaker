@@ -6,6 +6,11 @@
  * 
  * The volume is sampled from the red channel (.r) for the density/SDF field.
  * RGB channels are used for coloring in non-mono modes.
+ *
+ * GENERATED FILE — do not edit. The shared marcher body below comes from
+ * shaders/src/rendering/marcher-fragments.js; edit a fragment (or this effect's
+ * bespoke parts in shaders/scripts/generate-marcher-shaders.mjs), then re-run
+ * the generator: node shaders/scripts/generate-marcher-shaders.mjs
  */
 
 #version 300 es
