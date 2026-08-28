@@ -1,0 +1,23 @@
+{
+  "case": "shaders/tests/pin-cases/render3d-voxel.json",
+  "resolution": [
+    192,
+    192
+  ],
+  "webgl2": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 6,
+    "sha256": "317881db1fbb5354fdb077f8ee7994d98bf72702f9c5f0597a61f33a11f161dc"
+  },
+  "webgpu": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 6,
+    "sha256": "eae4f5176a32099e331257e937268c060e3c8ba8a84ed768fdf2fa006db16e95"
+  }
+}

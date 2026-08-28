@@ -1,0 +1,23 @@
+{
+  "case": "shaders/tests/pin-cases/render3d-isosurface.json",
+  "resolution": [
+    192,
+    192
+  ],
+  "webgl2": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 137,
+    "sha256": "1df874d67aa5c595120ce48c0bb5d762dff961eaa8de8495bd0844d093f7d7b3"
+  },
+  "webgpu": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 137,
+    "sha256": "c840b2529af5ba2e3a86e59f9c19a831d9df804ab3fdf0559a863016e77bcbba"
+  }
+}

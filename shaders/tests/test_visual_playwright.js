@@ -2049,8 +2049,10 @@ const TILE_FULL = [320, 240]
  * as interior. 32px is the SSAO kernel's reach in this scene: a 0.75 world-unit
  * radius on the floor, about 5 units from a 55-degree camera over 240 rows,
  * projects to roughly 34px of diameter. Nothing else here samples that far.
- * Measured, the SSAO seam collapses from 156 inside 24px to 32 beyond 32px,
- * which is exactly where the kernel stops reaching across.
+ * Measured with the tile-corrected dither seed, the SSAO seam collapses from
+ * 156 inside 24px to 12 beyond 32px — exactly where the kernel stops reaching
+ * across. (Pre-fix it flattened at 32 beyond the band: the residual dither
+ * phase, since removed.)
  *
  * EXACT_* apply with SSAO off, where tiling is genuinely exact: the mesh
  * rasterizer, the volume marcher and the deferred lighting all reconstruct the
@@ -2242,19 +2244,13 @@ const measureTileStitch = async ({ full }) => {
  *      pipeline accepts for its neighbourhood effects (test_tiling_parity gates
  *      the tile INTERIOR and skips an 18px border of a 64px tile).
  *
- *   2. A dither phase shift, everywhere. SSAO rotates its kernel per pixel by
- *      hashing gl_FragCoord.xy, which in a tile is the TILE-LOCAL coordinate.
- *      Every tile therefore gets a different — not worse, but different —
- *      realisation of the same AO noise: 28-32/255 on individual pixels with a
- *      0.29/255 mean, flat across the whole image rather than concentrated at
- *      the seams, which is exactly what the band profile shows beyond 32px. It
- *      does not read as a seam because a per-pixel rotation has no structure to
- *      break at a boundary. Making it identical would mean adding the tile
- *      offset to that hash, i.e. a uniform on the SSAO shader — the same fix
- *      every tile-aware 2D effect applies to its own procedural seed. That is a
- *      shader change, deliberately out of scope here, and it is recorded as a
- *      finding rather than papered over by a loose "interior" tolerance that
- *      would also hide a real regression.
+ *   2. Dither phase, FIXED: SSAO rotates its kernel per pixel by hashing the
+ *      fragment coordinate, which in a tile is tile-local — so before the
+ *      u_tileOffset seed correction (gbuffer.js, wired from scene-renderer)
+ *      every tile realised the AO noise with a different phase, 28-32/255
+ *      flat across the image. The hash now seeds from the tile-offset pixel
+ *      coordinate, tiles share one phase, and the interior residual measured
+ *      12/255 — which TILE_SSAO_INTERIOR_TOL pins.
  *
  * The post-SSR colour is reported for both configurations and gated in neither:
  * local SSR marches in screen space, so a ray leaving the tile has nothing to

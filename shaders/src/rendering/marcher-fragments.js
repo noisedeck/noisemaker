@@ -807,7 +807,7 @@ fn shadeVoxel(p: vec3<f32>, rd: vec3<f32>, n: vec3<f32>, voxel: vec3<i32>) -> ve
  * @param {readonly string[]} keys Fragment keys, in emission order
  * @returns {string}
  */
-export function joinFragments(fragments, keys) {
+function joinFragments(fragments, keys) {
   return keys.map((key) => {
     const fragment = fragments[key]
     if (fragment === undefined) throw new Error(`Unknown marcher fragment: ${key}`)

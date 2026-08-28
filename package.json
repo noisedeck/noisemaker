@@ -32,6 +32,7 @@
     "test:shaders:render:webgpu": "node shaders/tests/test-harness.js --effects synth/noise --backend webgpu && node shaders/tests/test_external_texture_upload.mjs",
     "test:shaders:structure": "node shaders/tests/test-harness.js --structure-only --backend webgl2",
     "test:shaders:visual": "node shaders/tests/test_visual_playwright.js",
+    "test:shaders:pins": "node shaders/scripts/run-pin-checks.mjs",
     "image-regress": "python scripts/image_regression.py",
     "manifest": "node shaders/scripts/generate-shader-manifest.mjs",
     "strings": "node shaders/scripts/generate-effect-strings.mjs",

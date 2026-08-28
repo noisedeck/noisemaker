@@ -1,0 +1,23 @@
+{
+  "case": "shaders/tests/pin-cases/renderCubemapSurface.json",
+  "resolution": [
+    192,
+    192
+  ],
+  "webgl2": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 70,
+    "sha256": "5088a6037042e16d0890c51b5fc704ce95d96875b7c1a96a26b51747b6d8e6c4"
+  },
+  "webgpu": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 36864,
+    "uniqueColors": 70,
+    "sha256": "2691bb3f64a443a7f75f64482d4c5ce81e59e1e156d80a349e9c3abbed1eee28"
+  }
+}
