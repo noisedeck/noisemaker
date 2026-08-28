@@ -1,3 +1,31 @@
+/**
+ * glTF 2.0 / GLB reader, narrowed to the geometry a mesh surface can hold.
+ *
+ * Every primitive in the file becomes one entry with positions, normals, uvs
+ * and indices; toGeometries() turns each into a Geometry, which is the same
+ * shape the OBJ parser returns and the same input Geometry.toPackedTextures()
+ * expects. Canvas.loadGLTFFromURL / loadGLTFFromString are the production
+ * callers.
+ *
+ * SUPPORTED: GLB and JSON glTF, separate or embedded buffers, tightly packed
+ * and byteStride-interleaved bufferViews, normalized integer accessors, and
+ * accessors with no bufferView (read as zeros, per spec).
+ *
+ * NOT SUPPORTED — each is silently ignored, not worked around:
+ *   - primitive.mode. Everything is treated as TRIANGLES (mode 4). A file
+ *     using strips, fans, lines or points loads with its indices interpreted
+ *     as independent triangles, which is wrong geometry, not an error.
+ *   - Sparse accessors (accessor.sparse). The dense base is read; the sparse
+ *     substitution that would overwrite parts of it is not applied.
+ *   - Node transforms. Primitives are read straight out of meshes[], so a
+ *     scene graph that positions its meshes by node matrix / TRS loads with
+ *     every part at the origin, overlapping.
+ *   - Materials, textures, skins, morph targets, animations, cameras.
+ *   - Compression extensions (KHR_draco_mesh_compression, EXT_meshopt_-
+ *     compression). A file using one parses to empty or garbled attributes.
+ *   - Data URIs in buffer.uri. parseGLTF's caller must fetch and pass the
+ *     bytes itself.
+ */
 import { Geometry } from './geometry.js'
 
 // glTF component type to TypedArray mapping
@@ -20,6 +48,17 @@ const TYPE_SIZES = {
   MAT3: 9,
   MAT4: 16,
 }
+
+// Divisor that maps a normalized integer component onto its float range.
+// Unsigned types span [0, 1]; signed types span [-1, 1] and, per the spec,
+// clamp at the low end so the two negative-most codes both mean exactly -1.
+const NORMALIZE_DIVISOR = {
+  5120: 127,    // Int8
+  5121: 255,    // Uint8
+  5122: 32767,  // Int16
+  5123: 65535,  // Uint16
+}
+const NORMALIZE_SIGNED = { 5120: true, 5122: true }
 
 /**
  * Parse a JSON glTF file with separate binary buffer(s).
@@ -91,9 +130,6 @@ function parseGLTFInternal(jsonChunk, bufferChunks) {
   // Helper: read an accessor's data as a typed array
   function readAccessor(accessorIndex) {
     const accessor = jsonChunk.accessors[accessorIndex]
-    const bufferView = jsonChunk.bufferViews[accessor.bufferView]
-    const bufferIndex = bufferView.buffer || 0
-    const binChunk = bufferChunks[bufferIndex]
     const TypedArrayCtor = COMPONENT_TYPES[accessor.componentType]
     if (!TypedArrayCtor) {
       throw new Error(`Unknown component type: ${accessor.componentType}`)
@@ -102,6 +138,17 @@ function parseGLTFInternal(jsonChunk, bufferChunks) {
     if (!numComponents) {
       throw new Error(`Unknown accessor type: ${accessor.type}`)
     }
+
+    // "When bufferView is undefined, the accessor MUST be initialized with
+    // zeros" (glTF 2.0 5.1.1). Sparse accessors then substitute into that
+    // base; we do not read sparse, so the zeros stand.
+    if (accessor.bufferView === undefined) {
+      return new TypedArrayCtor(accessor.count * numComponents)
+    }
+
+    const bufferView = jsonChunk.bufferViews[accessor.bufferView]
+    const bufferIndex = bufferView.buffer || 0
+    const binChunk = bufferChunks[bufferIndex]
 
     const byteOffset = (bufferView.byteOffset || 0) + (accessor.byteOffset || 0)
     const count = accessor.count * numComponents
@@ -125,6 +172,31 @@ function parseGLTFInternal(jsonChunk, bufferChunks) {
     return new TypedArrayCtor(binChunk, byteOffset, count)
   }
 
+  /**
+   * Read a vertex attribute as floats, honouring accessor.normalized.
+   *
+   * A normalized accessor stores its values as integers spanning the type's
+   * full range: exporters commonly write TEXCOORD_0 as normalized unsigned
+   * shorts, where 65535 means 1.0. Widening those verbatim into a
+   * Float32Array yields UVs in the tens of thousands and every texture
+   * lookup wraps to noise, so the rescale happens here, once, for every
+   * attribute rather than only for uvs.
+   */
+  function readAttributeAsFloat(accessorIndex) {
+    const accessor = jsonChunk.accessors[accessorIndex]
+    const raw = readAccessor(accessorIndex)
+    const divisor = accessor.normalized ? NORMALIZE_DIVISOR[accessor.componentType] : 0
+    if (!divisor) return new Float32Array(raw)
+
+    const out = new Float32Array(raw.length)
+    const signed = NORMALIZE_SIGNED[accessor.componentType] === true
+    for (let i = 0; i < raw.length; i++) {
+      const value = raw[i] / divisor
+      out[i] = signed && value < -1 ? -1 : value
+    }
+    return out
+  }
+
   // Extract meshes from all primitives
   const meshes = []
 
@@ -140,17 +212,17 @@ function parseGLTFInternal(jsonChunk, bufferChunks) {
 
         // Positions (required)
         if (primitive.attributes.POSITION !== undefined) {
-          entry.positions = new Float32Array(readAccessor(primitive.attributes.POSITION))
+          entry.positions = readAttributeAsFloat(primitive.attributes.POSITION)
         }
 
         // Normals (optional)
         if (primitive.attributes.NORMAL !== undefined) {
-          entry.normals = new Float32Array(readAccessor(primitive.attributes.NORMAL))
+          entry.normals = readAttributeAsFloat(primitive.attributes.NORMAL)
         }
 
         // UVs (optional)
         if (primitive.attributes.TEXCOORD_0 !== undefined) {
-          entry.uvs = new Float32Array(readAccessor(primitive.attributes.TEXCOORD_0))
+          entry.uvs = readAttributeAsFloat(primitive.attributes.TEXCOORD_0)
         }
 
         // Indices (optional but common)

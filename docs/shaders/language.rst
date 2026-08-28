@@ -799,8 +799,8 @@ These surfaces are managed by the ``pointsEmit`` and ``pointsRender`` wrappers. 
 
 * **Mesh Geometry Textures:** ``mesh0``-``mesh7`` are texture pairs storing mesh geometry data from loaded OBJ files.
 * Each mesh surface consists of a positions texture (vertex XYZ + W) and a normals texture (normal XYZ + UV).
-* **Loading:** Use ``meshLoader()`` in the pipeline and load OBJ files via the API (``canvas.loadOBJFromURL()`` or ``canvas.loadOBJFromString()``).
-* **Rendering:** Use ``meshRender(mesh: mesh0)`` to render mesh geometry with lighting and transforms.
+* **Loading:** Use ``meshLoader()`` in the pipeline and load mesh files via the API — ``canvas.loadOBJFromURL()`` / ``canvas.loadOBJFromString()`` for OBJ, ``canvas.loadGLTFFromURL()`` / ``canvas.loadGLTFFromString()`` for glTF and GLB. Each takes the target surface as its second argument, defaulting to ``mesh0``.
+* **Rendering:** Use ``meshRender()`` to render mesh geometry with lighting and transforms. It takes no surface argument: the effect is bound to ``mesh0``, so load into that surface to render it.
 
 Feedback Loops
 ^^^^^^^^^^^^^^

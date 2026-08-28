@@ -220,6 +220,17 @@ Combining with Other Automation
         rotation: osc(type: oscKind.sine, min: 0, max: 360)
     ).write(o0)
 
+All three descriptors also drive :ref:`scene graph <shader-scene>` nodes:
+``midi()`` and ``audio()`` are accepted in place of a number in any transform
+component and in a light's ``intensity``, resolved from the same ``MidiState``
+and ``AudioState`` as effect uniforms, so 3D motion and 2D automation respond
+to one performance.
+
+.. code-block:: dsl
+
+    light(type: "point", intensity: midi(channel: 1, mode: midiMode.velocity))
+    mesh("sphere", scale: [audio(band: audioBand.low, min: 1, max: 3), 1, 1])
+
 Host Integration
 ----------------
 

@@ -719,13 +719,61 @@ export class CanvasRenderer {
     }
 
     /**
-     * Render the active effect into 6 cubemap faces. See Pipeline.renderCubemap.
+     * Render the active program into 6 cubemap faces. See Pipeline.renderCubemap
+     * for the contract: faces in GL order (+X,-X,+Y,-Y,+Z,-Z), read back from
+     * the output surface, in the orientation the 2D cubemap renderers produce.
      * The returned array is reused on each call — copy the faces if retaining.
+     * @param {object} [config] - See Pipeline.renderCubemap
      * @returns {Promise<Array<{width,height,data}>>} reused buffer — copy if retaining
      */
-    renderCubemap(config) {
-        if (this._pipeline) return this._pipeline.renderCubemap(config)
-        return Promise.resolve([])
+    async renderCubemap(config) {
+        if (!this._pipeline) return []
+        if (this._isScene) return this._renderSceneCubemap(config)
+        return this._pipeline.renderCubemap(config)
+    }
+
+    /**
+     * Cubemap export of a scene program.
+     *
+     * A scene has no cubemap-renderer shader for `cubeBasis` to reach, so the
+     * six faces come from six renders of the scene through cube-face cameras.
+     * Everything downstream of the face is the 2D path's, unchanged: the
+     * pipeline still blits the scene texture into its surface, runs whatever 2D
+     * effects follow, and reads the surface back — so consumers see the same
+     * six buffers, in the same order and orientation, whichever kind of program
+     * produced them.
+     *
+     * The scene state is advanced ONCE for the whole capture rather than per
+     * face: an export is a single instant, and six faces of six different
+     * instants would not close into a cube.
+     * @private
+     * @param {object} [config] - See Pipeline.renderCubemap
+     * @returns {Promise<Array<{width,height,data}>>} reused buffer — copy if retaining
+     */
+    async _renderSceneCubemap(config = {}) {
+        if (!this._sceneRenderer || !this._sceneTree) return []
+        const size = config.size ?? 512
+        const normalizedTime = config.time ?? 0
+        this._advanceSceneState(normalizedTime * this._loopDuration * 1000, normalizedTime)
+
+        // The scene renderer's G-buffer has to be the face size while the faces
+        // render; the pipeline resizes itself inside renderCubemap.
+        const previousWidth = this._pipeline.width
+        const previousHeight = this._pipeline.height
+        const resized = previousWidth !== size || previousHeight !== size
+        if (resized) this._sceneRenderer.resize(size, size)
+        this._sceneRenderer.beginCubemapExport()
+        try {
+            return await this._pipeline.renderCubemap({
+                ...config,
+                onFace: (face) => this._sceneRenderer.renderCubemapFace(
+                    this._sceneTree, this._clock, face, SCENE_COLOR_TEXTURE)
+            })
+        } finally {
+            this._sceneRenderer.endCubemapExport()
+            // Back to whatever the pipeline restored itself to.
+            if (resized) this._sceneRenderer.resize(this._pipeline.width, this._pipeline.height)
+        }
     }
 
     /**
@@ -883,6 +931,29 @@ export class CanvasRenderer {
     }
 
     /**
+     * Move the scene to one instant: clock, bindings, world matrices.
+     *
+     * Shared by the per-frame render and by cubemap export, which runs it once
+     * for the whole six-face capture rather than once per face.
+     * @private
+     * @param {number} timeMs - Timestamp to advance the scene clock with
+     * @param {number} normalizedTime - Shared animation loop position in [0, 1]
+     */
+    _advanceSceneState(timeMs, normalizedTime) {
+        if (this._clock) {
+            this._clock.tick(timeMs)
+        }
+        if (this._sceneBindings && this._sceneBindings.length > 0 && sceneModules) {
+            // The third argument is the pipeline's own externalState record —
+            // the same object setMidiState/setAudioState write into — so
+            // midi()/audio() scene bindings read exactly what effect
+            // uniforms read, not a copy that could go stale.
+            sceneModules.evaluateBindings(this._sceneBindings, normalizedTime, this._pipeline?.externalState)
+        }
+        this._sceneTree.updateWorldMatrices()
+    }
+
+    /**
      * Draw one scene frame. Reports failures through _onError rather than
      * rejecting, so callers sharing this promise can still present.
      * @private
@@ -891,17 +962,7 @@ export class CanvasRenderer {
      */
     async _runSceneRender(timeMs, normalizedTime) {
         try {
-            if (this._clock) {
-                this._clock.tick(timeMs)
-            }
-            if (this._sceneBindings && this._sceneBindings.length > 0 && sceneModules) {
-                // The third argument is the pipeline's own externalState record —
-                // the same object setMidiState/setAudioState write into — so
-                // midi()/audio() scene bindings read exactly what effect
-                // uniforms read, not a copy that could go stale.
-                sceneModules.evaluateBindings(this._sceneBindings, normalizedTime, this._pipeline?.externalState)
-            }
-            this._sceneTree.updateWorldMatrices()
+            this._advanceSceneState(timeMs, normalizedTime)
             await this._sceneRenderer.render(
                 this._sceneTree, this._clock, SCENE_COLOR_TEXTURE, this._tileRegion)
         } catch (err) {
@@ -1906,7 +1967,7 @@ export class CanvasRenderer {
     }
 
     // =========================================================================
-    // Mesh Loading (for meshLoader effect OBJ import)
+    // Mesh Loading (for meshLoader effect OBJ / glTF import)
     // =========================================================================
 
     /** @private Pack geometry, cache it, and upload to backend */
@@ -1974,6 +2035,192 @@ export class CanvasRenderer {
             return { success: true, vertexCount: result.vertexCount }
         } catch (err) {
             console.error('[Canvas] Failed to parse OBJ:', err)
+            return { success: false, vertexCount: 0, error: err.message }
+        }
+    }
+
+    /**
+     * @private Concatenate a glTF's primitives into the single Geometry a mesh
+     * surface holds.
+     *
+     * A glTF mesh is a list of primitives (one per material), and a scene is a
+     * list of meshes — but a mesh surface is one packed vertex buffer. Taking
+     * only the first primitive would silently drop most of a multi-material
+     * model, so every primitive is appended and its indices rebased.
+     *
+     * Node transforms are not applied (the loader does not read them), so a
+     * file that positions its parts by node matrix merges with them all at the
+     * origin. That limitation is the loader's, documented in its header.
+     * @param {import('../geometry/geometry.js').Geometry[]} geometries
+     * @param {Function} Geometry - The Geometry class, handed in because the
+     *   mesh modules load on demand rather than at canvas import time.
+     * @returns {import('../geometry/geometry.js').Geometry}
+     */
+    _mergeGeometries(geometries, Geometry) {
+        if (geometries.length === 1) return geometries[0]
+
+        let totalVerts = 0
+        let totalIndices = 0
+        for (const geo of geometries) {
+            totalVerts += geo.vertexCount
+            totalIndices += geo.indices.length
+        }
+
+        const positions = new Float32Array(totalVerts * 3)
+        const normals = new Float32Array(totalVerts * 3)
+        const uvs = new Float32Array(totalVerts * 2)
+        const indices = new Uint32Array(totalIndices)
+
+        let vertexBase = 0
+        let indexBase = 0
+        for (const geo of geometries) {
+            positions.set(geo.positions, vertexBase * 3)
+            normals.set(geo.normals, vertexBase * 3)
+            uvs.set(geo.uvs, vertexBase * 2)
+            for (let i = 0; i < geo.indices.length; i++) {
+                indices[indexBase + i] = geo.indices[i] + vertexBase
+            }
+            vertexBase += geo.vertexCount
+            indexBase += geo.indices.length
+        }
+
+        return new Geometry({ positions, normals, uvs, indices })
+    }
+
+    /**
+     * @private Resolve a JSON glTF's `buffers[]` into ArrayBuffers.
+     *
+     * The parser takes bytes, not URIs — see the loader's module header — so
+     * fetching is the call site's job. Base64 `data:` URIs decode in place;
+     * relative URIs resolve against `baseUrl` and are fetched.
+     * @param {object} json - Parsed glTF JSON
+     * @param {?string} baseUrl - URL the glTF came from, or null
+     * @returns {Promise<ArrayBuffer[]>}
+     */
+    async _resolveGLTFBuffers(json, baseUrl) {
+        const buffers = json.buffers || []
+        const resolved = []
+
+        for (const buffer of buffers) {
+            const uri = buffer.uri
+            if (!uri) {
+                // A uri-less buffer is the GLB BIN chunk, which a JSON glTF
+                // does not have. Zero-fill so accessors read as zeros rather
+                // than throwing on a null chunk.
+                resolved.push(new ArrayBuffer(buffer.byteLength || 0))
+                continue
+            }
+
+            if (uri.startsWith('data:')) {
+                const comma = uri.indexOf(',')
+                if (comma < 0 || !uri.slice(0, comma).endsWith(';base64')) {
+                    throw new Error('glTF buffer data: URI must be base64-encoded')
+                }
+                const binary = atob(uri.slice(comma + 1))
+                const bytes = new Uint8Array(binary.length)
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+                resolved.push(bytes.buffer)
+                continue
+            }
+
+            if (!baseUrl) {
+                throw new Error(
+                    `glTF buffer "${uri}" is external; load it by URL so the reference can resolve`)
+            }
+            const response = await fetch(new URL(uri, baseUrl).href)
+            if (!response.ok) {
+                throw new Error(`Failed to fetch glTF buffer "${uri}": ${response.status}`)
+            }
+            resolved.push(await response.arrayBuffer())
+        }
+
+        return resolved
+    }
+
+    /**
+     * @private Turn glTF bytes or JSON into one Geometry.
+     * @param {ArrayBuffer|Uint8Array|string|object} source
+     * @param {?string} baseUrl - Base for resolving external buffer URIs
+     * @returns {Promise<import('../geometry/geometry.js').Geometry>}
+     */
+    async _geometryFromGLTF(source, baseUrl) {
+        const { parseGLB, parseGLTF } = await import('../geometry/gltf-loader.js')
+        const { Geometry } = await import('../geometry/geometry.js')
+
+        let parsed
+        if (source instanceof ArrayBuffer || ArrayBuffer.isView(source)) {
+            const bytes = source instanceof ArrayBuffer
+                ? new Uint8Array(source)
+                : new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+            // GLB magic is 'glTF'; anything else is a JSON glTF handed over as
+            // bytes (a fetched .gltf, most often).
+            const isGLB = bytes.byteLength >= 4 &&
+                bytes[0] === 0x67 && bytes[1] === 0x6C && bytes[2] === 0x54 && bytes[3] === 0x46
+            if (isGLB) {
+                parsed = parseGLB(bytes)
+            } else {
+                const json = JSON.parse(new TextDecoder().decode(bytes))
+                parsed = parseGLTF(json, await this._resolveGLTFBuffers(json, baseUrl))
+            }
+        } else {
+            const json = typeof source === 'string' ? JSON.parse(source) : source
+            parsed = parseGLTF(json, await this._resolveGLTFBuffers(json, baseUrl))
+        }
+
+        const geometries = parsed.toGeometries()
+        if (geometries.length === 0) {
+            throw new Error('glTF file contains no mesh primitives')
+        }
+        return this._mergeGeometries(geometries, Geometry)
+    }
+
+    /**
+     * Load a glTF or GLB mesh file from URL and upload to a mesh surface.
+     * @param {string} url - URL to a .glb or .gltf file
+     * @param {string} [meshId='mesh0'] - Target mesh surface (mesh0-mesh7)
+     * @returns {Promise<{success: boolean, vertexCount: number, error?: string}>}
+     */
+    async loadGLTFFromURL(url, meshId = 'mesh0') {
+        if (!this._pipeline || !this._pipeline.backend) {
+            console.warn('[loadGLTFFromURL] Pipeline not ready')
+            return { success: false, vertexCount: 0, error: 'Pipeline not ready' }
+        }
+
+        try {
+            const response = await fetch(url)
+            if (!response.ok) {
+                throw new Error(`Failed to fetch glTF: ${response.status}`)
+            }
+            const geometry = await this._geometryFromGLTF(await response.arrayBuffer(), url)
+
+            const result = this._packCacheAndUploadMesh(meshId, geometry)
+            return { success: true, vertexCount: result.vertexCount }
+        } catch (err) {
+            console.error('[Canvas] Failed to load glTF:', err)
+            return { success: false, vertexCount: 0, error: err.message }
+        }
+    }
+
+    /**
+     * Load a glTF mesh directly from in-memory content.
+     * @param {ArrayBuffer|Uint8Array|string|object} source - GLB bytes, or a
+     *   glTF JSON string or object. JSON glTF may only reference base64
+     *   `data:` buffers here; external buffers need loadGLTFFromURL.
+     * @param {string} [meshId='mesh0'] - Target mesh surface (mesh0-mesh7)
+     * @returns {Promise<{success: boolean, vertexCount: number, error?: string}>}
+     */
+    async loadGLTFFromString(source, meshId = 'mesh0') {
+        if (!this._pipeline || !this._pipeline.backend) {
+            console.warn('[loadGLTFFromString] Pipeline not ready')
+            return { success: false, vertexCount: 0, error: 'Pipeline not ready' }
+        }
+
+        try {
+            const geometry = await this._geometryFromGLTF(source, null)
+            const result = this._packCacheAndUploadMesh(meshId, geometry)
+            return { success: true, vertexCount: result.vertexCount }
+        } catch (err) {
+            console.error('[Canvas] Failed to parse glTF:', err)
             return { success: false, vertexCount: 0, error: err.message }
         }
     }

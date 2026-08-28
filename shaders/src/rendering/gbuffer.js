@@ -433,6 +433,11 @@ uniform sampler2D u_depth;
 uniform mat4 u_viewProj;
 uniform vec3 u_cameraPos;
 uniform float u_radius;
+// Bottom-left pixel offset of the tile being rendered into the full image, or
+// (0, 0) when untiled. Only the kernel rotation reads it: see the seed below.
+// Left unset by the untiled path, where GL's zero initialisation is the
+// correct default and adding 0.0 is an exact no-op on the seed.
+uniform vec2 u_tileOffset;
 
 in vec2 v_texCoord;
 out vec4 fragColor;
@@ -454,8 +459,12 @@ void main() {
   vec3 P = texture(u_positionEmission, v_texCoord).rgb;
   vec3 N = normalize(texture(u_normalRoughness, v_texCoord).rgb * 2.0 - 1.0);
 
-  // Tangent basis rotated per pixel
-  float angle = ign(gl_FragCoord.xy) * 6.2831853;
+  // Tangent basis rotated per pixel. The seed is a FULL-IMAGE pixel coordinate:
+  // under tiled export gl_FragCoord is tile-local, so hashing it alone restarts
+  // the dither at phase zero in every tile and the noise fails to line up
+  // across the stitch. Adding the tile's own offset is the same correction the
+  // tile-aware 2D effects apply to their procedural seeds.
+  float angle = ign(gl_FragCoord.xy + u_tileOffset) * 6.2831853;
   vec3 randVec = vec3(cos(angle), sin(angle), 0.0);
   vec3 T = normalize(randVec - N * dot(randVec, N));
   vec3 B = cross(N, T);
@@ -491,6 +500,10 @@ function ssaoWGSL() {
   u_viewProj: mat4x4f,
   u_cameraPos: vec3f,
   u_radius: f32,
+  // Bottom-left pixel offset of the tile into the full image, or (0, 0)
+  // untiled — the struct is packed into a zeroed buffer, so a pass that omits
+  // it gets exactly that, and adding 0.0 is an exact no-op on the seed.
+  u_tileOffset: vec2f,
 }
 
 @group(0) @binding(0) var u_normalRoughness: texture_2d<f32>;
@@ -528,7 +541,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
   // mirrors the noise rotation vertically and the two backends compute
   // different AO for the same surface point. v_texCoord * dimensions is
   // gl_FragCoord.xy exactly, on both backends.
-  let angle = ign(input.v_texCoord * vec2f(textureDimensions(u_depth))) * 6.2831853;
+  //
+  // u_tileOffset lifts that tile-local coordinate to a full-image one so the
+  // dither phase is continuous across a tiled export's stitch — see the GLSL
+  // shader for the reasoning.
+  let angle = ign(input.v_texCoord * vec2f(textureDimensions(u_depth)) + params.u_tileOffset) * 6.2831853;
   let randVec = vec3f(cos(angle), sin(angle), 0.0);
   let T = normalize(randVec - N * dot(randVec, N));
   let B = cross(N, T);

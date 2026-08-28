@@ -165,7 +165,13 @@ A cubemap renderer renders one face at a time (whichever ``cubeBasis`` the drive
      - 0
      - Time value passed to the render (for animated volumes)
 
-The graph must terminate in a cubemap renderer writing to ``outputSurface``. ``outputSurface`` must name a real surface the DSL wrote to; an unknown name throws. A flat 2D chain (no cubemap renderer) would render the same image six times.
+The graph must terminate in a cubemap renderer writing to ``outputSurface`` —
+or be a :ref:`scene() <shader-scene>` program ending in ``.write(oN)``, which
+exports by rendering the scene six times through cube-face cameras at the
+scene camera's position, full pass stack per face, no cubemap renderer
+involved. ``outputSurface`` must name a real surface the DSL wrote to; an
+unknown name throws. A flat 2D chain (neither a cubemap renderer nor a scene)
+would render the same image six times.
 
 Exporting
 ---------
@@ -227,6 +233,10 @@ Technical Notes
 
 - **Face order is fixed**: ``+X, -X, +Y, -Y, +Z, -Z`` (indices 0–5), consistent across the camera, driver, export names, and cross layout.
 - **Readback works on both backends.** ``renderCubemap`` reads the offscreen output surface directly (via ``copyTextureToBuffer`` on WebGPU), which sidesteps the canvas IOSurface readback race that affects on-screen captures.
+Note the surface readback row order is backend-relative: for the same program
+WebGL2 returns rows top-down and WebGPU row-reversed. Faces land in the same
+orientation per backend for the 2D and scene paths alike, which is the
+contract cross layouts and PNG writers rely on.
 - **Pixel rows are top-down** (``readPixels`` flips WebGL2's bottom-up rows to match WebGPU). The exported PNGs and the cross are in standard top-down image orientation.
 - **Volume size limits**: ``x16``–``x128`` (128³ is the current ceiling).
 - ``outputSurface`` defaults to ``o0`` and must match the surface the DSL writes to.

@@ -229,4 +229,90 @@ function assertSameFloats(actual, expected, label) {
   assertSameFloats(cached.positionData, expected.positionData, 'cached positions')
 }
 
+// canvas.loadGLTFFromString packs through the same path as the OBJ loader
+//
+// The glTF loader parses one Geometry per primitive, so the canvas call site
+// merges them before packing — a mesh surface is one vertex buffer. Two
+// single-triangle primitives here pin both the merge (indices rebased onto the
+// second primitive's vertices) and the shared 256x256 upload grid.
+{
+  const gltf = {
+    asset: { version: '2.0' },
+    meshes: [{
+      primitives: [
+        { attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 },
+        { attributes: { POSITION: 3, NORMAL: 1 }, indices: 2 }
+      ]
+    }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 1, componentType: 5126, count: 3, type: 'VEC3' },
+      { bufferView: 2, componentType: 5125, count: 3, type: 'SCALAR' },
+      { bufferView: 3, componentType: 5126, count: 3, type: 'VEC3' }
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 },
+      { buffer: 0, byteOffset: 36, byteLength: 36 },
+      { buffer: 0, byteOffset: 72, byteLength: 12 },
+      { buffer: 0, byteOffset: 84, byteLength: 36 }
+    ],
+    buffers: [{ byteLength: 120 }]
+  }
+
+  const bin = new ArrayBuffer(120)
+  new Float32Array(bin, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0])
+  new Float32Array(bin, 36, 9).set([0, 0, 1, 0, 0, 1, 0, 0, 1])
+  new Uint32Array(bin, 72, 3).set([0, 1, 2])
+  new Float32Array(bin, 84, 9).set([2, 0, 0, 3, 0, 0, 2, 1, 0])
+
+  const uploads = []
+  const renderer = Object.create(CanvasRenderer.prototype)
+  renderer._meshCache = new Map()
+  renderer._pipeline = {
+    backend: {
+      uploadMeshData(meshId, positionData, normalData, uvData, texWidth, texHeight, vertexCount) {
+        uploads.push({ meshId, positionData, normalData, uvData, texWidth, texHeight, vertexCount })
+        return { success: true, vertexCount }
+      }
+    }
+  }
+
+  const json = { ...gltf, buffers: [{ byteLength: 120, uri: dataURI(bin) }] }
+  const result = await renderer.loadGLTFFromString(JSON.stringify(json), 'mesh1')
+
+  assert.strictEqual(result.success, true, `loadGLTFFromString succeeded (${result.error || ''})`)
+  assert.strictEqual(result.vertexCount, 6, 'both primitives reached the surface')
+  assert.strictEqual(uploads.length, 1, 'uploaded once')
+
+  const upload = uploads[0]
+  assert.strictEqual(upload.meshId, 'mesh1', 'upload target surface')
+  assert.strictEqual(upload.texWidth, 256, 'glTF meshes use the same 256x256 grid as OBJ')
+  assert.strictEqual(upload.texHeight, 256, 'glTF meshes use the same 256x256 grid as OBJ')
+
+  // The second primitive's vertices land after the first's, so its rebased
+  // indices read the x=2..3 triangle rather than re-reading the first.
+  const merged = new Geometry({
+    positions: [0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0],
+    normals: [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1],
+    uvs: new Float32Array(12),
+    indices: [0, 1, 2, 3, 4, 5]
+  })
+  const expected = merged.toPackedTextures(256, 256)
+  assert.strictEqual(upload.vertexCount, expected.vertexCount, 'glTF vertexCount')
+  assertSameFloats(upload.positionData, expected.positionData, 'canvas glTF positions')
+  assertSameFloats(upload.normalData, expected.normalData, 'canvas glTF normals')
+
+  const cached = renderer._meshCache.get('mesh1')
+  assert.ok(cached, 'glTF mesh cached for context restore')
+  assert.strictEqual(cached.vertexCount, expected.vertexCount, 'cached glTF vertexCount')
+}
+
+/** Encode an ArrayBuffer as the base64 data: URI a JSON glTF embeds. */
+function dataURI(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  return `data:application/octet-stream;base64,${btoa(binary)}`
+}
+
 console.log('test_mesh_packing: all tests passed')

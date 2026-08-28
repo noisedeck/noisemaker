@@ -33,6 +33,7 @@ const CROSS_BACKEND_ONLY = process.argv.includes('--cross-backend-only')
 const VOLUME_ONLY = process.argv.includes('--volume-only')
 const VOXEL_ONLY = process.argv.includes('--voxel-only')
 const TILE_ONLY = process.argv.includes('--tile-only')
+const CUBEMAP_ONLY = process.argv.includes('--cubemap-only')
 
 /**
  * Cross-backend maxDelta ceiling for the volume scene's lit colour.
@@ -2064,7 +2065,9 @@ const TILE_FULL = [320, 240]
 const TILE_SEAM_BAND = 32
 const TILE_EXACT_INTERIOR_TOL = 2
 const TILE_EXACT_MAX_TOL = 4
-const TILE_SSAO_INTERIOR_TOL = 48
+// Measured 12 (lit) with the tile-corrected dither phase; was 32-48 before the
+// u_tileOffset seed fix, when every tile re-dithered. 16 pins the fix.
+const TILE_SSAO_INTERIOR_TOL = 16
 
 /**
  * A deterministic scene exercising every pass tiling has to get right.
@@ -2351,6 +2354,230 @@ async function testSceneTileStitch(browser, port, backendName) {
   }
 }
 
+/**
+ * Face size for the cubemap-export gate.
+ *
+ * Six full renders of a mesh + volume scene per backend, so small — but large
+ * enough that a half-face census is thousands of pixels rather than dozens.
+ */
+const CUBE_EXPORT_SIZE = 96
+
+/**
+ * A deterministic scene whose six cube faces are individually recognisable.
+ *
+ * The camera stands on a wide floor under a strongly coloured background, so
+ * every face carries the same two landmarks in different proportions: warm
+ * floor below, cold sky above. That is what makes the orientation checkable
+ * without a reference image — an upside-down face swaps them, a rolled face
+ * splits them down the middle, and a mis-ordered face pair reports the wrong
+ * one as the up face. Objects are placed asymmetrically (including one
+ * overhead, one under the camera and a marched volume off to the side) so no
+ * two faces can coincide and none is a flat wash.
+ */
+const CUBE_EXPORT_SCENE = `search synth3d
+noise3d(speed: 0, seed: 7, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0.04, 0.12, 0.55],
+  ambient: 0.4,
+  ssao: 1,
+  reflections: 1,
+  camera(fov: 55, pos: [0, 1.6, 0], target: [0, 1.6, 1]),
+  light(type: "directional", dir: [0.35, -1, 0.25], intensity: 2.2),
+  mesh("plane", width: 60, height: 60)
+    .material(solid(color: [0.85, 0.32, 0.06]).pbr(metallic: 0, roughness: 0.85)),
+  mesh("sphere", radius: 0.5, pos: [0.7, 0.35, 0.5])
+    .material(solid(color: [0.15, 0.85, 0.25]).pbr(metallic: 0, roughness: 0.4)),
+  mesh("box", pos: [-0.8, 0.3, -0.6], scale: [0.5, 0.5, 0.5])
+    .material(solid(color: [0.9, 0.9, 0.2]).pbr(metallic: 0, roughness: 0.6)),
+  mesh("sphere", radius: 0.7, pos: [0, 3.4, 0.4])
+    .material(solid(color: [0.2, 0.9, 0.6]).pbr(metallic: 0, roughness: 0.5)),
+  mesh("box", pos: [3.0, 1.2, -2.0], scale: [1.2, 2.4, 1.2])
+    .material(solid(color: [0.75, 0.75, 0.8]).pbr(metallic: 0.1, roughness: 0.7)),
+  volume(vol0, threshold: 0.5, pos: [-3.0, 1.8, -2.5], scale: [1.6, 1.6, 1.6])
+    .material(solid(color: [0.65, 0.15, 0.9]).pbr(metallic: 0, roughness: 0.6))
+).write(o0)
+render(o0)`
+
+/**
+ * Page-side body of the cubemap-export measurement.
+ *
+ * Exports through the real entry — CanvasRenderer.renderCubemap, the same one
+ * the 2D cubemap renderers use — and censuses each returned face in the page.
+ * "Sky" is a pixel whose blue beats its red, which separates the background
+ * from the floor with a wide margin and survives tone mapping.
+ */
+const measureCubemapExport = async ({ size }) => {
+  const renderer = window.__noisemakerCanvasRenderer
+  renderer.stop()
+  renderer._clock?.reset()
+  // The scene renders BEFORE the pipeline each tick, so the volume atlas needs
+  // a few frames before it holds anything.
+  for (let i = 0; i < 4; i++) await renderer.render(0)
+
+  const faces = await renderer.renderCubemap({ size })
+  if (!faces || faces.length !== 6) return { error: `expected 6 faces, got ${faces?.length}` }
+
+  const census = (data, width, fromRow, toRow) => {
+    let sky = 0
+    let count = 0
+    let sumR = 0
+    let sumB = 0
+    let minLuma = 255
+    let maxLuma = 0
+    for (let y = fromRow; y < toRow; y++) {
+      for (let x = 0; x < width; x++) {
+        const at = (y * width + x) * 4
+        const r = data[at]
+        const b = data[at + 2]
+        if (b > r) sky++
+        sumR += r
+        sumB += b
+        const luma = (r + data[at + 1] + b) / 3
+        if (luma < minLuma) minLuma = luma
+        if (luma > maxLuma) maxLuma = luma
+        count++
+      }
+    }
+    return { skyFraction: sky / count, meanR: sumR / count, meanB: sumB / count, range: maxLuma - minLuma }
+  }
+  const hash = (data) => {
+    let h = 0
+    for (let i = 0; i < data.length; i += 97) h = (h * 31 + data[i]) >>> 0
+    return h
+  }
+
+  const stats = faces.map((face) => {
+    const half = Math.floor(face.height / 2)
+    return {
+      width: face.width,
+      height: face.height,
+      whole: census(face.data, face.width, 0, face.height),
+      top: census(face.data, face.width, 0, half),
+      bottom: census(face.data, face.width, half, face.height),
+      hash: hash(face.data)
+    }
+  })
+
+  return {
+    backend: renderer.pipeline?.backend?.getName?.() ?? 'unknown',
+    distinct: new Set(stats.map((s) => s.hash)).size,
+    stats
+  }
+}
+
+/**
+ * Cubemap export of a scene program.
+ *
+ * A scene has no cubemap-renderer shader to drive with `cubeBasis`, so its six
+ * faces come from six renders through cube-face cameras. This gates the two
+ * claims that matters to a consumer: the faces are six DIFFERENT views of the
+ * world with real content in them, and they are in the ORDER and ORIENTATION
+ * the 2D cubemap path established — which is what lets the same layout code
+ * assemble either.
+ *
+ * Orientation is measured, not asserted from the camera math the unit tests
+ * already pin: with a floor under the camera and a coloured background over
+ * it, the +Y face has to come back mostly sky, the -Y face mostly floor, and
+ * every equator face has to come back sky ABOVE floor. A vertical flip — the
+ * single most likely mistake, since the cube-texture convention this codebase
+ * also uses is exactly the flipped one — inverts all three.
+ */
+async function testSceneCubemapExport(browser, port, backendName) {
+  const sceneName = 'scene cubemap export'
+  console.log(`\n--- Testing ${sceneName} on ${backendName.toUpperCase()} ---`)
+
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message || String(error)))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+
+  let measured
+  try {
+    await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+      { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+    await loadSceneSource(page, CUBE_EXPORT_SCENE)
+    measured = await page.evaluate(measureCubemapExport, { size: CUBE_EXPORT_SIZE })
+  } finally {
+    await context.close()
+  }
+
+  const fail = (reason) => ({ scene: sceneName, backend: backendName, status: 'fail', reason, metrics: measured })
+  if (measured.error) return fail(measured.error)
+  if (errors.length) return fail(errors.slice(0, 3).join(' / '))
+
+  const expectedBackend = backendName === 'webgpu' ? 'WebGPU' : 'WebGL2'
+  if (measured.backend !== expectedBackend) {
+    return fail(`expected the ${expectedBackend} backend, got ${measured.backend}`)
+  }
+
+  const names = ['+X', '-X', '+Y', '-Y', '+Z', '-Z']
+  for (let face = 0; face < 6; face++) {
+    const s = measured.stats[face]
+    console.log(`  ${names[face]}: ${s.width}x${s.height} sky=${(s.whole.skyFraction * 100).toFixed(1)}% ` +
+      `top=${(s.top.skyFraction * 100).toFixed(1)}% bottom=${(s.bottom.skyFraction * 100).toFixed(1)}% ` +
+      `range=${s.whole.range.toFixed(0)}`)
+  }
+
+  for (let face = 0; face < 6; face++) {
+    const s = measured.stats[face]
+    if (s.width !== CUBE_EXPORT_SIZE || s.height !== CUBE_EXPORT_SIZE) {
+      return fail(`${names[face]} came back ${s.width}x${s.height}, not square at ${CUBE_EXPORT_SIZE}`)
+    }
+    // A face that failed to render is a flat wash — the background alone, or
+    // nothing at all.
+    if (s.whole.range < 24) {
+      return fail(`${names[face]} is flat (luminance range ${s.whole.range.toFixed(0)})`)
+    }
+  }
+  if (measured.distinct !== 6) {
+    return fail(`only ${measured.distinct} of 6 faces are distinct — the face cameras are not all different`)
+  }
+
+  // Up is up. The floor is under the camera, so the +Y face is sky and the -Y
+  // face is floor; swapping the pair, or flipping a face, breaks this.
+  const up = measured.stats[2].whole
+  const down = measured.stats[3].whole
+  if (up.skyFraction < 0.6) return fail(`+Y is only ${(up.skyFraction * 100).toFixed(1)}% sky`)
+  if (up.meanB <= up.meanR) return fail(`+Y is not sky-coloured (meanB ${up.meanB.toFixed(1)} <= meanR ${up.meanR.toFixed(1)})`)
+  if (down.skyFraction > 0.2) return fail(`-Y is ${(down.skyFraction * 100).toFixed(1)}% sky, not floor`)
+  if (down.meanR <= down.meanB) return fail(`-Y is not floor-coloured (meanR ${down.meanR.toFixed(1)} <= meanB ${down.meanB.toFixed(1)})`)
+
+  // Every equator face carries the horizon across its middle: one half all
+  // sky, the other all floor. Which half is which is the readback's row order,
+  // and that is BACKEND-RELATIVE for a pipeline surface — measured here, and
+  // measured identically for a plain 2D program: WebGL2's readPixels returns
+  // the image top-down (matching the canvas), WebGPU's returns it row-reversed.
+  // A scene export therefore lands in exactly the orientation the 2D cubemap
+  // renderers land in on the same backend, which is the contract that matters:
+  // the same consumer code assembles either. The check is written per backend
+  // rather than relaxed, so a flip on ONE backend still fails.
+  const skyFirst = backendName !== 'webgpu'
+  for (const face of [0, 1, 4, 5]) {
+    const s = measured.stats[face]
+    const [sky, floor] = skyFirst ? [s.top, s.bottom] : [s.bottom, s.top]
+    const half = skyFirst ? 'top' : 'bottom'
+    if (sky.skyFraction < 0.6) {
+      return fail(`${names[face]} ${half} half is only ${(sky.skyFraction * 100).toFixed(1)}% sky — face is upside down`)
+    }
+    if (floor.skyFraction > 0.35) {
+      return fail(`${names[face]} other half is ${(floor.skyFraction * 100).toFixed(1)}% sky — face is upside down`)
+    }
+  }
+
+  return {
+    scene: sceneName,
+    backend: backendName,
+    status: 'pass',
+    reason: `six distinct faces at ${CUBE_EXPORT_SIZE}px; +Y ${(up.skyFraction * 100).toFixed(0)}% sky, ` +
+      `-Y ${(down.skyFraction * 100).toFixed(0)}% sky, horizon splits all four equator faces ` +
+      `sky-${skyFirst ? 'first' : 'last'} (this backend's surface readback row order)`,
+    metrics: measured
+  }
+}
+
 async function main() {
   const { server, port } = await startServer()
   console.log(`Server on port ${port}`)
@@ -2379,6 +2606,9 @@ async function main() {
   } else if (TILE_ONLY) {
     results.push(await testSceneTileStitch(browser, port, 'webgl2'))
     results.push(await testSceneTileStitch(browser, port, 'webgpu'))
+  } else if (CUBEMAP_ONLY) {
+    results.push(await testSceneCubemapExport(browser, port, 'webgl2'))
+    results.push(await testSceneCubemapExport(browser, port, 'webgpu'))
   } else if (VOXEL_ONLY) {
     results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
     results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
@@ -2422,12 +2652,14 @@ async function main() {
     results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
     results.push(await testSceneTileStitch(browser, port, 'webgl2'))
     results.push(await testSceneTileStitch(browser, port, 'webgpu'))
+    results.push(await testSceneCubemapExport(browser, port, 'webgl2'))
+    results.push(await testSceneCubemapExport(browser, port, 'webgpu'))
     results.push(...(await testCrossBackendParity(browser, port)))
     results.push(await testVolumeCrossBackendParity(browser, port))
     results.push(await testVoxelCrossBackendParity(browser, port))
   }
   if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY
-      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY && !VOXEL_ONLY && !TILE_ONLY) {
+      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY && !VOXEL_ONLY && !TILE_ONLY && !CUBEMAP_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']
     const backends = ['webgl2', 'webgpu']
     for (const scene of scenes) {

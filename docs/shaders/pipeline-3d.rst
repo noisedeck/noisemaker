@@ -78,4 +78,5 @@ A renderer consumes the volume and produces the frame:
      - Lit variant of ``render3d``
    * - ``renderCubemapSurface`` / ``renderCubemap3d``
      - Six seamless cube faces for skyboxes and planetary surfaces — see the
-       Cubemaps guide
+       Cubemaps guide. No longer the only route to a cubemap: a
+       :ref:`scene() <shader-scene>` program exports through the same API

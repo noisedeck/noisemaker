@@ -145,7 +145,40 @@ function resolveTile(region, width, height) {
   return { x, y, width, height, fullWidth, fullHeight }
 }
 
+/**
+ * Aim a camera out of `position` along one cube face.
+ *
+ * The two callers differ only in `upSign`, and that difference is the whole
+ * distinction between the two cube conventions in this codebase:
+ *
+ * - The reflection probe renders INTO a cube texture and is sampled by
+ *   direction, so it uses the face's own up (`+1`) — the GL cubemap
+ *   convention CUBE_FACES is written in.
+ * - A cubemap EXPORT is read back as six images that a consumer lays out or
+ *   writes to disk, and those images follow the 2D cubemap renderers:
+ *   `rd = cubeBasis * vec3(uv.x, -uv.y, 1.0)`, so the top row of a face points
+ *   along MINUS the face's up (`-1`). A camera's image top is its own up, so
+ *   the export camera takes the negated one. Negating up also flips the
+ *   handedness of `cross(forward, up)` back to faceRight(), which is what
+ *   keeps the horizontal direction matching too.
+ * @param {CameraNode} camera - Camera to aim (mutated in place)
+ * @param {ArrayLike<number>} position - Eye position
+ * @param {number} face - CUBE_FACES index
+ * @param {number} upSign - +1 for a cube-texture capture, -1 for a readback
+ */
+function aimCameraAtCubeFace(camera, position, face, upSign) {
+  const cubeFace = CUBE_FACES[face]
+  for (let i = 0; i < 3; i++) {
+    camera._position[i] = position[i]
+    camera.target[i] = position[i] + cubeFace.forward[i]
+    camera.up[i] = upSign * cubeFace.up[i]
+  }
+}
+
 const LIGHT_TYPE_CODE = Object.freeze({ point: 0, directional: 1, spot: 2 })
+
+// Shared by every untiled frame so the live loop never allocates for it.
+const ZERO_TILE_OFFSET = Object.freeze([0, 0])
 const ALL_TEXTURES = [...GBUF_TEXTURES, ...PLANAR_GBUF_TEXTURES, ...WORK_TEXTURES]
 
 export class SceneRenderer {
@@ -187,6 +220,24 @@ export class SceneRenderer {
       target: [0, 0, 1],
       up: [0, -1, 0]
     })
+    /**
+     * The camera a cubemap export renders each face through. The scene's own
+     * camera is never touched: only its position, near and far are borrowed,
+     * because a cube face is a 90-degree square view along a world axis.
+     */
+    this._cubeExportCamera = new CameraNode({
+      id: '__scene_cubemap_export_camera__',
+      fov: 90,
+      near: 0.1,
+      far: 1000,
+      position: [0, 0, 0],
+      target: [0, 0, 1],
+      up: [0, 1, 0]
+    })
+    // Set only between beginCubemapExport() and endCubemapExport(): see
+    // beginCubemapExport for why an export captures the probe exactly once.
+    this._probeFrozen = false
+    this._probeStateBeforeExport = null
   }
 
   async initialize(width, height) {
@@ -284,11 +335,14 @@ export class SceneRenderer {
    *   The region set on the canvas for tiled hi-res export, or null for a full
    *   frame. The same object the 2D pipeline is given; the scene turns it into
    *   a camera sub-frustum rather than a fragment-coordinate shift.
+   * @param {?CameraNode} [cameraOverride=null] - View to render instead of the
+   *   scene's own camera. Cubemap export passes one camera per cube face; the
+   *   scene tree is left untouched so the live view survives a capture.
    */
-  async render(sceneTree, clock, target = 'screen', tileRegion = null) {
+  async render(sceneTree, clock, target = 'screen', tileRegion = null, cameraOverride = null) {
     if (!this._initialized || !this.backend) return
 
-    const camera = sceneTree.camera
+    const camera = cameraOverride || sceneTree.camera
     const meshNodes = sceneTree.getMeshNodes()
     const volumeNodes = sceneTree.getVolumeNodes()
     const lights = sceneTree.lights || []
@@ -382,7 +436,9 @@ export class SceneRenderer {
     const ground = settings.ground ?? [ambient, ambient, ambient]
     const background = settings.background ?? [0, 0, 0]
 
-    if (probeActive) {
+    // A frozen probe is still sampled by lighting below; it is only the
+    // capture that is skipped. See beginCubemapExport().
+    if (probeActive && !this._probeFrozen) {
       this._renderReflectionProbe(
         frameState,
         meshNodes,
@@ -530,7 +586,12 @@ export class SceneRenderer {
         uniforms: {
           u_viewProj: this._viewProj,
           u_cameraPos: camera._position || [0, 0, 5],
-          u_radius: settings.ssaoRadius ?? 0.75
+          u_radius: settings.ssaoRadius ?? 0.75,
+          // The SSAO kernel-rotation hash seeds from the fragment coordinate,
+          // which is tile-local under tiled export — without the tile's pixel
+          // offset each tile re-dithers with a different phase. (0,0) leaves
+          // untiled output byte-identical.
+          u_tileOffset: camera.tile ? [camera.tile.x, camera.tile.y] : ZERO_TILE_OFFSET
         }
       }, frameState)
     }
@@ -711,21 +772,13 @@ export class SceneRenderer {
   _renderReflectionProbe(frameState, meshNodes, volumeNodes, materials, lights, envTexture, envIntensity, background, sky, ground) {
     const camera = this._probeCamera
     const position = this._probePosition
-    camera._position[0] = position[0]
-    camera._position[1] = position[1]
-    camera._position[2] = position[2]
 
     const faceCount = this._probeInitialized ? 1 : CUBE_FACES.length
     const firstFace = this._probeInitialized ? this._probeNextFace : 0
     for (let faceOffset = 0; faceOffset < faceCount; faceOffset++) {
       const face = (firstFace + faceOffset) % CUBE_FACES.length
-      const cubeFace = CUBE_FACES[face]
-      camera.target[0] = position[0] + cubeFace.forward[0]
-      camera.target[1] = position[1] + cubeFace.forward[1]
-      camera.target[2] = position[2] + cubeFace.forward[2]
-      camera.up[0] = cubeFace.up[0]
-      camera.up[1] = cubeFace.up[1]
-      camera.up[2] = cubeFace.up[2]
+      // +1: the capture lands in a cube texture sampled by direction.
+      aimCameraAtCubeFace(camera, position, face, 1)
 
       const passId = PROBE_GBUFFER_PASS_IDS[face]
       const meshPasses = this.meshRenderer.buildMeshPasses(
@@ -797,6 +850,68 @@ export class SceneRenderer {
       this._probeInitialized = true
       this._probeNextFace = 0
     }
+  }
+
+  /**
+   * Open a cubemap export.
+   *
+   * Two things are arranged here, both about the reflection probe.
+   *
+   * The probe is a world-space cube captured from a fixed point, so it does
+   * not change between export faces — one capture is correct for all six. The
+   * first face therefore primes the whole cube (`_probeInitialized = false`),
+   * and `renderCubemapFace` freezes it afterwards so the remaining five
+   * faces sample the completed cube instead of re-rendering the same six
+   * views five more times. Faces still light with the probe: only the capture
+   * is skipped.
+   *
+   * A live render loop's amortization state is saved and restored, so an
+   * export cannot move the rotation a running loop is partway through — the
+   * cube it leaves behind is fully current either way.
+   */
+  beginCubemapExport() {
+    this._probeStateBeforeExport = {
+      initialized: this._probeInitialized,
+      nextFace: this._probeNextFace
+    }
+    this._probeFrozen = false
+    this._probeInitialized = false
+    this._probeNextFace = 0
+  }
+
+  /**
+   * Draw one cube face of a cubemap export.
+   *
+   * The full pass stack runs per face — G-buffer, SSAO, deferred lighting,
+   * reflections, tone-mapped present — from a square 90-degree camera at the
+   * SCENE camera's position, aimed along the face axis. Never tiled: a face is
+   * sampled by direction, so a screen tile would capture a fraction of it.
+   * @param {SceneTree} sceneTree - Scene to draw
+   * @param {Clock} clock - Supplies elapsed time; ticked once per export, not
+   *   per face, so all six faces are the same instant
+   * @param {number} face - CUBE_FACES index, 0..5 (+X,-X,+Y,-Y,+Z,-Z)
+   * @param {string} target - Texture to present the face into
+   */
+  async renderCubemapFace(sceneTree, clock, face, target) {
+    const sceneCamera = sceneTree.camera
+    const camera = this._cubeExportCamera
+    camera.near = sceneCamera.near
+    camera.far = sceneCamera.far
+    // -1: the face is read back as an image, not sampled as a cube texture.
+    aimCameraAtCubeFace(camera, sceneCamera._position || [0, 0, 5], face, -1)
+
+    await this.render(sceneTree, clock, target, null, camera)
+    this._probeFrozen = true
+  }
+
+  /** Close a cubemap export, restoring the live probe's amortization state. */
+  endCubemapExport() {
+    this._probeFrozen = false
+    const saved = this._probeStateBeforeExport
+    if (!saved) return
+    this._probeInitialized = saved.initialized
+    this._probeNextFace = saved.nextFace
+    this._probeStateBeforeExport = null
   }
 
   _preparePlanarReflection(reflector, camera, aspect) {

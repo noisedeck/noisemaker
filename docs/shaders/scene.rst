@@ -456,13 +456,28 @@ sub-frustum, not by shifting a fragment coordinate; offsets are bottom-left,
 matching the 2D path. Geometry, volume marching, deferred lighting and the
 tonemap are tile-exact — a stitched render matches the untiled one to a single
 least-significant bit. Two passes are not: SSAO can seam within its kernel's
-projected reach (occluders outside the tile are not in its G-buffer) and
-re-dithers per tile, and local screen-space reflections cannot be tiled at all
+projected reach (occluders outside the tile are not in its G-buffer; its dither
+phase is tile-corrected, so the seam band is the whole residual), and local
+screen-space reflections cannot be tiled at all
 — rays leaving the tile find nothing. For tiled exports prefer a planar
 ``reflector()``, whose mirrored camera inherits the same sub-frustum and is
 tile-exact, or set ``reflections: 0``. The reflection probe is never tiled: it
 is a world-space cubemap and captures all six full faces regardless of the
 region.
+
+Cubemap export
+--------------
+
+A ``scene()`` program exports a cubemap through the same ``renderCubemap()``
+API as a cubemap-renderer program: the scene renders six times through
+cube-face cameras — fov 90, square, at the scene camera's position, the full
+pass stack including the tonemap per face — and the faces come back in GL
+order (+X, -X, +Y, -Y, +Z, -Z) in the same orientation contract the 2D path
+returns. All six faces are one instant: scene animation state advances once
+per export, not per face. Faces are never tiled, and a configured reflection
+probe is captured once for the first face and frozen for the rest — it is a
+world-space cubemap and does not change between export faces; the live
+amortization state is restored afterwards.
 
 Groups and transforms
 ---------------------

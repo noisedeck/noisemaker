@@ -4,7 +4,8 @@ import { SceneRenderer } from '../src/rendering/scene-renderer.js'
 import { MeshRenderer } from '../src/rendering/mesh-renderer.js'
 
 import { SceneTree } from '../src/scene/tree.js'
-import { mat4, perspectiveMatrix } from '../src/scene/math.js'
+import { mat4, lookAtMatrix, perspectiveMatrix } from '../src/scene/math.js'
+import { CUBE_FACES, faceBasisMat3 } from '../src/renderer/cubeCamera.js'
 
 /**
  * The world matrix an untransformed node actually produces.
@@ -658,6 +659,35 @@ function treeWithLights(lights, settings = {}) {
   assert.strictEqual(ssao.uniforms.u_radius, 1.5, 'radius flows')
   const lighting = backend.passes.find(p => p.id === 'scene_lighting')
   assert.strictEqual(lighting.uniforms.u_ssaoStrength, 0.6, 'strength flows')
+}
+
+// The SSAO kernel rotation is seeded from the fragment's pixel coordinate,
+// which under tiled export is TILE-local: every tile restarts the dither at
+// phase zero, so the AO noise does not line up across a stitched image. The fix
+// is the same one every tile-aware 2D effect applies — add the tile's pixel
+// offset into the seed before hashing — so the shader takes a u_tileOffset
+// uniform on both backends.
+//
+// The uniform is not supplied by any pass today: unset it reads as (0, 0) on
+// both backends (GL initialises uniforms to zero; the WGSL struct is packed
+// into a zeroed buffer), and `+ 0.0` leaves the seed bit-identical, which is
+// what keeps the untiled cross-backend parity gates where they were.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+
+  const glsl = renderer.gbufferConfig.getSSAOShader('glsl')
+  assert.ok(/uniform\s+vec2\s+u_tileOffset\s*;/.test(glsl),
+    'GLSL SSAO declares u_tileOffset')
+  assert.ok(/ign\(gl_FragCoord\.xy \+ u_tileOffset\)/.test(glsl),
+    'GLSL SSAO seeds the rotation hash with the tile-offset pixel coordinate')
+
+  const wgsl = renderer.gbufferConfig.getSSAOShader('wgsl')
+  assert.ok(/u_tileOffset:\s*vec2f,/.test(wgsl),
+    'WGSL SSAO struct carries u_tileOffset')
+  assert.ok(/ign\(input\.v_texCoord \* vec2f\(textureDimensions\(u_depth\)\) \+ params\.u_tileOffset\)/.test(wgsl),
+    'WGSL SSAO seeds the rotation hash with the tile-offset pixel coordinate')
 }
 
 // --- SSR + environment ---
@@ -1794,6 +1824,239 @@ function projectionOf(backend, program, passId) {
     projectionOf(backend, 'scene_mesh_gbuf'),
     Array.from(perspectiveMatrix(90, 320 / 240, 1, 1000)),
     'a frame rendered without a tile region is untiled, whatever the previous frame did')
+}
+
+// =============================================================================
+// Cubemap export
+// =============================================================================
+
+/** A mesh + volume scene whose camera sits somewhere unmistakable. */
+function cubeExportTree(settings = {}) {
+  return SceneTree.fromIR({
+    camera: { fov: 35, near: 0.25, far: 900, position: [1, 2, -3], target: [4, 2, -3] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    settings,
+    materials: {},
+    nodes: [
+      { id: 'box', type: 'mesh', meshType: 'box', meshParams: {}, transform: {}, children: [], parent: null },
+      { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }
+    ]
+  })
+}
+
+/**
+ * The world direction the face camera sends an NDC point down.
+ *
+ * Recovered from the view-projection the passes were actually given, so it
+ * measures what the GPU sees rather than what the camera was asked for.
+ */
+function rayThroughNDC(viewProj, eye, ndcX, ndcY) {
+  const inv = mat4.invert(mat4.create(), viewProj)
+  assert.ok(inv, 'view-projection must be invertible')
+  const w = inv[3] * ndcX + inv[7] * ndcY + inv[11] * 0 + inv[15]
+  const point = [
+    (inv[0] * ndcX + inv[4] * ndcY + inv[8] * 0 + inv[12]) / w,
+    (inv[1] * ndcX + inv[5] * ndcY + inv[9] * 0 + inv[13]) / w,
+    (inv[2] * ndcX + inv[6] * ndcY + inv[10] * 0 + inv[14]) / w
+  ]
+  const d = [point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]]
+  const length = Math.hypot(d[0], d[1], d[2])
+  return [d[0] / length, d[1] / length, d[2] / length]
+}
+
+/**
+ * The direction the 2D cubemap renderers march for the same NDC point:
+ * `normalize(cubeBasis * vec3(uv.x, -uv.y, 1.0))`, verbatim from
+ * renderCubemapSurface.glsl / renderCubemap3d.glsl.
+ */
+function shaderRay(face, ndcX, ndcY) {
+  const m = faceBasisMat3(face) // columns [right | up | forward]
+  const d = [
+    ndcX * m[0] - ndcY * m[3] + m[6],
+    ndcX * m[1] - ndcY * m[4] + m[7],
+    ndcX * m[2] - ndcY * m[5] + m[8]
+  ]
+  const length = Math.hypot(d[0], d[1], d[2])
+  return [d[0] / length, d[1] / length, d[2] / length]
+}
+
+/** Render all six export faces, handing each face's passes to `inspect`. */
+async function exportCubemap(renderer, backend, tree, inspect, clock = { elapsed: 0 }) {
+  renderer.beginCubemapExport()
+  try {
+    for (let face = 0; face < 6; face++) {
+      backend.passes.length = 0
+      await renderer.renderCubemapFace(tree, clock, face, 'scene_color')
+      // Inspected INSIDE the loop on purpose: mesh pass objects and the
+      // renderer's view-projection scratch buffer are reused between faces, so
+      // anything kept for later has to be copied out now.
+      inspect(face, backend.passes)
+    }
+  } finally {
+    renderer.endCubemapExport()
+  }
+}
+
+// A scene exports a cubemap the way the 2D path does: six faces in GL order,
+// each a square 90-degree view from the SCENE camera's position, each through
+// the full pass stack and presented tonemapped into the target.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const tree = cubeExportTree()
+  const seen = []
+
+  await exportCubemap(renderer, backend, tree, (face, passes) => {
+    const ids = passes.map(p => p.id)
+    for (const required of ['scene_ssao_pass', 'scene_lighting', 'scene_ssr_pass', 'scene_tonemap_present']) {
+      assert.ok(ids.includes(required), `face ${face} runs ${required}`)
+    }
+    assert.ok(passes.some(p => p.program === 'scene_mesh_gbuf'), `face ${face} rasterizes meshes`)
+    assert.ok(passes.some(p => p.program === 'scene_volume_gbuf'), `face ${face} marches volumes`)
+
+    const present = passes.find(p => p.id === 'scene_tonemap_present')
+    assert.strictEqual(present.outputs.color, 'scene_color',
+      `face ${face} presents into the export target`)
+    const lighting = passes.find(p => p.id === 'scene_lighting')
+    assert.deepStrictEqual(Array.from(lighting.uniforms.u_cameraPos), [1, 2, -3],
+      `face ${face} renders from the scene camera's position`)
+
+    const mesh = passes.find(p => p.program === 'scene_mesh_gbuf')
+    seen.push({
+      projection: Array.from(mesh.uniforms.u_projectionMatrix),
+      viewProj: Array.from(passes.find(p => p.id === 'scene_ssao_pass').uniforms.u_viewProj)
+    })
+  })
+
+  assert.strictEqual(seen.length, 6, 'six faces')
+  const square90 = Array.from(perspectiveMatrix(90, 1, 0.25, 900))
+  for (let face = 0; face < 6; face++) {
+    assert.deepStrictEqual(seen[face].projection, square90,
+      `face ${face} projects through a square 90-degree frustum, not the scene camera's 35`)
+  }
+  const distinct = new Set(seen.map(s => s.viewProj.join(',')))
+  assert.strictEqual(distinct.size, 6, 'all six faces look somewhere different')
+
+  // The scene's own camera is untouched: the export drives a camera of the
+  // renderer's own, so the live view is exactly where the export found it.
+  assert.strictEqual(tree.camera.fov, 35, 'scene camera fov preserved')
+  assert.deepStrictEqual(tree.camera.target, [4, 2, -3], 'scene camera target preserved')
+}
+
+// ORIENTATION CONTRACT. Scene faces and 2D faces feed the same consumers — the
+// horizontal cross in cubeExport.js, the six px/nx/py/ny/pz/nz PNGs — so a
+// scene face must carry the same world direction in the same texel as a
+// renderCubemapSurface face would. The 2D renderers march
+// `normalize(cubeBasis * vec3(uv.x, -uv.y, 1.0))`; unprojecting the scene face
+// camera's own view-projection has to reproduce that ray, which pins the face
+// ORDER, the roll of each face and both flips at once.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const tree = cubeExportTree()
+  const eye = [1, 2, -3]
+  // Corners, edge midpoints and the centre: enough to catch a transpose, a
+  // mirrored axis or a 90-degree roll, none of which move the centre.
+  const samples = [[0, 0], [-1, 1], [1, 1], [-1, -1], [1, -1], [0, 1], [0, -1], [-1, 0], [1, 0], [0.5, -0.25]]
+
+  await exportCubemap(renderer, backend, tree, (face, passes) => {
+    const viewProj = Array.from(passes.find(p => p.id === 'scene_ssao_pass').uniforms.u_viewProj)
+    for (const [ndcX, ndcY] of samples) {
+      const actual = rayThroughNDC(viewProj, eye, ndcX, ndcY)
+      const expected = shaderRay(face, ndcX, ndcY)
+      for (let i = 0; i < 3; i++) {
+        assert.ok(Math.abs(actual[i] - expected[i]) < 1e-5,
+          `face ${face} ray at NDC (${ndcX}, ${ndcY}) component ${i}: ` +
+          `${actual[i]} != ${expected[i]} — scene export does not match the 2D cubemap convention`)
+      }
+    }
+  })
+}
+
+// The probe inside a cubemap export is captured once and then frozen. It is a
+// world-space cube from a fixed point, so it does not change between export
+// faces; re-capturing it per face would re-render the same six views five more
+// times. The live amortization state is saved and restored, so exporting can
+// never perturb a running loop's rotation.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const tree = cubeExportTree({ reflectionProbe: [0, 1, 0], reflectionProbeSize: 32 })
+
+  // Prime, then two amortized frames, so the rotation sits somewhere an export
+  // could visibly disturb.
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+  await renderer.render(tree, { elapsed: 0.032 }, 'scene_color')
+  const nextFaceBeforeExport = renderer._probeNextFace
+  assert.strictEqual(nextFaceBeforeExport, 2, 'two amortized frames advanced the rotation')
+
+  const probeCaptures = []
+  await exportCubemap(renderer, backend, tree, (face, passes) => {
+    probeCaptures.push(passes.filter(p => p.id.startsWith('scene_probe_lighting_face_')).length)
+    const lighting = passes.find(p => p.id === 'scene_lighting')
+    assert.strictEqual(lighting.inputs.u_reflectionProbe, 'scene_reflection_probe',
+      `face ${face} still samples the probe cube`)
+    assert.strictEqual(lighting.uniforms.u_probeEnabled, 1, `face ${face} keeps probe specular on`)
+  }, { elapsed: 0.032 })
+
+  assert.deepStrictEqual(probeCaptures, [6, 0, 0, 0, 0, 0],
+    'the first export face primes all six probe faces; the rest reuse that cube')
+
+  backend.passes.length = 0
+  await renderer.render(tree, { elapsed: 0.048 }, 'scene_color')
+  const resumed = backend.passes.filter(p => p.id.startsWith('scene_probe_lighting_face_'))
+  assert.strictEqual(resumed.length, 1, 'the live loop still amortizes to one face after an export')
+  assert.strictEqual(resumed[0].cubeFace, nextFaceBeforeExport,
+    'an export leaves the live probe rotation where it found it')
+}
+
+// A cubemap export is never tiled. A face is a 90-degree view of the world
+// sampled by direction, so restricting it to a screen tile would capture a
+// fraction of it and leave every direction outside that fraction wrong.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const tree = cubeExportTree()
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color',
+    { offset: [32, 32], fullResolution: [128, 128] })
+
+  const square90 = Array.from(perspectiveMatrix(90, 1, 0.25, 900))
+  await exportCubemap(renderer, backend, tree, (face, passes) => {
+    const mesh = passes.find(p => p.program === 'scene_mesh_gbuf')
+    assert.deepStrictEqual(Array.from(mesh.uniforms.u_projectionMatrix), square90,
+      `face ${face} ignores a tile region left over from the live view`)
+  })
+}
+
+// REGRESSION PIN for the probe's own face cameras, which the export path
+// shares. Each face looks from the probe position along the cube face's
+// forward axis with the face's own up — the cube-texture convention, which is
+// NOT the readback convention the export uses.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const probePosition = [0, 1, 0]
+  const tree = cubeExportTree({ reflectionProbe: probePosition, reflectionProbeSize: 32 })
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  for (let face = 0; face < 6; face++) {
+    const pass = backend.passes.find(p =>
+      p.id === `scene_probe_gbuf_face_${face}` && p.program === 'scene_mesh_gbuf')
+    assert.ok(pass, `probe face ${face} rasterizes the mesh`)
+    const { forward, up } = CUBE_FACES[face]
+    const expected = lookAtMatrix(
+      probePosition,
+      [probePosition[0] + forward[0], probePosition[1] + forward[1], probePosition[2] + forward[2]],
+      up
+    )
+    assertMatrixClose(pass.uniforms.u_viewMatrix, expected, `probe face ${face} view matrix`)
+  }
 }
 
 console.log('Scene renderer tests passed')

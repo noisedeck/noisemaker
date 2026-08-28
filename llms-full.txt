@@ -229,6 +229,58 @@ parameter resolution explicitly checks `0` through `7`; `o8`, `o99`, and
 `read(o8)` pass lexing and surface conversion. Do not infer an enforced `o0`-
 `o7` range from the public model. See GAP-001.
 
+`scene()` is a chain vocabulary that is not a registered effect. Treat it as
+**preview**: the renderer consumes every shape below today, but node names,
+keywords, defaults, and rendered output are declared unstable until Noisemaker
+2.0, so an agent must not depend on a scene program parsing or rendering
+identically across releases the way it can for the effect surfaces.
+
+```ts
+type SceneSettingKey = "ambient" | "background" | "exposure" | "ground" |
+                       "sky" | "reflections" | "reflectionProbe" |
+                       "reflectionProbeSize" | "ssao" | "ssaoRadius"
+
+type SceneNodeIR = {
+  id: string | undefined
+  type: "mesh" | "volume" | "group"
+  transform: object          // pos/rot/scale, each 3 numbers or descriptors
+  children: number[]         // indices into SceneIR.nodes
+  parent: number | null
+  meshType?: string          // mesh() only, its one positional argument
+  meshParams?: Record<string, number>   // mesh() only
+  surface?: string           // volume() only, "vol0".."vol7"
+  threshold?: number         // volume() only, 0..1
+  mode?: "smooth" | "voxel"  // volume() only
+  material?: string          // key into SceneIR.materials
+  planarReflection?: true    // reflector() on a plane mesh
+}
+
+type SceneIR = {
+  camera: object                  // never null; omitted keywords defaulted
+  lights: object[]
+  environment: object | null
+  settings: { [K in SceneSettingKey]?: unknown }
+  materials: Record<string, object>
+  nodes: SceneNodeIR[]            // flat; hierarchy is parent/children indices
+}
+```
+
+`compileScene(compilationResult)` returns `SceneIR`, or `null` when the program
+has no `scene()`. `compileGraph()` attaches it as `graph.sceneIR` with
+`graph._isScene`, `SceneTree.fromIR()` builds the runtime tree, and the scene
+renderer draws into `SCENE_COLOR_TEXTURE` (`"scene_color"`, screen-sized
+`rgba16f`) before the pipeline executes its passes. A `scene()` step expands to
+**zero** passes: it only seeds the chain's current input with that texture,
+which is why the terminal `write(oN)` is the thing that makes a scene
+observable at all.
+
+A `volume()` node marches one of the `vol0`-`vol7` atlases, which are fixed at
+64 cubed (`VOLUME_ATLAS_SIZE`, declared identically in `compiler.js`,
+`volume-renderer.js`, and `pipeline.js`, and allocated as 64x4096 `rgba16f`). A
+`volume()` node therefore samples a 64-cube whatever `volumeSize` the producing
+chain declares; a mismatch is rejected at compile time rather than rescaled, and
+a runtime `volumeSize` change on a pinned surface is refused with a warning.
+
 Current connections are observable after compilation in
 `graph.passes[].inputs`, `graph.passes[].outputs`, `graph.renderSurface`, and at
 runtime in `pipeline.surfaces`, `pipeline.frameReadTextures`, and
@@ -237,7 +289,11 @@ runtime in `pipeline.surfaces`, `pipeline.frameReadTextures`, and
 Sources: `shaders/src/lang/lexer.js` - `lex()`;
 `shaders/src/lang/parser.js` - `parse()`;
 `shaders/src/lang/validator.js` - `validate()`, `toSurface()`;
-`shaders/src/runtime/pipeline.js` - `createSurfaces()`, `getFrameState()`.
+`shaders/src/runtime/pipeline.js` - `createSurfaces()`, `getFrameState()`;
+`shaders/src/rendering/scene-compiler.js` - `compileScene()`,
+`SCENE_COLOR_TEXTURE`; `shaders/src/scene/tree.js` - `SceneTree.fromIR()`;
+`shaders/src/runtime/compiler.js` - `VOLUME_ATLAS_SIZE`,
+`checkSceneVolumeAtlasSizes()`; `shaders/src/runtime/expander.js` - scene step.
 
 ### Act
 
@@ -399,10 +455,69 @@ head; inline `.read`/`.read3d`; unquoted strings for most value types; and
 unknown registered-effect arguments. Unknown subchain metadata keys are the
 silent exception described above and in GAP-027.
 
+`scene()` adds no grammar. Its call parses as an ordinary `Call`, and everything
+inside the parentheses is preserved as argument AST that the effect registry
+never sees — which is why terms like `reflector()` need no registration. The
+scene compiler, not the parser, imposes the shape:
+
+```ebnf
+SceneCall      ::= "scene" "(" SceneArg { "," SceneArg } ")"
+SceneArg       ::= KeywordArg | CameraCall | LightCall | EnvironmentCall |
+                   NodeChain
+NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) { "." NodeLink }
+VolumeCall     ::= "volume" "(" ArgList ")"
+NodeLink       ::= MaterialCall | "reflector" "(" ")"
+MaterialCall   ::= "material" "(" MaterialSpec ")"
+MaterialSpec   ::= ( "solid" | "surface" ) "(" [ ArgList ] ")"
+                   { "." MaterialTerm }
+MaterialTerm   ::= "pbr" "(" [ ArgList ] ")" | "emit" "(" [ ArgList ] ")"
+```
+
+Resolution and position rules:
+
+- `scene` is a **generator**: it must start its chain, or `scene() is a
+  generator and must start a chain`. Only one `scene()` per program.
+- The validator resolves every chain call against the registered effects first
+  and **only `scene` falls through** to the scene layer when nothing matches.
+  The other names in the scene vocabulary — `camera`, `light`, `environment`,
+  `mesh`, `volume`, `group`, `material`, `solid`, `surface`, `pbr`, `emit` — are
+  children *inside* a `scene()` call. Written as a chain element with no effect
+  behind them they are rejected rather than passed through, which used to turn a
+  typo into a no-op that compiled clean and rendered nothing. `solid` is the
+  exception in practice: `synth/solid` is a registered effect, so a top-level
+  `solid()` under `search synth` resolves to that 2D generator.
+- Permitted direct children of `scene()` are `camera`, `light`, `environment`,
+  `mesh`, `volume`, and `group`. Permitted links on a node are `.material()` and
+  `.reflector()`; transforms are keyword arguments on the node itself, so
+  `mesh("sphere").pos([0, 0, -4])` is an unknown-link error and not a placement.
+- Scene settings are the `SceneSettingKey` whitelist in Introspect. Node
+  keywords are whitelisted per node kind; an unrecognized key is an error rather
+  than a silent drop, unlike subchain metadata.
+- Transform components and a light's `intensity` accept `osc()`, `midi()`, and
+  `audio()` in place of a number, with the same arguments, enums, and `[0, 1]`
+  sub-range they carry on an effect uniform. They are hoisted out of the tree at
+  compile time and advanced against the same clock and the same `MidiState` /
+  `AudioState` the pipeline resolves effect uniforms from. `volume()`'s
+  `threshold` does not accept them.
+
+`volume()` is the one node whose argument list mixes forms. Exactly one argument
+is positional and must be a `VolRef` (or an identifier bound to one by `let`)
+naming `vol0`-`vol7`; every other argument is a keyword, and the two may be
+interleaved in any order. Its keyword set is `id`, `pos`, `rot`, `scale`,
+`threshold` (default `0.5`, range `0..1`), and `mode` (default `"smooth"`, one
+of `"smooth"` or `"voxel"`). `mode` selects the marching algorithm only: the
+bound is always the local `[-1, 1]` cube, so a `volume()` at `scale: 1` spans
+two world units per axis where `mesh("box")` at `scale: 1` spans one. A
+raymarched isosurface has no UVs, so a `surface()` material — declared on the
+volume or inherited from its `group()` — is rejected.
+
 Sources: `shaders/src/lang/lexer.js` - `lex()`;
 `shaders/src/lang/parser.js` - `parseProgram()`, `parseCall()`,
 `parseSubchainCall()`, `parsePrimary()`; `shaders/src/lang/validator.js` -
-`compileChainStatement()`, `processChain()`.
+`compileChainStatement()`, `processChain()`, `SCENE_FUNCTIONS`;
+`shaders/src/rendering/scene-compiler.js` - `compileScene()`, `walkNode()`,
+`volumeReference()`, `volumeMode()`, `SCENE_SETTING_KEYS`, `VOLUME_KEYS`;
+`shaders/src/scene/bindings.js` - hoisted automation descriptors.
 
 ### Validate
 
@@ -421,9 +536,23 @@ Warnings (`S002`, `S007`, `S008`) do not make `compileGraph()` fail. Any semanti
 error does. `runDslProgram` is a convenient combined validator on WebGL2; its
 exact contract and WebGPU limitation are in the MCP section.
 
+A program containing `scene()` passes through two extra stages between semantic
+validation and expansion, both of which throw rather than emitting diagnostics:
+
+| Stage | Measurement | Pass threshold |
+|---|---|---|
+| scene compile | `graph.sceneIR` | non-null with `nodes.length >= 0` and a `camera`; no thrown `SyntaxError` from `compileScene()` |
+| volume atlas | every `volume(volN)` against the `volumeSize` of the chain writing `volN` | no `ERR_VOLUME_ATLAS_SIZE`; a producer declaring no numeric `volumeSize`, or a surface nothing writes, is exempt |
+
+Expansion measures a scene the same way as any other program, with one
+adjustment: the scene step itself contributes zero passes, so `passes >= 1` is
+satisfied by the terminal `write(oN)` and whatever 2D chaining follows it.
+
 Sources: `shaders/src/lang/index.js` - `compile()`;
-`shaders/src/runtime/compiler.js` - `compileGraph()`;
-`shaders/src/runtime/pipeline.js` - `compilePrograms()`, `render()`.
+`shaders/src/runtime/compiler.js` - `compileGraph()`,
+`checkSceneVolumeAtlasSizes()`; `shaders/src/rendering/scene-compiler.js` -
+`compileScene()`; `shaders/src/runtime/pipeline.js` - `compilePrograms()`,
+`render()`.
 
 ### Diagnose
 
@@ -458,11 +587,36 @@ Expansion failures have shape `ExpansionFailure`. Current enumerated messages
 are `Effect '<name>' not found` with the failing step, and `No render surface
 specified and no write() found - add render(oN) or write(oN)` without a step.
 
+Scene failures split across the two layers. The validator emits ordinary `S001`
+diagnostics; the scene compiler throws `SyntaxError` with ` at line <n> col <n>`
+appended, so it escapes `ERR_COMPILATION_FAILED` the same way a raw parse error
+does and cannot be read out of a diagnostics array:
+
+| Condition | Layer | Message |
+|---|---|---|
+| scene child name used as a chain element | validator, `S001` | `Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside scene().` |
+| `scene()` not at a chain head | validator, `S001` | `scene() is a generator and must start a chain` |
+| chain without a terminal write | validator, `S001` | `Chain must have explicit write() or write3d() target` |
+| two `scene()` calls in one program | scene compiler, throw | `Only one scene() per program is supported` |
+| unknown `scene()` keyword | scene compiler, throw | `Unknown keyword '<key>' for scene()` |
+| unknown direct child | scene compiler, throw | `Unknown scene child '<name>' (allowed: camera, light, environment, mesh, volume, group)` |
+| unknown link on a node | scene compiler, throw | `Unknown link '<name>()' on <kind>(); a scene node accepts only .material() and .reflector()` |
+| unknown node keyword | scene compiler, throw | `Unknown keyword '<key>' for volume()` (and the same form for `mesh("<type>")` and `group()`) |
+| bad `volume()` positional | scene compiler, throw | `volume() expects a volume reference (vol0..vol7)` |
+| second `volume()` positional | scene compiler, throw | `volume() takes one positional argument, the volume reference` |
+| bad `volume()` marching mode | scene compiler, throw | `Unknown volume mode '<value>' (expected: smooth, voxel)` |
+| `surface()` material on a volume | scene compiler, throw | `volume() cannot take a surface() material; an isosurface has no UVs` |
+| `reflector()` on a non-mesh node | scene compiler, throw | `reflector() is not supported on <kind>() nodes; planar reflection applies to a plane mesh` |
+| atlas/`volumeSize` mismatch | `compileGraph()`, throw | `{ code: "ERR_VOLUME_ATLAS_SIZE", errors }`, each naming the surface, the marched cube, and the `volumeSize` to set |
+
 Sources: `shaders/src/lang/diagnostics.js` - default export;
 `shaders/src/lang/lexer.js` - thrown `SyntaxError` sites;
 `shaders/src/lang/parser.js` - thrown `SyntaxError` sites;
-`shaders/src/runtime/compiler.js` - `compileGraph()`;
-`shaders/src/runtime/expander.js` - `expand()`.
+`shaders/src/runtime/compiler.js` - `compileGraph()`,
+`checkSceneVolumeAtlasSizes()`;
+`shaders/src/runtime/expander.js` - `expand()`;
+`shaders/src/lang/validator.js` - `processChain()`;
+`shaders/src/rendering/scene-compiler.js` - `sceneError()` and its throw sites.
 
 <!-- SURFACE:EFFECT -->
 ## Effect definition
@@ -3277,7 +3431,7 @@ Every cell points to an executable contract or an explicitly identified gap.
 
 | Surface | Introspect | Act | Validate | Diagnose |
 |---|---|---|---|---|
-| DSL program | `Token`, `ParsedProgram`, `CompiledProgram`, registry keys, `CompiledGraph` | Complete EBNF plus call/read/write/render contracts | parse/unparse/compile and render metric predicates | `SyntaxError`, `Diagnostic`, `CompilationFailure`; GAP-001/002/023/027 |
+| DSL program | `Token`, `ParsedProgram`, `CompiledProgram`, registry keys, `CompiledGraph`, `SceneIR` | Complete EBNF plus call/read/write/render contracts, and the preview `scene()`/`volume()` shape | parse/unparse/compile, scene-compile and volume-atlas stages, render metric predicates | `SyntaxError`, `Diagnostic`, `CompilationFailure`, scene-compiler throws; GAP-001/002/023/027 |
 | Effect definition | `Effect` fields, registry/manifest, `checkEffectStructure` | `EffectDefinition` typed grammar | validator and structure scan; browser backend identity is GAP-024 | exact validator messages, structural arrays, backend errors; GAP-003/007/024/026 |
 | Parameters and globals | `effect.globals`, transformed `uniforms`, registry params | `GlobalSpec` typed grammar and enum/binding rules | compile reflection and numeric response deltas | transform errors, type/range/identity blind spots; GAP-010/011/024 |
 | Passes and render graph | `Effect.passes`, `CompiledGraph.passes`, `CompiledGraph.textures`, `CompiledGraph.allocations` | `PassSpec` typed grammar and sampler/output binding rules | graph analysis and per-pass compile | unresolved inputs and backend compile/resource failures; GAP-005/006 |

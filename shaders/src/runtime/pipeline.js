@@ -1186,10 +1186,17 @@ export class Pipeline {
      * graph ends in (renderCubemap3d / renderCubemapSurface) — not a parameter here.
      * yieldBetweenFaces awaits an animation frame before each face render so a
      * host render loop keeps painting during large (e.g. 1024px) captures.
-     * @param {{size?:number, outputSurface?:string, time?:number, yieldBetweenFaces?:boolean}} cfg
+     *
+     * onFace is awaited before each face's passes run. A scene program has no
+     * cubemap-renderer shader for `cubeBasis` to reach, so its six faces come
+     * from six renders of the scene through cube-face cameras — that is what
+     * the hook does, drawing the face into the texture this pipeline then blits
+     * and reads back. Everything else about the capture stays shared: the
+     * resize, the face order, the readback and the reused return buffer.
+     * @param {{size?:number, outputSurface?:string, time?:number, yieldBetweenFaces?:boolean, onFace?:?function(number):(void|Promise<void>)}} cfg
      * @returns {Promise<Array<{width:number,height:number,data:Uint8Array}>>} reused buffer — copy if retaining
      */
-    async renderCubemap({ size = 512, outputSurface = 'o0', time = 0, yieldBetweenFaces = false } = {}) {
+    async renderCubemap({ size = 512, outputSurface = 'o0', time = 0, yieldBetweenFaces = false, onFace = null } = {}) {
         const prevW = this.width, prevH = this.height
         if (this.width !== size || this.height !== size) this.resize(size, size)
         if (!this._cubeFaces) this._cubeFaces = new Array(6)
@@ -1210,10 +1217,11 @@ export class Pipeline {
                 })
             }
             this.setUniform('cubeBasis', CUBE_FACE_BASES[face])
+            if (onFace) await onFace(face)
             this.render(time)
             const surface = this.surfaces.get(outputSurface)
             if (!surface) {
-                throw new Error(`renderCubemap: output surface "${outputSurface}" not found — the composition must write its cubemap-renderer result to it (e.g. .renderCubemapSurface().write(${outputSurface}))`)
+                throw new Error(`renderCubemap: output surface "${outputSurface}" not found — the composition must write its result to it (e.g. .renderCubemapSurface().write(${outputSurface}), or scene(...).write(${outputSurface}))`)
             }
             this._cubeFaces[face] = await this.backend.readPixels(surface.read)
         }
