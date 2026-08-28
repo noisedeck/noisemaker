@@ -13,6 +13,7 @@ const EMPTY_MATERIAL = Object.freeze({})
 const EMPTY_PBR = Object.freeze({})
 
 const DEFAULT_COLOR = Object.freeze([1, 1, 1])
+const DEFAULT_CLIP_PLANE = Object.freeze([0, 0, 0, 0])
 const DEFAULT_OUTPUTS = Object.freeze({
   color0: 'scene_gbuf_albedo_metallic',
   color1: 'scene_gbuf_normal_roughness',
@@ -67,29 +68,37 @@ export class VolumeRenderer {
    */
   constructor(meshRenderer) {
     this.meshRenderer = meshRenderer
-    // Weak, so a recompile that rebuilds the scene tree does not pin the old
-    // nodes. Only one pass variant exists in Phase 1 — the main G-buffer — so
-    // unlike MeshRenderer there is nothing to key by pass id.
-    this._passStates = new WeakMap() // node -> reusable pass state
+    // Keyed by pass id (main, planar, each probe face) and then weakly by node,
+    // exactly as MeshRenderer does: the same node now has one pass object per
+    // G-buffer variant, and a single shared object would carry the last
+    // variant's outputs and camera into every earlier one within a frame.
+    this._passStates = new Map() // passId -> WeakMap<node, reusable pass state>
   }
 
   dispose() {
     // Box geometry belongs to the mesh renderer's cache, which disposes it.
-    this._passStates = new WeakMap()
+    this._passStates.clear()
   }
 
   /**
-   * Reusable per-node pass state, mirroring MeshRenderer._passState.
+   * Reusable per-node pass state for one pass variant, mirroring
+   * MeshRenderer._passState.
    *
    * Rewritten in place each frame; only the identity is stable. Rebuilding
    * these per frame would allocate two matrices, a colour array, three texture
-   * names and three object literals per volume per frame.
+   * names and three object literals per volume per variant per frame.
+   * @param {string} passId - Pass variant this state belongs to
    * @param {object} node - Volume node the pass draws
    * @param {object} handle - Geometry handle carrying the box texture ids
    * @returns {object} Reusable { pass, uniforms, inputs, invModelMatrix, normalMatrix, baseColorRgba }
    */
-  _passState(node, handle) {
-    let state = this._passStates.get(node)
+  _passState(passId, node, handle) {
+    let byNode = this._passStates.get(passId)
+    if (!byNode) {
+      byNode = new WeakMap()
+      this._passStates.set(passId, byNode)
+    }
+    let state = byNode.get(node)
     // The texture names derive from the geometry handle, so rebuild if it moves.
     if (state && state.meshId === handle.meshId) return state
 
@@ -120,13 +129,16 @@ export class VolumeRenderer {
       u_hasMaterial: 0,
       u_metallic: 0,
       u_roughness: 1,
-      u_emissionStrength: 0
+      u_emissionStrength: 0,
+      u_clipPlane: null,
+      u_clipEnabled: 0
     }
     const pass = {
-      // Deliberately the SAME id the mesh passes use. On WebGL2 that is what
-      // puts both on one framebuffer and therefore one depth buffer, which is
-      // what the volume/mesh compositing depends on. See SCENE_GBUFFER_PASS_ID.
-      id: SCENE_GBUFFER_PASS_ID,
+      // Deliberately the SAME id the mesh passes of this variant use. On WebGL2
+      // that is what puts both on one framebuffer and therefore one depth
+      // buffer, which is what the volume/mesh compositing depends on. See
+      // SCENE_GBUFFER_PASS_ID.
+      id: passId,
       program: 'scene_volume_gbuf',
       // 'triangles' is what attaches a depth buffer and enables the depth test
       // on BOTH backends; without it the volume could not composite against
@@ -135,6 +147,18 @@ export class VolumeRenderer {
       // Back faces only. One fragment per covered pixel, and the box stays
       // drawn when the camera is inside it. Stated rather than defaulted: the
       // backends disagree on the default for an MRT triangles pass.
+      //
+      // The same value is correct in the mirrored planar variant, and that is
+      // derived rather than inherited. The reflection camera is built by
+      // lookAt() from a mirrored position, target and up, and lookAt always
+      // produces a proper rigid frame — determinant +1, measured — so the
+      // mirroring never reaches the winding: a back face seen from the mirrored
+      // eye is genuinely a back face. (The planar MESH passes use 'none' for an
+      // unrelated reason: single-sided geometry such as a plane, viewed from the
+      // far side of the reflector, would vanish under any culling. A closed box
+      // has no such problem.) 'front' therefore stays both one-fragment-per-
+      // pixel and robust to the mirrored eye landing inside the box, which
+      // 'back' would not be.
       cullMode: 'front',
       count: handle.vertexCount,
       inputs,
@@ -144,21 +168,30 @@ export class VolumeRenderer {
       uniforms
     }
     state = { pass, uniforms, inputs, invModelMatrix, normalMatrix, baseColorRgba, meshId: handle.meshId }
-    this._passStates.set(node, state)
+    byNode.set(node, state)
     return state
   }
 
   /**
-   * Build a pass per volume node, filling the main scene G-buffer.
+   * Build a pass per volume node, filling one scene G-buffer variant.
    * @param {object[]} volumeNodes - Nodes from SceneTree.getVolumeNodes()
    * @param {object} materials - Interned material records by key
    * @param {CameraNode} camera - View the volume is marched from
    * @param {number} width - G-buffer width
    * @param {number} height - G-buffer height
    * @param {object} [opts]
+   * @param {object} [opts.outputs] - colorN -> texture id map. Defaults to the
+   *   main G-buffer; the planar reflection and each probe face pass their own.
+   * @param {string} [opts.passId] - Pass id, which is what the WebGL2 backend
+   *   keys its MRT framebuffer (and therefore its depth buffer) on. Must be the
+   *   SAME id the mesh passes of this variant use.
+   * @param {Float32Array|number[]} [opts.clipPlane] - World-space plane
+   *   (xyz = normal, w = -dot(normal, point)); a marched hit behind it is
+   *   discarded. Absent means no clipping.
    * @param {boolean} [opts.firstClear=false] - Whether the first volume pass is
-   *   the first pass into the G-buffer this frame and must therefore clear it.
-   *   Mesh passes run first, so this is true only in a volume-only scene.
+   *   the first pass into this G-buffer variant this frame and must therefore
+   *   clear it. Mesh passes run first, so this is true only when the variant's
+   *   mesh list came out empty.
    */
   buildVolumePasses(volumeNodes, materials, camera, width, height, opts = {}) {
     const passes = []
@@ -172,6 +205,10 @@ export class VolumeRenderer {
     const projMatrix = camera.getProjectionMatrix(aspect)
     const cameraPos = camera._position || [0, 0, 5]
     const firstClear = opts.firstClear === true
+    const outputs = opts.outputs ?? DEFAULT_OUTPUTS
+    const passId = opts.passId ?? SCENE_GBUFFER_PASS_ID
+    const clipPlane = opts.clipPlane ?? DEFAULT_CLIP_PLANE
+    const clipEnabled = opts.clipPlane ? 1 : 0
 
     for (let i = 0; i < volumeNodes.length; i++) {
       const node = volumeNodes[i]
@@ -185,7 +222,7 @@ export class VolumeRenderer {
       const roughness = boundedNumber(pbr.roughness, 1, 0.045, 1)
       const emission = boundedNumber(mat.emission, 0, 0, Number.POSITIVE_INFINITY)
 
-      const state = this._passState(node, handle)
+      const state = this._passState(passId, node, handle)
       const { pass, uniforms, invModelMatrix, normalMatrix, baseColorRgba } = state
 
       // World -> local carries the ray into the box's own [-1,1] space. A
@@ -205,7 +242,7 @@ export class VolumeRenderer {
       baseColorRgba[3] = 1.0
 
       pass.count = handle.vertexCount
-      pass.outputs = DEFAULT_OUTPUTS
+      pass.outputs = outputs
       pass.clear = firstClear && passes.length === 0
 
       uniforms.u_modelMatrix = modelMatrix
@@ -221,6 +258,8 @@ export class VolumeRenderer {
       uniforms.u_metallic = metallic
       uniforms.u_roughness = roughness
       uniforms.u_emissionStrength = emission
+      uniforms.u_clipPlane = clipPlane
+      uniforms.u_clipEnabled = clipEnabled
 
       passes.push(pass)
     }

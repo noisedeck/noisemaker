@@ -1279,6 +1279,269 @@ async function testVolumeNearPlaneReject(browser, port) {
 }
 
 /**
+ * A mirror floor with an emissive volume, above it or below it.
+ *
+ * The reflector is the only reflective surface and the volume the only red
+ * thing in the scene, so red anywhere in the mirrored G-buffer, or in the
+ * reflected contribution the composite adds over plain lighting, can only have
+ * come from the volume being drawn into the mirrored view.
+ *
+ * Deterministic on both backends: noise3d at speed 0 has no time term.
+ * @param {number} volumeY - Centre height. The body spans 1.4 world units per
+ *   axis at scale 0.7, so 1.4 puts it wholly above the floor and -1.4 wholly
+ *   below it — where the reflector's clip plane must remove it entirely.
+ */
+function planarVolumeScene(volumeY) {
+  return `search synth3d
+noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0.02, 0.02, 0.02],
+  reflections: 1,
+  ambient: 0.2,
+  camera(fov: 52, pos: [0, 3, -7], target: [0, 0.7, 0]),
+  light(type: "directional", dir: [0.4, -1, 0.6], intensity: 2),
+  mesh("plane", width: 16, height: 16, pos: [0, 0, 0])
+    .reflector()
+    .material(solid(color: [0.25, 0.25, 0.25]).pbr(metallic: 1, roughness: 0.045)),
+  volume(vol0, threshold: 0.5, pos: [0, ${volumeY}, 0], scale: [0.7, 0.7, 0.7])
+    .material(solid(color: [1, 0.12, 0.04]).emit(strength: 1.5))
+).write(o0)
+render(o0)`
+}
+
+/**
+ * What the mirrored G-buffer holds, and what the composite added over lighting.
+ *
+ * The mirrored G-buffer is an MRT target, so it is counted rather than diffed
+ * positionally — WebGL2's readPixels flips rows and the WGSL vertex stage has
+ * already flipped clip Y, so the two backends' MRT readbacks run opposite ways.
+ * scene_reflect_color and scene_lit_color are fullscreen-pass outputs and do
+ * agree, which is what testFlatPlanarReflection's row scan relies on.
+ */
+async function planarVolumeCensus(page) {
+  return page.evaluate(async () => {
+    const backend = window.__noisemakerCanvasRenderer.sceneRenderer.backend
+    const [albedo, depth, reflect, lit] = await Promise.all([
+      backend.readPixels('scene_planar_gbuf_albedo_metallic'),
+      backend.readPixels('scene_planar_gbuf_depth'),
+      backend.readPixels('scene_reflect_color'),
+      backend.readPixels('scene_lit_color')
+    ])
+    const total = albedo.width * albedo.height
+    let mirroredVolume = 0
+    let mirroredOther = 0
+    for (let pixel = 0; pixel < total; pixel++) {
+      const offset = pixel * 4
+      // depth == 0 is the no-hit sentinel every downstream pass reads as sky.
+      if (depth.data[offset] === 0) continue
+      if (albedo.data[offset] > albedo.data[offset + 2] + 8) mirroredVolume++
+      else mirroredOther++
+    }
+
+    // What the reflection stage added on top of plain lighting. The mirror is
+    // neutral grey, so a red-dominant addition is the volume's reflection.
+    let redReflected = 0
+    for (let pixel = 0; pixel < total; pixel++) {
+      const offset = pixel * 4
+      const dr = reflect.data[offset] - lit.data[offset]
+      const db = reflect.data[offset + 2] - lit.data[offset + 2]
+      if (dr >= 16 && dr > db + 8) redReflected++
+    }
+    return { mirroredVolume, mirroredOther, redReflected, total }
+  })
+}
+
+/**
+ * Volumes appear in the planar reflection, and the reflector's clip plane
+ * governs the marched hit rather than the bounding box.
+ *
+ * Two loads, one page, per backend:
+ *
+ * - Above the floor, the volume must reach the mirrored G-buffer and its colour
+ *   must reach the composited frame. Before Phase 4 both are zero: the planar
+ *   group was built from getMeshNodes() alone.
+ * - Below the floor, the mirrored camera looks straight at it, so an unclipped
+ *   marcher would fill the mirrored G-buffer with it. Every hit is behind the
+ *   reflector's plane, so a correctly clipped one draws nothing at all. This is
+ *   what separates "the clip plane is wired" from "the clip plane is applied to
+ *   the box face", which would clip the scaffolding and leave the isosurface.
+ */
+async function testVolumeInPlanarReflection(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const sceneName = 'volume() in the planar reflection'
+  console.log(`\n--- Testing ${sceneName} on ${backendName.toUpperCase()} ---`)
+
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message || String(error)))
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+
+  const fail = (reason, metrics) => ({ scene: sceneName, backend: backendName, status: 'fail', reason, metrics, errors })
+
+  try {
+    await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+      { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+
+    await loadSceneSource(page, planarVolumeScene(1.4))
+    const above = await planarVolumeCensus(page)
+    await loadSceneSource(page, planarVolumeScene(-1.4))
+    const below = await planarVolumeCensus(page)
+    const metrics = { above, below }
+    console.log(`  above=${JSON.stringify(above)}\n  below=${JSON.stringify(below)}`)
+
+    await context.close()
+
+    if (above.mirroredVolume < above.total * 0.005) {
+      return fail(`the volume is missing from the mirrored G-buffer: ${JSON.stringify(above)}`, metrics)
+    }
+    // The reflector itself is excluded from the mirrored render and nothing
+    // else is in the scene, so everything the mirrored G-buffer holds is the
+    // volume.
+    if (above.mirroredOther > above.mirroredVolume * 0.02) {
+      return fail(`unexpected non-volume coverage in the mirrored G-buffer: ${JSON.stringify(above)}`, metrics)
+    }
+    if (above.redReflected < above.total * 0.002) {
+      return fail(`the volume's colour never reached the mirror: ${JSON.stringify(above)}`, metrics)
+    }
+    // Clipped: a volume entirely behind the reflector's plane contributes
+    // nothing, even though the mirrored camera is pointed straight at it.
+    if (below.mirroredVolume > below.total * 0.0005) {
+      return fail(
+        `a volume behind the reflector's plane survived the clip: ${JSON.stringify(below)}`, metrics)
+    }
+    if (errors.length > 0) {
+      return { scene: sceneName, backend: backendName, status: 'fail', reason: errors.slice(0, 3).join(' / '), metrics, errors }
+    }
+    return { scene: sceneName, backend: backendName, status: 'pass', metrics }
+  } catch (error) {
+    await context.close()
+    return {
+      scene: sceneName,
+      backend: backendName,
+      status: 'error',
+      reason: [error.message, ...errors].filter(Boolean).join(' / '),
+      errors
+    }
+  }
+}
+
+/**
+ * A mirror-metal sphere with an emissive volume BEHIND THE CAMERA.
+ *
+ * The volume is at z -12; the camera sits at z -6 looking toward +z, so the
+ * volume is outside the main view entirely and contributes nothing to the
+ * G-buffer. The sphere is metallic 1 at roughness 0.1 with a probe at its own
+ * centre, and the reflected direction at the middle of its visible face is
+ * straight back past the camera — into the probe's -Z face, which is where the
+ * volume is.
+ *
+ * So red in the LIT frame (before SSR, which cannot see behind the camera
+ * either) can only be the probe's, and the probe's can only be the volume's.
+ * @param {boolean} withVolume - false is the control: the identical scene with
+ *   the volume removed, which must show no red at all.
+ */
+function probeVolumeScene(withVolume) {
+  const volume = withVolume
+    ? `,
+  volume(vol0, threshold: 0.5, pos: [0, 0, -12], scale: [3, 3, 3])
+    .material(solid(color: [1, 0.1, 0.03]).emit(strength: 3))`
+    : ''
+  return `search synth3d
+noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0, 0, 0],
+  ambient: 0,
+  reflections: 1,
+  reflectionProbe: [0, 0, 0],
+  reflectionProbeSize: 128,
+  camera(fov: 45, pos: [0, 0, -6], target: [0, 0, 0]),
+  light(type: "directional", dir: [0, -1, 1], intensity: 0.2),
+  mesh("sphere", radius: 1.5, segments: 64, pos: [0, 0, 0])
+    .material(solid(color: [0.9, 0.9, 0.9]).pbr(metallic: 1, roughness: 0.1))${volume}
+).write(o0)
+render(o0)`
+}
+
+/** Red-dominant pixels in the deferred lighting result. */
+async function probeRedCensus(page) {
+  return page.evaluate(async () => {
+    const backend = window.__noisemakerCanvasRenderer.sceneRenderer.backend
+    const lit = await backend.readPixels('scene_lit_color')
+    let red = 0
+    for (let offset = 0; offset < lit.data.length; offset += 4) {
+      if (lit.data[offset] >= 24 && lit.data[offset] > lit.data[offset + 2] + 12) red++
+    }
+    return { red, total: lit.width * lit.height }
+  })
+}
+
+/**
+ * Volumes appear in the reflection probe.
+ *
+ * Measured on both backends in one case: the assertion is a difference against
+ * a control, so both readings must come from the same harness.
+ */
+async function testVolumeInReflectionProbe(browser, port) {
+  const sceneName = 'volume() in the reflection probe'
+  console.log(`\n--- Testing ${sceneName} ---`)
+
+  const measure = async (backendName) => {
+    const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+    const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+    const page = await context.newPage()
+    try {
+      await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+        { waitUntil: 'domcontentloaded', timeout: 15000 })
+      await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+      await loadSceneSource(page, probeVolumeScene(false))
+      const control = await probeRedCensus(page)
+      await loadSceneSource(page, probeVolumeScene(true))
+      const withVolume = await probeRedCensus(page)
+      return { control, withVolume }
+    } finally {
+      await context.close()
+    }
+  }
+
+  const results = {}
+  const fail = (reason) => ({ scene: sceneName, backend: 'webgl2+webgpu', status: 'fail', reason, metrics: results })
+
+  for (const backendName of ['webgl2', 'webgpu']) {
+    results[backendName] = await measure(backendName)
+    const { control, withVolume } = results[backendName]
+    console.log(`  ${backendName}: control=${JSON.stringify(control)} withVolume=${JSON.stringify(withVolume)}`)
+
+    // Nothing red exists without the volume, so the control pins the metric to
+    // the probe rather than to some other red in the frame.
+    if (control.red > control.total * 0.0002) {
+      return fail(`${backendName}: the control frame already contains red: ${JSON.stringify(control)}`)
+    }
+    // The sphere subtends ~14 degrees of a 45-degree frame, so its visible face
+    // is a few percent of it; a floor of 0.2% is well inside that and far above
+    // the control.
+    if (withVolume.red < withVolume.total * 0.002) {
+      return fail(
+        `${backendName}: a volume behind the camera never reached the probe: ${JSON.stringify(withVolume)}`)
+    }
+  }
+
+  // Both backends capture the same probe, so they must agree on how much of it
+  // the sphere shows.
+  const spread = Math.abs(results.webgl2.withVolume.red - results.webgpu.withVolume.red)
+    / results.webgl2.withVolume.total
+  console.log(`  cross-backend probe red spread: ${(spread * 100).toFixed(4)}%`)
+  if (spread > 0.002) {
+    return fail(`backends disagree on probe contribution by ${(spread * 100).toFixed(3)}% of the frame`)
+  }
+
+  return { scene: sceneName, backend: 'webgl2+webgpu', status: 'pass', metrics: results }
+}
+
+/**
  * A centred, radially symmetric volume with nothing else in the scene.
  *
  * shape3d's sphere field is a function of |p - centre| only, and at speedA /
@@ -1524,6 +1787,9 @@ async function main() {
     results.push(await testVolumeScene(browser, port, 'webgpu'))
     results.push(await testVolumeNearPlaneReject(browser, port))
     results.push(await testVolumeSamplingConvention(browser, port))
+    results.push(await testVolumeInPlanarReflection(browser, port, 'webgl2'))
+    results.push(await testVolumeInPlanarReflection(browser, port, 'webgpu'))
+    results.push(await testVolumeInReflectionProbe(browser, port))
     results.push(await testVolumeCrossBackendParity(browser, port))
   } else if (PLANAR_REFLECTION_ONLY) {
     results.push(await testFlatPlanarReflection(browser, port, 'webgl2'))
@@ -1545,6 +1811,9 @@ async function main() {
     results.push(await testVolumeScene(browser, port, 'webgpu'))
     results.push(await testVolumeNearPlaneReject(browser, port))
     results.push(await testVolumeSamplingConvention(browser, port))
+    results.push(await testVolumeInPlanarReflection(browser, port, 'webgl2'))
+    results.push(await testVolumeInPlanarReflection(browser, port, 'webgpu'))
+    results.push(await testVolumeInReflectionProbe(browser, port))
     results.push(...(await testCrossBackendParity(browser, port)))
     results.push(await testVolumeCrossBackendParity(browser, port))
   }

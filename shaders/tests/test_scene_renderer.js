@@ -745,7 +745,7 @@ function treeWithLights(lights, settings = {}) {
   })
   await renderer.render(tree, { elapsed: 0 }, 'scene_color')
 
-  const planarMeshes = backend.passes.filter(p => p.id === 'scene_planar_mesh_pass')
+  const planarMeshes = backend.passes.filter(p => p.program === 'scene_mesh_gbuf' && p.id === 'scene_planar_gbuf_pass')
   assert.strictEqual(planarMeshes.length, 1, 'only the non-reflector mesh is mirrored')
   assert.strictEqual(planarMeshes[0].outputs.color0, 'scene_planar_gbuf_albedo_metallic')
   assert.strictEqual(planarMeshes[0].uniforms.u_clipEnabled, 1)
@@ -957,14 +957,48 @@ const GBUF_OUTPUTS = {
   color3: 'scene_gbuf_depth'
 }
 
-function volumeTree(nodes, materials = {}) {
+const PLANAR_GBUF_OUTPUTS = {
+  color0: 'scene_planar_gbuf_albedo_metallic',
+  color1: 'scene_planar_gbuf_normal_roughness',
+  color2: 'scene_planar_gbuf_position_emission',
+  color3: 'scene_planar_gbuf_depth'
+}
+
+const PROBE_GBUF_OUTPUTS = {
+  color0: 'scene_probe_gbuf_albedo_metallic',
+  color1: 'scene_probe_gbuf_normal_roughness',
+  color2: 'scene_probe_gbuf_position_emission',
+  color3: 'scene_probe_gbuf_depth'
+}
+
+const PLANAR_PASS_ID = 'scene_planar_gbuf_pass'
+
+function volumeTree(nodes, materials = {}, settings = {}) {
   return SceneTree.fromIR({
     camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
     lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
     materials,
-    settings: {},
+    settings,
     nodes
   })
+}
+
+/** A reflector plane under a volume, the fixture every Phase 4 case shares. */
+function reflectedVolumeTree(extraNodes = [], settings = {}) {
+  return volumeTree([
+    {
+      id: 'mirror',
+      type: 'mesh',
+      meshType: 'plane',
+      meshParams: { width: 16, height: 16 },
+      transform: {},
+      planarReflection: true,
+      children: [],
+      parent: null
+    },
+    { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: { position: [0, 1.5, 0] }, children: [], parent: null },
+    ...extraNodes
+  ], {}, settings)
 }
 
 // A volume is not a mesh, but it does reach the G-buffer: its bounding box is
@@ -1062,21 +1096,178 @@ function volumeTree(nodes, materials = {}) {
   assert.deepStrictEqual(backend.clearedTextures, [], 'the mesh pass already cleared')
 }
 
-// Phase 1 scope: volumes do not appear in the planar reflection or the probe.
-// Both pass lists are built from getMeshNodes().
+// A volume belongs in the planar reflection: the mirrored G-buffer is a second
+// view of the whole scene, not a mesh-only one. Same mirrored camera, same
+// planar targets, same clip plane — and the SAME pass id the planar mesh passes
+// use, because the WebGL2 MRT framebuffer (and the depth renderbuffer hanging
+// off it) is keyed on `mrt_${pass.id}_${outputs}`.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = reflectedVolumeTree([
+    { id: 'box', type: 'mesh', meshType: 'box', meshParams: {}, transform: { position: [0, 1.5, 0] }, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const mainVolume = backend.passes.filter(
+    p => p.program === 'scene_volume_gbuf' && p.outputs.color0 === GBUF_OUTPUTS.color0
+  )
+  assert.strictEqual(mainVolume.length, 1, 'still exactly one volume pass into the main G-buffer')
+
+  const planarPasses = backend.passes.filter(p => p.id === PLANAR_PASS_ID)
+  const planarVolume = planarPasses.filter(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(planarVolume.length, 1, 'the volume is drawn into the mirrored G-buffer too')
+  const pass = planarVolume[0]
+  assert.deepStrictEqual(pass.outputs, PLANAR_GBUF_OUTPUTS, 'into the planar targets')
+  assert.strictEqual(pass.id, PLANAR_PASS_ID,
+    'the planar volume pass shares the planar mesh pass id, or it gets its own depth buffer')
+  assert.strictEqual(
+    new Set(planarPasses.map(p => p.id)).size, 1,
+    'one framebuffer, one depth buffer, for the whole mirrored G-buffer group')
+  assert.strictEqual(pass.uniforms.u_clipEnabled, 1, 'the reflector plane clips the march')
+  assert.strictEqual(pass.uniforms.u_clipPlane, renderer._clipPlane, 'and it is the reflector\'s own plane')
+  assert.deepStrictEqual(
+    Array.from(pass.uniforms.u_cameraPos),
+    Array.from(renderer._reflectionCamera._position),
+    'the marched ray starts at the mirrored eye')
+  // Derived, not copied from the mesh path: the reflection camera is built by
+  // lookAt from mirrored position/target/up, which is a proper rigid transform
+  // (det +1), so nothing about the mirrored view flips triangle winding. Back
+  // faces stay back faces, and 'front' remains both one-fragment-per-pixel and
+  // robust to the mirrored eye landing inside the box.
+  assert.strictEqual(pass.cullMode, 'front', 'the mirrored view does not flip the box winding')
+
+  // Exactly one clear across the whole mirrored group, and it is a draw, not a
+  // clearTexture — the mesh drew first here.
+  assert.deepStrictEqual(
+    planarPasses.map(p => p.clear), [true, false],
+    'the first planar pass clears and no other does')
+  assert.ok(
+    !backend.clearedTextures.some(id => id.startsWith('scene_planar_')),
+    'no separate zero-content clear when the mirrored group drew')
+}
+
+// The mirrored group's clear is a property of the GROUP, not of the mesh list:
+// a reflector with nothing but a volume above it must still clear exactly once,
+// and the volume pass is what does it.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  await renderer.render(reflectedVolumeTree(), { elapsed: 0 }, 'scene_color')
+
+  const planarPasses = backend.passes.filter(p => p.id === PLANAR_PASS_ID)
+  assert.strictEqual(planarPasses.length, 1, 'the reflector itself is excluded, so only the volume is mirrored')
+  assert.strictEqual(planarPasses[0].program, 'scene_volume_gbuf')
+  assert.strictEqual(planarPasses[0].clear, true, 'the volume pass is the first into the mirrored G-buffer')
+  assert.ok(
+    !backend.clearedTextures.some(id => id.startsWith('scene_planar_')),
+    'a volume that drew must suppress the zero-content clear')
+}
+
+// ...and with neither, the zero-content branch still fires exactly once.
 {
   const backend = stubBackend()
   const renderer = new SceneRenderer(backend, null)
   await renderer.initialize(320, 240)
   const tree = volumeTree([
-    { id: 'mirror', type: 'mesh', meshType: 'plane', meshParams: {}, transform: {}, planarReflection: true, children: [], parent: null },
-    { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: { position: [0, 1, 0] }, children: [], parent: null }
+    { id: 'mirror', type: 'mesh', meshType: 'plane', meshParams: {}, transform: {}, planarReflection: true, children: [], parent: null }
   ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  assert.deepStrictEqual(
+    backend.clearedTextures.filter(id => id.startsWith('scene_planar_')),
+    Object.values(PLANAR_GBUF_OUTPUTS),
+    'nothing mirrored, so the four planar targets are zeroed directly')
+}
+
+// The probe is six views of the scene. Volumes come along on every face, into
+// that face's own G-buffer group.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree(
+    [
+      { id: 'ground', type: 'mesh', meshType: 'plane', meshParams: {}, transform: {}, children: [], parent: null },
+      { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }
+    ],
+    {},
+    { reflectionProbe: [0, 1, 0], reflectionProbeSize: 64 }
+  )
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  for (let face = 0; face < 6; face++) {
+    const id = `scene_probe_gbuf_face_${face}`
+    const facePasses = backend.passes.filter(p => p.id === id)
+    assert.deepStrictEqual(
+      facePasses.map(p => p.program), ['scene_mesh_gbuf', 'scene_volume_gbuf'],
+      `face ${face} fills its G-buffer from meshes AND volumes`)
+    assert.deepStrictEqual(facePasses[1].outputs, PROBE_GBUF_OUTPUTS, `face ${face} volume writes the probe targets`)
+    assert.strictEqual(facePasses[1].uniforms.u_clipEnabled, 0, `face ${face} has no clip plane`)
+    assert.deepStrictEqual(facePasses.map(p => p.clear), [true, false], `face ${face} clears exactly once`)
+  }
+  assert.ok(
+    !backend.clearedTextures.some(id => id.startsWith('scene_probe_')),
+    'no separate zero-content clear when a face drew')
+
+  // Amortization is unchanged: after priming, one face per frame, volumes
+  // included.
+  backend.passes.length = 0
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+  const drawnFaces = backend.passes.filter(p => /^scene_probe_gbuf_face_\d+$/.test(p.id))
+  assert.deepStrictEqual(
+    drawnFaces.map(p => p.program), ['scene_mesh_gbuf', 'scene_volume_gbuf'],
+    'one face per frame after priming, still carrying the volume')
+}
+
+// A probe face with only a volume in front of it clears from the volume pass.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree(
+    [{ id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }],
+    {},
+    { reflectionProbe: [0, 0, 0], reflectionProbeSize: 32 }
+  )
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  for (let face = 0; face < 6; face++) {
+    const facePasses = backend.passes.filter(p => p.id === `scene_probe_gbuf_face_${face}`)
+    assert.deepStrictEqual(facePasses.map(p => p.clear), [true], `face ${face}: the volume pass clears`)
+  }
+  assert.ok(
+    !backend.clearedTextures.some(id => id.startsWith('scene_probe_')),
+    'a volume that drew must suppress the zero-content clear')
+}
+
+// A scene with a reflector, a probe and a volume builds all three G-buffer
+// groups, and each group is internally consistent.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = reflectedVolumeTree(
+    [{ id: 'ball', type: 'mesh', meshType: 'sphere', meshParams: {}, transform: { position: [2, 1, 0] }, children: [], parent: null }],
+    { reflectionProbe: [0, 1.5, 0], reflectionProbeSize: 32 }
+  )
   await renderer.render(tree, { elapsed: 0 }, 'scene_color')
 
   const volumePasses = backend.passes.filter(p => p.program === 'scene_volume_gbuf')
-  assert.strictEqual(volumePasses.length, 1, 'the volume is drawn once, into the main G-buffer only')
-  assert.deepStrictEqual(volumePasses[0].outputs, GBUF_OUTPUTS, 'never into the planar or probe G-buffer')
+  assert.strictEqual(volumePasses.length, 8, 'main + planar + six probe faces')
+  const byOutputs = new Map()
+  for (const pass of volumePasses) {
+    const key = pass.outputs.color0
+    byOutputs.set(key, (byOutputs.get(key) || 0) + 1)
+  }
+  assert.strictEqual(byOutputs.get(GBUF_OUTPUTS.color0), 1)
+  assert.strictEqual(byOutputs.get(PLANAR_GBUF_OUTPUTS.color0), 1)
+  assert.strictEqual(byOutputs.get(PROBE_GBUF_OUTPUTS.color0), 6)
+
+  // Each variant is a distinct, reused pass object: one pass mutated across
+  // variants would carry the last variant's outputs into every earlier one.
+  assert.strictEqual(new Set(volumePasses).size, 8, 'one pass object per variant, not one object reused across variants')
+  assert.strictEqual(new Set(volumePasses.map(p => p.id)).size, 8, 'and one pass id per variant')
 }
 
 // Material uniforms on a volume are the mesh material set. surface() albedo is

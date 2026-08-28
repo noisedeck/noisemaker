@@ -47,6 +47,11 @@
  * languages, before that expression runs — the rasterizer near-clips a mesh and
  * the marcher must do the same for its hits or a volume enclosing the camera
  * hides the whole scene. See the test at the site.
+ *
+ * u_clipPlane / u_clipEnabled are the mesh pass's own pair, carrying the same
+ * meaning: the planar reflection renders from a mirrored camera and must not
+ * publish anything behind the reflector's plane. The one difference is WHERE
+ * the test applies — against the marched hit, not the rasterized box face.
  */
 
 /** Marcher constants, matching render3d so the same iso level resolves alike. */
@@ -76,6 +81,9 @@ uniform int u_hasMaterial;
 uniform float u_metallic;
 uniform float u_roughness;
 uniform float u_emissionStrength;
+
+uniform vec4 u_clipPlane;
+uniform int u_clipEnabled;
 
 in vec3 v_worldPos;
 in vec3 v_worldNormal;
@@ -199,6 +207,15 @@ void main() {
 
   vec3 pLocal = ro + rd * tHit;
   vec4 worldHit = u_modelMatrix * vec4(pLocal, 1.0);
+
+  // The planar reflection renders from a mirrored camera and must not publish
+  // anything behind the reflector's plane. The mesh pass applies the same test
+  // to its own interpolated surface point; the marcher's surface point is the
+  // ray HIT, not the rasterized bounding-box face, so testing v_worldPos would
+  // clip the scaffolding and leave the isosurface unclipped. Before calcNormal
+  // because a clipped fragment needs none of its six field samples.
+  if (u_clipEnabled == 1 && dot(vec4(worldHit.xyz, 1.0), u_clipPlane) < 0.0001) discard;
+
   vec3 normal = normalize((u_normalMatrix * vec4(calcNormal(pLocal), 0.0)).xyz);
 
   vec3 albedo = u_baseColor.rgb;
@@ -240,6 +257,7 @@ struct VolumeUniforms {
   u_projectionMatrix: mat4x4f,
   u_normalMatrix: mat4x4f,
   u_baseColor: vec4f,
+  u_clipPlane: vec4f,
   u_cameraPos: vec3f,
   u_threshold: f32,
   u_volumeSize: i32,
@@ -247,6 +265,7 @@ struct VolumeUniforms {
   u_metallic: f32,
   u_roughness: f32,
   u_emissionStrength: f32,
+  u_clipEnabled: i32,
 }
 
 // Bindings 0-3 belong to the vertex stage (the mesh vertex shader's transform
@@ -397,6 +416,18 @@ fn fs_main(input: FragmentInput) -> GBufferOutput {
 
   let pLocal = ro + rd * tHit;
   let worldHit = u.u_modelMatrix * vec4f(pLocal, 1.0);
+
+  // The planar reflection renders from a mirrored camera and must not publish
+  // anything behind the reflector's plane. The mesh pass applies the same test
+  // to its own interpolated surface point; the marcher's surface point is the
+  // ray HIT, not the rasterized bounding-box face, so testing v_worldPos would
+  // clip the scaffolding and leave the isosurface unclipped. Before calcNormal
+  // because a clipped fragment needs none of its six field samples.
+  if (u.u_clipEnabled == 1 && dot(vec4f(worldHit.xyz, 1.0), u.u_clipPlane) < 0.0001) {
+    discard;
+    return output;
+  }
+
   let normal = normalize((u.u_normalMatrix * vec4f(calcNormal(pLocal), 0.0)).xyz);
 
   var albedo = u.u_baseColor.rgb;

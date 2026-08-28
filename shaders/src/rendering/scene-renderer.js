@@ -50,6 +50,22 @@ const PLANAR_GBUF_OUTPUTS = Object.freeze({
   color3: 'scene_planar_gbuf_depth'
 })
 
+/**
+ * Pass id shared by every pass filling the mirrored G-buffer — mesh and volume
+ * alike, for the same reason the main group shares one. See
+ * SCENE_GBUFFER_PASS_ID: the WebGL2 MRT framebuffer, and the depth renderbuffer
+ * hanging off it, are keyed on `mrt_${pass.id}_${outputs}`.
+ */
+const PLANAR_GBUFFER_PASS_ID = 'scene_planar_gbuf_pass'
+
+/**
+ * The same rule, once per cube face — and interned rather than built per face
+ * per frame, since the probe re-renders a face on every frame it is active.
+ */
+const PROBE_GBUFFER_PASS_IDS = Object.freeze(
+  CUBE_FACES.map((_, face) => `scene_probe_gbuf_face_${face}`)
+)
+
 const PROBE_GBUF_TEXTURES = [
   { id: 'scene_probe_gbuf_albedo_metallic', format: 'rgba16f' },
   { id: 'scene_probe_gbuf_normal_roughness', format: 'rgba16f' },
@@ -319,6 +335,7 @@ export class SceneRenderer {
       this._renderReflectionProbe(
         frameState,
         meshNodes,
+        volumeNodes,
         materials,
         lights,
         envTexture,
@@ -351,10 +368,9 @@ export class SceneRenderer {
     // the order irrelevant; volumes run after meshes so the clear decision
     // below is deterministic rather than order-dependent.
     //
-    // Phase 1 scope: the planar reflection and the reflection probe are built
-    // from getMeshNodes() and therefore contain no volumes. A volume is lit,
-    // occluded and occluding in the main view, but does not appear in a
-    // mirror or in the probe cube.
+    // The mirrored G-buffer and each probe face repeat this pairing with their
+    // own targets and their own pass id — a volume is a scene node, so every
+    // view of the scene draws it.
     const volumePasses = this.volumeRenderer.buildVolumePasses(volumeNodes, materials, camera, width, height, {
       firstClear: meshPasses.length === 0
     })
@@ -386,7 +402,7 @@ export class SceneRenderer {
         {
           albedoFallbackTexture: 'scene_albedo_fallback',
           outputs: PLANAR_GBUF_OUTPUTS,
-          passId: 'scene_planar_mesh_pass',
+          passId: PLANAR_GBUFFER_PASS_ID,
           excludeNode: reflector,
           clipPlane: this._clipPlane,
           cullMode: 'none'
@@ -395,7 +411,29 @@ export class SceneRenderer {
       for (const pass of planarMeshPasses) {
         this.backend.executePass(pass, frameState)
       }
-      if (planarMeshPasses.length === 0) {
+      // Volumes are mirrored on the same terms: same camera, same targets, same
+      // pass id (hence the same depth buffer), same clip plane. No excludeNode
+      // — a reflector is a mesh flag, so a volume can never be the receiver.
+      // cullMode stays the renderer's own 'front': the reflection camera is a
+      // proper rigid frame, so the mirroring does not flip the box's winding.
+      // See VolumeRenderer._passState.
+      const planarVolumePasses = this.volumeRenderer.buildVolumePasses(
+        volumeNodes,
+        materials,
+        this._reflectionCamera,
+        width,
+        height,
+        {
+          outputs: PLANAR_GBUF_OUTPUTS,
+          passId: PLANAR_GBUFFER_PASS_ID,
+          clipPlane: this._clipPlane,
+          firstClear: planarMeshPasses.length === 0
+        }
+      )
+      for (const pass of planarVolumePasses) {
+        this.backend.executePass(pass, frameState)
+      }
+      if (planarMeshPasses.length === 0 && planarVolumePasses.length === 0) {
         clearGBuffer(this.backend, PLANAR_GBUF_OUTPUTS)
       }
     }
@@ -567,7 +605,7 @@ export class SceneRenderer {
     this._probeNextFace = 0
   }
 
-  _renderReflectionProbe(frameState, meshNodes, materials, lights, envTexture, envIntensity, background, sky, ground) {
+  _renderReflectionProbe(frameState, meshNodes, volumeNodes, materials, lights, envTexture, envIntensity, background, sky, ground) {
     const camera = this._probeCamera
     const position = this._probePosition
     camera._position[0] = position[0]
@@ -586,6 +624,7 @@ export class SceneRenderer {
       camera.up[1] = cubeFace.up[1]
       camera.up[2] = cubeFace.up[2]
 
+      const passId = PROBE_GBUFFER_PASS_IDS[face]
       const meshPasses = this.meshRenderer.buildMeshPasses(
         meshNodes,
         materials,
@@ -595,11 +634,27 @@ export class SceneRenderer {
         {
           albedoFallbackTexture: 'scene_albedo_fallback',
           outputs: PROBE_GBUF_OUTPUTS,
-          passId: `scene_probe_mesh_face_${face}`
+          passId
         }
       )
       for (const pass of meshPasses) this.backend.executePass(pass, frameState)
-      if (meshPasses.length === 0) {
+      // Volumes come along on every face. The probe primes all six and then
+      // amortizes to one face per frame, so a volume costs one extra march per
+      // frame at probe resolution once the cube is up.
+      const volumePasses = this.volumeRenderer.buildVolumePasses(
+        volumeNodes,
+        materials,
+        camera,
+        this._probeSize,
+        this._probeSize,
+        {
+          outputs: PROBE_GBUF_OUTPUTS,
+          passId,
+          firstClear: meshPasses.length === 0
+        }
+      )
+      for (const pass of volumePasses) this.backend.executePass(pass, frameState)
+      if (meshPasses.length === 0 && volumePasses.length === 0) {
         clearGBuffer(this.backend, PROBE_GBUF_OUTPUTS)
       }
 

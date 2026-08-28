@@ -65,15 +65,18 @@ unconditionally.
      - Writes
      - Runs when
    * - 1
-     - Reflection probe (per cube face: G-buffer fill, then lighting)
+     - Reflection probe (per cube face: G-buffer fill from meshes then volumes,
+       then lighting)
      - ``scene_reflection_probe``
      - ``reflectionProbe`` set and ``reflections > 0``
    * - 2
-     - G-buffer fill, one draw per mesh batched onto one target
+     - G-buffer fill, one draw per mesh and one raymarch per volume, batched
+       onto one target
      - ``scene_gbuf_*`` (MRT ×4)
      - always
    * - 3
-     - Mirrored G-buffer fill, reflector excluded, clipped to the plane
+     - Mirrored G-buffer fill, meshes and volumes, reflector excluded, clipped
+       to the plane
      - ``scene_planar_gbuf_*``
      - a ``reflector()`` exists and ``reflections > 0``
    * - 4

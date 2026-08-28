@@ -397,9 +397,13 @@ Three behaviours worth knowing:
 - **Resolution.** The ``vol0``–``vol7`` atlases are fixed at 64 cubed. A
   ``volume()`` node samples a 64-cube regardless of the ``volumeSize`` the
   producing effect was configured with.
-- **Reflections.** Volumes are lit by scene lights and occlude meshes through
-  the shared depth buffer, but they do not yet appear in planar reflections or
-  the reflection probe — those passes render meshes only.
+- **Reflections.** Volumes are lit by scene lights, occlude meshes through the
+  shared depth buffer, and appear in planar reflections and in the reflection
+  probe on the same terms a mesh does. The reflector's clip plane governs the
+  marched hit, so the part of a volume behind a mirror is absent from its
+  reflection rather than clipped at the bounding box. A volume in the probe
+  costs one extra march per probe face: six on the frame that primes the cube,
+  then one per frame as the probe amortizes.
 
 Groups and transforms
 ---------------------

@@ -54,11 +54,40 @@ const wgsl = volumeFragmentWGSL()
 {
   assert.ok(glsl.includes('discard;'), 'GLSL discards on miss')
   assert.ok(wgsl.includes('discard;'), 'WGSL discards on miss')
-  // Three discards each: the ray missing the box entirely, the march reaching
-  // the exit without crossing the threshold, and the hit landing inside the
-  // near plane (see the near-plane clip test below).
-  assert.strictEqual((glsl.match(/discard;/g) || []).length, 3, 'GLSL: box miss, march miss, near-plane reject')
-  assert.strictEqual((wgsl.match(/discard;/g) || []).length, 3, 'WGSL: box miss, march miss, near-plane reject')
+  // Four discards each: the ray missing the box entirely, the march reaching
+  // the exit without crossing the threshold, the hit landing behind the planar
+  // reflector's clip plane, and the hit landing inside the near plane (see the
+  // two clip tests below).
+  assert.strictEqual((glsl.match(/discard;/g) || []).length, 4, 'GLSL: box miss, march miss, clip-plane reject, near-plane reject')
+  assert.strictEqual((wgsl.match(/discard;/g) || []).length, 4, 'WGSL: box miss, march miss, clip-plane reject, near-plane reject')
+}
+
+// The planar reflection renders from a mirrored camera and must not show
+// anything behind the reflector's own plane. The mesh pass discards such a
+// fragment on its interpolated surface point (gbuffer.js). The marcher's
+// surface point is the ray HIT, not the rasterized bounding-box face, so the
+// same test applied to v_worldPos would clip the scaffolding and leave the
+// isosurface unclipped. Same uniforms, same epsilon, same comparison as the
+// mesh path — identical text in both languages.
+{
+  const CLIP_EXPR = 'dot(vec4(worldHit.xyz, 1.0), u_clipPlane) < 0.0001'
+  const CLIP_EXPR_WGSL = 'dot(vec4f(worldHit.xyz, 1.0), u.u_clipPlane) < 0.0001'
+  assert.ok(glsl.includes(`u_clipEnabled == 1 && ${CLIP_EXPR}`), `GLSL clip-plane reject: ${CLIP_EXPR}`)
+  assert.ok(wgsl.includes(`u.u_clipEnabled == 1 && ${CLIP_EXPR_WGSL}`), `WGSL clip-plane reject: ${CLIP_EXPR_WGSL}`)
+
+  // It tests the hit, not the box face — v_worldPos must never reach the clip
+  // comparison.
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    assert.ok(!/dot\(vec4f?\(\s*(input\.)?v_worldPos/.test(src),
+      `${lang} must clip the marched hit, not the bounding box surface`)
+  }
+
+  // Both languages declare the pair the mesh material struct carries, so the
+  // renderer supplies one uniform set for both programs.
+  assert.ok(glsl.includes('uniform vec4 u_clipPlane;'), 'GLSL declares u_clipPlane')
+  assert.ok(glsl.includes('uniform int u_clipEnabled;'), 'GLSL declares u_clipEnabled')
+  assert.ok(wgsl.includes('u_clipPlane: vec4f,'), 'WGSL declares u_clipPlane')
+  assert.ok(wgsl.includes('u_clipEnabled: i32,'), 'WGSL declares u_clipEnabled')
 }
 
 // A hit INSIDE the near plane must be discarded, not clamped to the front of
