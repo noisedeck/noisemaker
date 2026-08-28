@@ -7,6 +7,12 @@
  * "blob in space" view lives in the sibling renderCubemap3d.)
  *
  * The volume's red channel drives per-step opacity; RGB is the emitted color.
+ *
+ * GENERATED FILE — do not edit. The atlas sampling below is the same text
+ * render3d marches with, from shaders/src/rendering/marcher-fragments.js; edit a
+ * fragment (or this effect's bespoke parts in
+ * shaders/scripts/generate-marcher-shaders.mjs), then re-run the generator:
+ * node shaders/scripts/generate-marcher-shaders.mjs
  */
 
 @group(0) @binding(0) var<uniform> resolution: vec2<f32>;

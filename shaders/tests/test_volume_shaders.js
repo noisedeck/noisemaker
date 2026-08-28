@@ -1,6 +1,7 @@
 import assert from 'assert'
 import { volumeFragmentGLSL, volumeFragmentWGSL } from '../src/rendering/volume-shaders.js'
 import { GBufferConfig } from '../src/rendering/gbuffer.js'
+import { GLSL_FRAGMENTS, WGSL_FRAGMENTS } from '../src/rendering/marcher-fragments.js'
 
 const glsl = volumeFragmentGLSL()
 const wgsl = volumeFragmentWGSL()
@@ -143,13 +144,34 @@ const wgsl = volumeFragmentWGSL()
 
 // Marcher constants match render3d's, so a program moved from the marcher to the
 // scene graph resolves the same isosurface.
+//
+// Read out of the shared fragments rather than written down twice: the legacy
+// marchers' .glsl/.wgsl are generated from marcher-fragments.js, so parsing the
+// numbers from there makes them single-sourced across the two implementations
+// even though the surrounding text cannot be (see the header of
+// volume-shaders.js). Changing render3d's step budget now fails here.
 {
-  assert.ok(glsl.includes('#define MAX_STEPS 256'), 'GLSL MAX_STEPS 256')
-  assert.ok(wgsl.includes('const MAX_STEPS: i32 = 256;'), 'WGSL MAX_STEPS 256')
-  assert.ok(glsl.includes('#define BISECTION_STEPS 8'), 'GLSL 8 bisection iterations')
-  assert.ok(wgsl.includes('const BISECTION_STEPS: i32 = 8;'), 'WGSL 8 bisection iterations')
-  assert.ok(glsl.includes('1.5 / float(u_volumeSize)'), 'GLSL step size 1.5/volumeSize')
-  assert.ok(wgsl.includes('1.5 / f32(u.u_volumeSize)'), 'WGSL step size 1.5/volumeSize')
+  const MAX_STEPS = Number(/const int MAX_STEPS = (\d+);/.exec(GLSL_FRAGMENTS.constants)[1])
+  const MAX_STEPS_WGSL = Number(/const MAX_STEPS: i32 = (\d+);/.exec(WGSL_FRAGMENTS.constants)[1])
+  const BISECTION = Number(/for \(int j = 0; j < (\d+); j\+\+\)/.exec(GLSL_FRAGMENTS.isosurfaceTrace)[1])
+  const BISECTION_WGSL = Number(/for \(var j: i32 = 0; j < (\d+); j = j \+ 1\)/.exec(WGSL_FRAGMENTS.isosurfaceTrace)[1])
+  const STEP_FACTOR = /float stepSize = ([\d.]+) \/ float\(volumeSize\);/.exec(GLSL_FRAGMENTS.isosurfaceTrace)[1]
+  const STEP_FACTOR_WGSL = /let stepSize = ([\d.]+) \/ f32\(volumeSize\);/.exec(WGSL_FRAGMENTS.isosurfaceTrace)[1]
+
+  assert.strictEqual(MAX_STEPS, MAX_STEPS_WGSL, 'the shared fragments agree on MAX_STEPS')
+  assert.strictEqual(BISECTION, BISECTION_WGSL, 'the shared fragments agree on the bisection count')
+  assert.strictEqual(STEP_FACTOR, STEP_FACTOR_WGSL, 'the shared fragments agree on the step factor')
+
+  assert.ok(glsl.includes(`#define MAX_STEPS ${MAX_STEPS}`), `GLSL MAX_STEPS ${MAX_STEPS}`)
+  assert.ok(wgsl.includes(`const MAX_STEPS: i32 = ${MAX_STEPS};`), `WGSL MAX_STEPS ${MAX_STEPS}`)
+  assert.ok(glsl.includes(`#define BISECTION_STEPS ${BISECTION}`), `GLSL ${BISECTION} bisection iterations`)
+  assert.ok(wgsl.includes(`const BISECTION_STEPS: i32 = ${BISECTION};`), `WGSL ${BISECTION} bisection iterations`)
+  assert.ok(glsl.includes(`${STEP_FACTOR} / float(u_volumeSize)`), `GLSL step size ${STEP_FACTOR}/volumeSize`)
+  assert.ok(wgsl.includes(`${STEP_FACTOR} / f32(u.u_volumeSize)`), `WGSL step size ${STEP_FACTOR}/volumeSize`)
+
+  // The DDA bound is render3d's MAX_STEPS * 2, stated as such in the source.
+  assert.ok(glsl.includes(`#define VOXEL_MAX_STEPS ${MAX_STEPS * 2}`), 'GLSL DDA bound is MAX_STEPS * 2')
+  assert.ok(wgsl.includes(`const VOXEL_MAX_STEPS: i32 = ${MAX_STEPS * 2};`), 'WGSL DDA bound is MAX_STEPS * 2')
 }
 
 // The 2D atlas emulates a 3D texture the same way every existing marcher does:
@@ -341,6 +363,166 @@ const wgsl = volumeFragmentWGSL()
     assert.strictEqual((src.match(/clip\.w <= 0\.0 \|\| clip\.z < -clip\.w/g) || []).length, 1,
       `${lang} tests the near plane once, for both modes`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Correspondence with the legacy marcher's shared fragments.
+//
+// shaders/src/rendering/marcher-fragments.js is the single textual source for
+// render3d / renderCubemap3d / renderCubemapSurface. This file cannot assemble
+// itself from that text — every fragment names uniforms this pass does not have
+// (`volumeSize` vs `u_volumeSize`, and in WGSL a `u.` accessor into a struct,
+// because bindings 0-3 belong to the mesh vertex stage), and the fragments are
+// deliberately verbatim rather than templated, which is what makes the
+// generator's byte-compare gate mean anything. The full reasoning is in the
+// header of volume-shaders.js.
+//
+// What is left is two implementations of the same maths, so what follows is the
+// drift gate between them: each row of that header's correspondence table,
+// asserted. An edit to a fragment that leaves this file behind — or the reverse
+// — fails here rather than in a rendered frame.
+// ---------------------------------------------------------------------------
+
+/** Strip comments, collapse whitespace, canonicalize the names that must differ. */
+function normalizeMarcher(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/\bu\.u_volumeSize\b|\bu_volumeSize\b|\bvolumeSize\b|\bvolSize\b/g, 'SIZE')
+    .replace(/\bu\.u_threshold\b|\bu_threshold\b|\bthreshold\b/g, 'THRESHOLD')
+    .replace(/\bu_volumeAtlas\b|\bvolumeCache\b/g, 'ATLAS')
+    .replace(/\bvec2f\b/g, 'vec2<f32>')
+    .replace(/\bvec3f\b/g, 'vec3<f32>')
+    .replace(/\bvec4f\b/g, 'vec4<f32>')
+    .replace(/\bvec2i\b/g, 'vec2<i32>')
+    .replace(/\bvec3i\b/g, 'vec3<i32>')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** One brace-balanced top-level function, from its signature to its closing brace. */
+function extractFunction(src, signature) {
+  const start = src.indexOf(signature)
+  assert.ok(start >= 0, `precondition: ${signature} is present`)
+  let depth = 0
+  for (let i = src.indexOf('{', start); i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1)
+  }
+  throw new Error(`unbalanced braces after ${signature}`)
+}
+
+// calcNormal: the same six central-difference samples, the same eps, the same
+// degenerate fallback. Identical after normalization, with one documented delta
+// in WGSL — `let n` here for the fragment's `var n`; n is reassigned in neither.
+{
+  assert.strictEqual(
+    normalizeMarcher(GLSL_FRAGMENTS.calcNormal),
+    normalizeMarcher(extractFunction(glsl, 'vec3 calcNormal')),
+    'GLSL calcNormal has drifted from the shared fragment')
+
+  const wgslFragment = normalizeMarcher(WGSL_FRAGMENTS.calcNormal)
+    .replace('var n = vec3<f32>(dx, dy, dz);', 'let n = vec3<f32>(dx, dy, dz);')
+  assert.strictEqual(
+    wgslFragment,
+    normalizeMarcher(extractFunction(wgsl, 'fn calcNormal')),
+    'WGSL calcNormal has drifted from the shared fragment (beyond the documented var/let delta)')
+}
+
+// sampleVolume: the eight corners are fetched in the same order, each named for
+// its own index triple, and the three interpolation stages that follow are the
+// same text. The fetch CALL differs by arity — the fragment passes volSize, this
+// file reads the uniform — so the corner order is compared as data, not as text.
+{
+  const corners = (src) =>
+    [...src.matchAll(/\bc(\d{3}) = (?:texelFetch|textureLoad)\([^;]*?\bi([01])\.x, i([01])\.y, i([01])\.z/g)]
+      .map((m) => ({ name: m[1], index: `${m[2]}${m[3]}${m[4]}` }))
+
+  for (const [lang, fragment, scene, signature] of [
+    ['GLSL', GLSL_FRAGMENTS.sampleVolume, glsl, 'vec4 sampleVolume'],
+    ['WGSL', WGSL_FRAGMENTS.sampleVolume, wgsl, 'fn sampleVolume'],
+  ]) {
+    const sceneFn = extractFunction(scene, signature)
+    const a = corners(fragment)
+    const b = corners(sceneFn)
+    assert.strictEqual(a.length, 8, `precondition: the ${lang} fragment fetches eight corners`)
+    assert.deepStrictEqual(b, a, `${lang} sampleVolume fetches different corners than the shared fragment`)
+    for (const corner of a) {
+      assert.strictEqual(corner.name, corner.index,
+        `${lang} corner c${corner.name} is loaded from index ${corner.index}`)
+    }
+
+    // The interpolation tail, verbatim once the fraction is renamed (`frac` in
+    // the fragment, `f` here) — the substance of the trilinear blend.
+    const tail = (src) => normalizeMarcher(src.slice(src.indexOf('c00 =')))
+    assert.strictEqual(
+      tail(fragment).replace(/\bfrac\b/g, 'f'), tail(sceneFn),
+      `${lang} sampleVolume's interpolation has drifted from the shared fragment`)
+
+    // The documented head deltas, asserted so they stay exactly these three.
+    const head = normalizeMarcher(sceneFn.slice(0, sceneFn.indexOf('c000')))
+    assert.ok(head.includes('vec3<f32>(0.0), vec3<f32>(1.0));') || head.includes('clamp(p * 0.5 + 0.5, 0.0, 1.0);'),
+      `${lang} sampleVolume clamps the merged [0,1] mapping in one statement`)
+    assert.ok(!/= SIZE;/.test(head),
+      `${lang} sampleVolume does not keep the fragment's redundant volSize local`)
+  }
+}
+
+// getField: the same signed field, minus render3d's compile-time INVERT branch,
+// which this pass has no define machinery to supply.
+{
+  assert.ok(GLSL_FRAGMENTS.getField.includes('if (INVERT)'),
+    'precondition: the shared fragment carries the INVERT branch')
+  assert.ok(WGSL_FRAGMENTS.getField.includes('if (INVERT)'),
+    'precondition: the shared WGSL fragment carries the INVERT branch')
+  assert.ok(!glsl.includes('INVERT'), 'GLSL marcher has no INVERT define to honour')
+  assert.ok(!wgsl.includes('INVERT'), 'WGSL marcher has no INVERT define to honour')
+  assert.ok(glsl.includes('return u_threshold - sampleVolume(p).r;'), 'GLSL signed field')
+  assert.ok(wgsl.includes('return u.u_threshold - sampleVolume(p).r;'), 'WGSL signed field')
+}
+
+// isosurfaceTrace: same constants and same two entry cases, different shape.
+// The fragment runs its own slab test and returns an IsoHit; here both modes
+// share ONE slab test in main() and the smooth march is inlined against it, so
+// there is no isosurfaceTrace function to call and adopting one would intersect
+// the box twice on the smooth path.
+{
+  for (const [lang, fragment, scene] of [
+    ['GLSL', GLSL_FRAGMENTS.isosurfaceTrace, glsl],
+    ['WGSL', WGSL_FRAGMENTS.isosurfaceTrace, wgsl],
+  ]) {
+    assert.ok(fragment.includes('tEnter > tExit || tExit < 0.0'),
+      `precondition: the ${lang} fragment runs its own slab test`)
+    // The name survives in a comment at the site; what must not exist is a call.
+    assert.ok(!/isosurfaceTrace\s*\(/.test(scene),
+      `${lang} inlines the march instead of calling isosurfaceTrace`)
+    assert.strictEqual((scene.match(/tEnter > tExit \|\| tExit < 0\.0/g) || []).length, 1,
+      `${lang} intersects the box exactly once, for both modes`)
+    assert.ok(fragment.includes('max(tEnter, 0.0)'),
+      `precondition: the ${lang} fragment clamps tStart for a camera inside the box`)
+    assert.ok(scene.includes('max(tEnter, 0.0)'), `${lang} clamps tStart the same way`)
+    assert.ok(fragment.includes('prevField < 0.0'),
+      `precondition: the ${lang} fragment hits the box face when it starts inside`)
+    assert.ok(scene.includes('prevField < 0.0'), `${lang} keeps the enters-already-inside early hit`)
+  }
+}
+
+// voxelTrace: the one function that must NOT converge. render3d takes the next
+// wall from voxelToWorld(), a cell CENTRE — half a cell past the wall. That bias
+// is invisible where the hit only feeds shading and dist/MAX_DIST, and wrong
+// here, where it becomes the G-buffer's world position and the fragment's depth.
+{
+  assert.ok(GLSL_FRAGMENTS.voxelTrace.includes('voxelToWorld(voxel + max(step, ivec3(0)))'),
+    'precondition: the shared GLSL fragment takes the wall from a cell centre')
+  assert.ok(WGSL_FRAGMENTS.voxelTrace.includes('voxelToWorld(voxel + max(step, vec3<i32>(0)))'),
+    'precondition: the shared WGSL fragment takes the wall from a cell centre')
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    // The name survives in the comment that explains the divergence at its
+    // site; what must not exist is a call.
+    assert.ok(!/voxelToWorld\s*\(/.test(src.replace(/\/\/[^\n]*/g, '')),
+      `${lang} must not adopt the shared fragment's half-cell wall`)
+  }
+  // The scene's own boundary form is asserted above, at the DDA section.
 }
 
 console.log('Volume shader tests passed')

@@ -27,6 +27,61 @@
  * exactly what `createBox({ size: [2, 2, 2] })` spans, so the slab test, step
  * size and trilinear atlas sampling are copied from render3d unchanged.
  *
+ * ---------------------------------------------------------------------------
+ * Relationship to shaders/src/rendering/marcher-fragments.js
+ * ---------------------------------------------------------------------------
+ *
+ * That module is the single textual source for the legacy render/* marchers —
+ * render3d, renderCubemap3d and renderCubemapSurface, whose committed .glsl and
+ * .wgsl files are generated from it. This file does NOT assemble itself from
+ * those fragments, and the reason is mechanical rather than a matter of taste.
+ *
+ * The fragments are verbatim shader text with no interpolation, which is what
+ * makes the generator's byte-compare gate mean anything: what you read there is
+ * what ships. That text reads `volumeSize`, `threshold` and `volumeCache` at
+ * module scope. This pass reads `u_volumeSize`, `u_threshold` and
+ * `u_volumeAtlas`, and in WGSL reads them out of the `VolumeUniforms` struct
+ * behind a `u.` accessor, because bindings 0-3 belong to the shared mesh vertex
+ * stage. No reformatting closes that gap; only turning the fragments into
+ * name-parameterized templates would, at the cost of the property the byte
+ * gate rests on. WGSL has no preprocessor to alias the names around, either.
+ *
+ * What the two implementations do owe each other, measured against the
+ * fragments with comments stripped, whitespace collapsed and those uniform
+ * names canonicalized:
+ *
+ *   calcNormal       IDENTICAL (in WGSL, modulo `let n` here for the fragment's
+ *                    `var n` — n is never reassigned in either)
+ *   sampleVolume     identical but for three cosmetic deltas and one merged
+ *                    statement: the fragment keeps a redundant `volSize` local,
+ *                    names the fraction `frac`, takes `worldPos`, and splits
+ *                    `uvw = p * 0.5 + 0.5; uvw = clamp(uvw, 0, 1);` where this
+ *                    file merges the two
+ *   atlasTexel       same index arithmetic; the fragment takes volSize as a
+ *                    parameter (in WGSL, three scalars, named volumeToAtlas),
+ *                    this file reads the uniform
+ *   sampleVoxel      same clamped nearest-neighbour fetch, inlined here
+ *   getField         the fragment carries render3d's compile-time INVERT
+ *                    branch, which this pass has no define machinery to supply
+ *   isosurfaceTrace  same constants (MAX_STEPS, stepSize 1.5/N, the bisection
+ *                    count), same camera-inside `max(tEnter, 0.0)`, same
+ *                    enters-already-inside early hit — but not the same shape.
+ *                    The fragment is self-contained: it runs its own slab test
+ *                    and returns an IsoHit. Here BOTH modes share one slab test
+ *                    done in main(), and the smooth march is inlined against
+ *                    it, so adopting the function would run the slab test twice
+ *                    on the smooth path and hand the voxel branch a second
+ *                    tmin.
+ *   voxelTrace       DELIBERATELY DIVERGENT and must stay so — the wall
+ *                    derivation at its site below is a fix to render3d's
+ *                    half-cell bias, not a copy of it.
+ *
+ * The numeric constants ARE single-sourced, by assertion rather than by shared
+ * text: test_volume_shaders.js parses MAX_STEPS, the bisection count and the
+ * step-size factor out of the shared fragments and fails if this file drifts
+ * from them. That test also pins each row above, so a fragment edit that leaves
+ * this file behind fails the suite instead of quietly changing one of the two.
+ *
  * The gradient comes out of the field in LOCAL space and is carried to world by
  * u_normalMatrix. That is the correct matrix and not a coincidence:
  * u_normalMatrix is transpose(inverse(worldMatrix)) — the local-to-world normal

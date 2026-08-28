@@ -57,19 +57,19 @@ fn sampleVoxel(voxel: vec3<i32>) -> vec4<f32> {
 fn sampleVolume(worldPos: vec3<f32>) -> vec4<f32> {
     let volSize = volumeSize;
     let volSizeF = f32(volSize);
-    
+
     // Convert world position [-1, 1] to normalized volume coords [0, 1]
     var uvw = worldPos * 0.5 + 0.5;
     uvw = clamp(uvw, vec3<f32>(0.0), vec3<f32>(1.0));
-    
+
     // Convert to texel coordinates
     let texelPos = uvw * (volSizeF - 1.0);
     let texelFloor = floor(texelPos);
     let frac = texelPos - texelFloor;
-    
+
     let i0 = vec3<i32>(texelFloor);
     let i1 = min(i0 + 1, vec3<i32>(volSize - 1));
-    
+
     // Trilinear filtering - load 8 corners
     let c000 = textureLoad(volumeCache, volumeToAtlas(i0.x, i0.y, i0.z, volSize), 0);
     let c100 = textureLoad(volumeCache, volumeToAtlas(i1.x, i0.y, i0.z, volSize), 0);
@@ -79,16 +79,16 @@ fn sampleVolume(worldPos: vec3<f32>) -> vec4<f32> {
     let c101 = textureLoad(volumeCache, volumeToAtlas(i1.x, i0.y, i1.z, volSize), 0);
     let c011 = textureLoad(volumeCache, volumeToAtlas(i0.x, i1.y, i1.z, volSize), 0);
     let c111 = textureLoad(volumeCache, volumeToAtlas(i1.x, i1.y, i1.z, volSize), 0);
-    
+
     // Trilinear interpolation
     let c00 = mix(c000, c100, frac.x);
     let c10 = mix(c010, c110, frac.x);
     let c01 = mix(c001, c101, frac.x);
     let c11 = mix(c011, c111, frac.x);
-    
+
     let c0 = mix(c00, c10, frac.y);
     let c1 = mix(c01, c11, frac.y);
-    
+
     return mix(c0, c1, frac.z);
 }
 
@@ -139,10 +139,10 @@ fn voxelTrace(ro: vec3<f32>, rd: vec3<f32>) -> VoxelHit {
     result.dist = -1.0;
     result.normal = vec3<f32>(0.0);
     result.voxel = vec3<i32>(0);
-    
+
     let volSize = volumeSize;
     let voxelSize = 2.0 / f32(volSize);  // world-space size of one voxel
-    
+
     // Ray-box intersection with the volume bounds [-1, 1]
     let invRd = 1.0 / rd;
     let t0 = (-1.0 - ro) * invRd;
@@ -151,29 +151,29 @@ fn voxelTrace(ro: vec3<f32>, rd: vec3<f32>) -> VoxelHit {
     let tmaxV = max(t0, t1);
     let tEnter = max(max(tminV.x, tminV.y), tminV.z);
     let tExit = min(min(tmaxV.x, tmaxV.y), tmaxV.z);
-    
+
     if (tEnter > tExit || tExit < 0.0) {
         return result;  // No intersection with volume
     }
-    
+
     // Start position (slightly inside the volume)
     var tStart = max(tEnter + 0.001, 0.0);
     let pos = ro + rd * tStart;
-    
+
     // Current voxel
     var voxel = worldToVoxel(pos);
     voxel = clamp(voxel, vec3<i32>(0), vec3<i32>(volSize - 1));
-    
+
     // Step direction
     let step = vec3<i32>(sign(rd));
-    
+
     // Distance to next voxel boundary in each axis
     let voxelBounds = voxelToWorld(voxel + max(step, vec3<i32>(0)));
     var tMaxVec = (voxelBounds - ro) * invRd;
-    
+
     // Distance to cross one voxel in each axis
     let tDelta = abs(vec3<f32>(voxelSize) * invRd);
-    
+
     // Traverse voxels
     var lastNormal = vec3<f32>(0.0);
     for (var i: i32 = 0; i < MAX_STEPS * 2; i = i + 1) {
@@ -181,13 +181,13 @@ fn voxelTrace(ro: vec3<f32>, rd: vec3<f32>) -> VoxelHit {
         if (voxel.x >= 0 && voxel.x < volSize &&
             voxel.y >= 0 && voxel.y < volSize &&
             voxel.z >= 0 && voxel.z < volSize) {
-            
+
             if (isVoxelSolid(voxel)) {
-                // Hit! 
+                // Hit!
                 result.dist = tStart;
                 result.normal = lastNormal;
                 result.voxel = voxel;
-                
+
                 // If this is the first voxel, compute entry normal
                 if (lastNormal.x == 0.0 && lastNormal.y == 0.0 && lastNormal.z == 0.0) {
                     if (tminV.x > tminV.y && tminV.x > tminV.z) {
@@ -201,7 +201,7 @@ fn voxelTrace(ro: vec3<f32>, rd: vec3<f32>) -> VoxelHit {
                 return result;
             }
         }
-        
+
         // Step to next voxel (DDA)
         if (tMaxVec.x < tMaxVec.y) {
             if (tMaxVec.x < tMaxVec.z) {
@@ -228,27 +228,27 @@ fn voxelTrace(ro: vec3<f32>, rd: vec3<f32>) -> VoxelHit {
                 lastNormal = vec3<f32>(0.0, 0.0, -f32(step.z));
             }
         }
-        
+
         // Check if we've exited the volume
         if (tStart > tExit) { break; }
     }
-    
+
     return result;
 }
 
 // Compute smooth normal using central differences on the SDF field
 fn calcNormal(p: vec3<f32>) -> vec3<f32> {
     let eps = 2.0 / f32(volumeSize);
-    
+
     let dx = getField(p + vec3<f32>(eps, 0.0, 0.0)) - getField(p - vec3<f32>(eps, 0.0, 0.0));
     let dy = getField(p + vec3<f32>(0.0, eps, 0.0)) - getField(p - vec3<f32>(0.0, eps, 0.0));
     let dz = getField(p + vec3<f32>(0.0, 0.0, eps)) - getField(p - vec3<f32>(0.0, 0.0, eps));
-    
+
     var n = vec3<f32>(dx, dy, dz);
-    
+
     let len = length(n);
     if (len < 0.0001) { return vec3<f32>(0.0, 1.0, 0.0); }
-    
+
     return n / len;
 }
 
@@ -265,7 +265,7 @@ fn isosurfaceTrace(ro: vec3<f32>, rd: vec3<f32>) -> IsoHit {
     result.hit = false;
     result.dist = -1.0;
     result.pos = vec3<f32>(0.0);
-    
+
     let invRd = 1.0 / rd;
     let t0 = (-1.0 - ro) * invRd;
     let t1 = (1.0 - ro) * invRd;
@@ -273,15 +273,15 @@ fn isosurfaceTrace(ro: vec3<f32>, rd: vec3<f32>) -> IsoHit {
     let tmaxV = max(t0, t1);
     let tEnter = max(max(tminV.x, tminV.y), tminV.z);
     let tExit = min(min(tmaxV.x, tmaxV.y), tmaxV.z);
-    
+
     if (tEnter > tExit || tExit < 0.0) { return result; }
-    
+
     let tStart = max(tEnter, 0.0);
     let stepSize = 1.5 / f32(volumeSize);
-    
+
     var t = tStart;
     var prevField = getField(ro + rd * t);
-    
+
     // If we start inside solid (e.g., inverted volume), hit the bounding box surface
     if (prevField < 0.0) {
         result.hit = true;
@@ -289,23 +289,23 @@ fn isosurfaceTrace(ro: vec3<f32>, rd: vec3<f32>) -> IsoHit {
         result.pos = ro + rd * tStart;
         return result;
     }
-    
+
     for (var i: i32 = 0; i < MAX_STEPS; i = i + 1) {
         t = t + stepSize;
         if (t > tExit) { break; }
-        
+
         let p = ro + rd * t;
         let field = getField(p);
-        
+
         if (prevField * field < 0.0) {
             var tLo = t - stepSize;
             var tHi = t;
             var pf = prevField;
-            
+
             for (var j: i32 = 0; j < 8; j = j + 1) {
                 let tMid = (tLo + tHi) * 0.5;
                 let fMid = getField(ro + rd * tMid);
-                
+
                 if (pf * fMid < 0.0) {
                     tHi = tMid;
                 } else {
@@ -313,16 +313,16 @@ fn isosurfaceTrace(ro: vec3<f32>, rd: vec3<f32>) -> IsoHit {
                     pf = fMid;
                 }
             }
-            
+
             result.hit = true;
             result.dist = (tLo + tHi) * 0.5;
             result.pos = ro + rd * result.dist;
             return result;
         }
-        
+
         prevField = field;
     }
-    
+
     return result;
 }
 
@@ -330,46 +330,46 @@ fn isosurfaceTrace(ro: vec3<f32>, rd: vec3<f32>) -> IsoHit {
 fn shade(p: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
     let n = calcNormal(p);
     let lightDir = normalize(vec3<f32>(1.0, 1.0, -1.0));
-    
+
     let diff = max(dot(n, lightDir), 0.0);
     let amb: f32 = 0.15;
-    
+
     let halfVec = normalize(lightDir - rd);
     let spec = pow(max(dot(n, halfVec), 0.0), 32.0);
-    
+
     let rim = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
-    
+
     // Use RGB from volume for coloring
     let volColor = sampleVolume(p);
     var baseColor = volColor.rgb;
-    
+
     // If volume appears grayscale (R≈G≈B), use a neutral gray
     let colorVariance = length(volColor.rgb - vec3<f32>(volColor.r));
     if (colorVariance < 0.01) {
         baseColor = vec3<f32>(0.75);
     }
-    
+
     return baseColor * (amb + diff * 0.7) + spec * 0.2 + rim * 0.15;
 }
 
 // Voxel shading with flat face normals
 fn shadeVoxel(p: vec3<f32>, rd: vec3<f32>, n: vec3<f32>, voxel: vec3<i32>) -> vec3<f32> {
     let lightDir = normalize(vec3<f32>(1.0, 1.0, -1.0));
-    
+
     let diff = max(dot(n, lightDir), 0.0);
     let amb: f32 = 0.3;
-    
+
     // Use RGB from volume for coloring
     let volColor = sampleVoxel(voxel);
     var baseColor = volColor.rgb;
-    
+
     // If volume appears grayscale, apply face-based shading variation
     let colorVariance = length(volColor.rgb - vec3<f32>(volColor.r));
     if (colorVariance < 0.01) {
         let faceShade = abs(n.x) * 0.9 + abs(n.y) * 1.0 + abs(n.z) * 0.85;
         baseColor = vec3<f32>(0.7 * faceShade);
     }
-    
+
     return baseColor * (amb + diff * 0.7);
 }
 
@@ -383,12 +383,12 @@ fn main(@builtin(position) position: vec4<f32>) -> FragmentOutput {
     let uv = ((position.xy + tileOffset) - 0.5 * fullRes) / (0.5 * fullRes.y);
     let ro = vec3<f32>(0.0);
     let rd = normalize(cubeBasis * vec3<f32>(uv.x, -uv.y, 1.0));
-    
+
     var color: vec3<f32>;
     var normal = vec3<f32>(0.0, 0.0, 1.0);
     var depth: f32 = 1.0;
     var alpha: f32 = 1.0;
-    
+
     // FILTERING is a compile-time const; the optimizer eliminates the
     // unused raymarching path entirely.
     if (FILTERING == 1) {
@@ -413,9 +413,9 @@ fn main(@builtin(position) position: vec4<f32>) -> FragmentOutput {
             alpha = bgAlpha;
         }
     }
-    
+
     color = pow(color, vec3<f32>(1.0 / 2.2));
-    
+
     var output: FragmentOutput;
     output.color = vec4<f32>(color, alpha);
     output.geoOut = vec4<f32>(normal * 0.5 + 0.5, depth);
