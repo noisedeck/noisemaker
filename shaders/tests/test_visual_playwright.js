@@ -31,6 +31,7 @@ const MATERIAL_BANDING_ONLY = process.argv.includes('--material-banding-only')
 const SCENE_ANIMATION_ONLY = process.argv.includes('--scene-animation-only')
 const CROSS_BACKEND_ONLY = process.argv.includes('--cross-backend-only')
 const VOLUME_ONLY = process.argv.includes('--volume-only')
+const VOXEL_ONLY = process.argv.includes('--voxel-only')
 
 /**
  * Cross-backend maxDelta ceiling for the volume scene's lit colour.
@@ -937,8 +938,11 @@ async function testCrossBackendParity(browser, port) {
  * outright which surface won each pixel.
  * @param {number} volumeY - Height of the volume's centre. 0 buries the lower
  *   half in the plane; 1.05 lifts the whole box clear of it.
+ * @param {string} [mode="smooth"] - Marching mode. The scene is otherwise
+ *   identical in both, so every measurement below is a like-for-like
+ *   comparison of the two algorithms on one field, one camera and one light.
  */
-function volumeScene(volumeY) {
+function volumeScene(volumeY, mode = 'smooth') {
   return `search synth3d
 noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
 scene(
@@ -948,7 +952,7 @@ scene(
   light(type: "directional", dir: [0.4, -1, 0.6], intensity: 2.2),
   mesh("plane", width: 12, height: 12)
     .material(solid(color: [0.05, 0.1, 0.9]).pbr(metallic: 0, roughness: 0.9)),
-  volume(vol0, threshold: 0.5, pos: [0, ${volumeY}, 0])
+  volume(vol0, threshold: 0.5, mode: "${mode}", pos: [0, ${volumeY}, 0])
     .material(solid(color: [0.95, 0.15, 0.05]).pbr(metallic: 0, roughness: 0.6))
 ).write(o0)
 render(o0)`
@@ -984,13 +988,13 @@ async function volumeAlbedoCensus(page) {
   })
 }
 
-async function loadVolumeScene(page, volumeY) {
+async function loadVolumeScene(page, volumeY, mode = 'smooth') {
   // 'Edit DSL program' toggles the editor, so opening it a second time closes
   // it and every later fill() waits forever on a hidden textbox.
   if (!(await page.getByRole('textbox').isVisible().catch(() => false))) {
     await page.getByRole('button', { name: 'Edit DSL program' }).click()
   }
-  await page.getByRole('textbox').fill(volumeScene(volumeY))
+  await page.getByRole('textbox').fill(volumeScene(volumeY, mode))
   await page.getByRole('button', { name: 'run', exact: true }).click()
   await page.waitForFunction(
     () => document.getElementById('status')?.textContent === 'compiled successfully',
@@ -1128,6 +1132,274 @@ async function testVolumeCrossBackendParity(browser, port) {
     scene: sceneName,
     backend: 'webgl2-vs-webgpu',
     status: withinCeiling ? 'pass' : 'fail',
+    reason: `maxDelta=${maxDelta} over ${pct.toFixed(4)}% of channels (ceiling ${CEILING}; not bit-identical)`
+  }
+}
+
+/**
+ * Horizontal run-length statistics over the volume's G-buffer world normals.
+ *
+ * This is what distinguishes the two marching modes numerically, and it is
+ * derived from what they are rather than from a golden image.
+ *
+ * A voxel hit's normal is the face of the cell wall the DDA entered through:
+ * one of six axis-aligned directions, constant across the whole visible face of
+ * a cell. Scanning a row of the normal target therefore yields long runs of the
+ * identical encoded triple, and the whole image can only contain six distinct
+ * values (the node is unrotated, so local axes are world axes). A smooth hit's
+ * normal is the central difference of a trilinearly-filtered field, which turns
+ * over continuously along the row.
+ *
+ * Runs are counted only over pixels the volume itself won — red albedo, and not
+ * the depth sentinel — so the ground plane's own flat normal cannot contribute.
+ * A non-volume pixel ends the current run rather than joining the next.
+ */
+async function volumeNormalRuns(page) {
+  return page.evaluate(async () => {
+    const renderer = window.__noisemakerCanvasRenderer
+    const normals = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_normal_roughness')
+    const albedo = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_albedo_metallic')
+    const depth = await renderer.sceneRenderer.backend.readPixels('scene_gbuf_depth')
+    const { width, height } = normals
+    const distinct = new Set()
+    let covered = 0
+    let runs = 0
+    let longestRun = 0
+    for (let y = 0; y < height; y++) {
+      let previous = -1
+      let current = 0
+      for (let x = 0; x < width; x++) {
+        const offset = (y * width + x) * 4
+        const isVolume = depth.data[offset] !== 0 &&
+          albedo.data[offset] > albedo.data[offset + 2]
+        if (!isVolume) {
+          if (current > longestRun) longestRun = current
+          previous = -1
+          current = 0
+          continue
+        }
+        const encoded = (normals.data[offset] << 16) |
+          (normals.data[offset + 1] << 8) | normals.data[offset + 2]
+        covered++
+        distinct.add(encoded)
+        if (encoded === previous) {
+          current++
+        } else {
+          if (current > longestRun) longestRun = current
+          runs++
+          current = 1
+        }
+        previous = encoded
+      }
+      if (current > longestRun) longestRun = current
+    }
+    return {
+      covered,
+      runs,
+      distinct: distinct.size,
+      longestRun,
+      meanRun: runs > 0 ? covered / runs : 0
+    }
+  })
+}
+
+/**
+ * Cross-backend maxDelta ceiling for the voxel branch's lit colour.
+ *
+ * Its own, separate from the smooth branch's VOLUME_PARITY_CEILING, and lower
+ * for a structural reason: the smooth branch's residual comes from bisection
+ * converging on a slightly different t under each compiler's float
+ * reassociation, which moves the hit and its central-difference normal. The
+ * voxel branch has no bisection and no gradient — the hit is a cell wall and
+ * the normal is one of six exact constants — so the only float sensitivity left
+ * is the DDA's own min-of-three comparison, which a ray has to strike almost
+ * exactly to flip.
+ *
+ * Measured 6 over 0.0003% of channels, reproduced across runs — against the
+ * smooth branch's 7 over 0.0026%, a tenth of the affected area. The G-buffer
+ * itself is identical: the buried/raised albedo censuses and every run-length
+ * statistic below come out bit-for-bit equal on the two backends, so what is
+ * left is the same SSAO occlusion-threshold quantisation the mesh and smooth
+ * cases document. One over the measurement, as the smooth branch's ceiling is.
+ */
+const VOXEL_PARITY_CEILING = 7
+
+/**
+ * The voxel marching mode, measured against the smooth mode on the same scene.
+ *
+ * Three things at once, because they share one page and one field:
+ *
+ * 1. Non-flat: the DDA found cells and they survived compositing.
+ * 2. Blocky: the run-length statistics above separate the two algorithms by a
+ *    wide, measured margin.
+ * 3. Depth compositing: the same buried/raised comparison the smooth case makes
+ *    — the marched cell-wall distance, not the bounding box's back face, is
+ *    what the ground plane is tested against.
+ */
+async function testVoxelVolumeScene(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const url = `http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`
+  const sceneName = 'volume(mode: "voxel") in the scene G-buffer'
+  console.log(`\n--- Testing ${sceneName} on ${backendName.toUpperCase()} ---`)
+
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message || String(error)))
+  page.on('console', message => {
+    if (message.type() === 'error') errors.push(message.text())
+  })
+
+  const fail = (reason, metrics) => ({ scene: sceneName, backend: backendName, status: 'fail', reason, metrics, errors })
+
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+
+    await loadVolumeScene(page, 0, 'smooth')
+    const smoothRuns = await volumeNormalRuns(page)
+    await loadVolumeScene(page, 0, 'voxel')
+    const buried = await volumeAlbedoCensus(page)
+    const voxelRuns = await volumeNormalRuns(page)
+    await loadVolumeScene(page, 1.05, 'voxel')
+    const raised = await volumeAlbedoCensus(page)
+    const metrics = { buried, raised, smoothRuns, voxelRuns }
+
+    console.log(`  buried=${JSON.stringify(buried)}\n  raised=${JSON.stringify(raised)}`)
+    console.log(`  smooth runs: ${JSON.stringify(smoothRuns)}`)
+    console.log(`  voxel  runs: ${JSON.stringify(voxelRuns)}`)
+    console.log(`  mean run length: smooth=${smoothRuns.meanRun.toFixed(2)} voxel=${voxelRuns.meanRun.toFixed(2)} ` +
+      `ratio=${(voxelRuns.meanRun / smoothRuns.meanRun).toFixed(2)}x`)
+
+    await context.close()
+
+    if (buried.volume < buried.total * 0.01) {
+      return fail(`the voxel volume produced almost no G-buffer coverage: ${JSON.stringify(buried)}`, metrics)
+    }
+    if (buried.plane < buried.total * 0.2) {
+      return fail(`the ground plane is missing: ${JSON.stringify(buried)}`, metrics)
+    }
+    // Depth compositing, on the same terms the smooth case asserts it: the
+    // plane must occlude the buried half, so lifting the box clear exposes
+    // materially more of it.
+    if (raised.volume < buried.volume * 1.2) {
+      return fail(
+        `the plane does not occlude the buried half: buried=${buried.volume} raised=${raised.volume}`,
+        metrics
+      )
+    }
+    // Both algorithms must be looking at a comparable amount of surface, or the
+    // run-length comparison below is between two different pictures.
+    if (smoothRuns.covered < buried.total * 0.01) {
+      return fail(`the smooth reference barely drew: ${JSON.stringify(smoothRuns)}`, metrics)
+    }
+
+    // The blocky signature. Measured mean horizontal run length 1.04px smooth
+    // against 23.45px voxel — a 22.4x separation, identical to the last digit
+    // on both backends. 4x is the gate: five times the smooth figure, a fifth
+    // of the voxel one, so neither side has to hold still for it to hold.
+    const MIN_RUN_RATIO = 4
+    const ratio = voxelRuns.meanRun / smoothRuns.meanRun
+    if (!(ratio > MIN_RUN_RATIO)) {
+      return fail(
+        `voxel mode is not blocky: mean horizontal normal run ${voxelRuns.meanRun.toFixed(2)}px ` +
+        `against smooth's ${smoothRuns.meanRun.toFixed(2)}px (ratio ${ratio.toFixed(2)}x, need > ${MIN_RUN_RATIO}x)`,
+        metrics
+      )
+    }
+    // The sharper half of the same fact, and the one that cannot be reached by
+    // simply blurring: an unrotated voxel volume's world normals are drawn from
+    // the six axis directions and nothing else. Encoded to bytes that is at
+    // most six distinct triples — measured 4, since this camera sees only four
+    // of the six faces. The smooth reference measured 138,492.
+    if (voxelRuns.distinct > 6) {
+      return fail(
+        `voxel normals take ${voxelRuns.distinct} distinct values; an unrotated cell face ` +
+        'has one of six axis-aligned normals',
+        metrics
+      )
+    }
+    if (smoothRuns.distinct <= 6) {
+      return fail(
+        `the smooth reference also has only ${smoothRuns.distinct} distinct normals — ` +
+        'the two modes are not being told apart',
+        metrics
+      )
+    }
+
+    if (errors.length > 0) {
+      return { scene: sceneName, backend: backendName, status: 'fail', reason: errors.slice(0, 3).join(' / '), metrics, errors }
+    }
+    return { scene: sceneName, backend: backendName, status: 'pass', metrics }
+  } catch (error) {
+    await context.close()
+    return {
+      scene: sceneName,
+      backend: backendName,
+      status: 'error',
+      reason: [error.message, ...errors].filter(Boolean).join(' / '),
+      errors
+    }
+  }
+}
+
+async function voxelLitColorFor(browser, port, backendName) {
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const url = `http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+    await loadVolumeScene(page, 0, 'voxel')
+    return await page.evaluate(async () => {
+      const renderer = window.__noisemakerCanvasRenderer
+      renderer.stop()
+      renderer._clock?.reset()
+      await renderer.render(0.25)
+      const image = await renderer.sceneRenderer.backend.readPixels('scene_lit_color')
+      return { width: image.width, height: image.height, data: Array.from(image.data) }
+    })
+  } finally {
+    await context.close()
+  }
+}
+
+/**
+ * Cross-backend gate for the voxel branch, separate from the smooth branch's.
+ *
+ * The DDA is a hand-written GLSL/WGSL pair like the isosurface march, and it is
+ * a different pair of code paths: sharing the smooth branch's gate would leave
+ * this one ungated.
+ */
+async function testVoxelCrossBackendParity(browser, port) {
+  const sceneName = 'voxel volume cross-backend lit colour parity'
+  console.log(`\n--- Testing ${sceneName} ---`)
+  const [a, b] = [
+    await voxelLitColorFor(browser, port, 'webgl2'),
+    await voxelLitColorFor(browser, port, 'webgpu')
+  ]
+
+  if (a.width !== b.width || a.height !== b.height) {
+    return { scene: sceneName, backend: 'both', status: 'fail',
+      reason: `size mismatch: ${a.width}x${a.height} vs ${b.width}x${b.height}` }
+  }
+
+  let maxDelta = 0
+  let differing = 0
+  for (let i = 0; i < a.data.length; i++) {
+    const delta = Math.abs(a.data[i] - b.data[i])
+    if (delta > 0) differing++
+    if (delta > maxDelta) maxDelta = delta
+  }
+  const pct = (differing / a.data.length) * 100
+  console.log(`  Voxel cross-backend: maxDelta=${maxDelta} differing=${pct.toFixed(4)}%`)
+
+  const CEILING = VOXEL_PARITY_CEILING
+  return {
+    scene: sceneName,
+    backend: 'webgl2-vs-webgpu',
+    status: maxDelta <= CEILING ? 'pass' : 'fail',
     reason: `maxDelta=${maxDelta} over ${pct.toFixed(4)}% of channels (ceiling ${CEILING}; not bit-identical)`
   }
 }
@@ -1782,6 +2054,10 @@ async function main() {
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
   } else if (CROSS_BACKEND_ONLY) {
     results.push(...(await testCrossBackendParity(browser, port)))
+  } else if (VOXEL_ONLY) {
+    results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
+    results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
+    results.push(await testVoxelCrossBackendParity(browser, port))
   } else if (VOLUME_ONLY) {
     results.push(await testVolumeScene(browser, port, 'webgl2'))
     results.push(await testVolumeScene(browser, port, 'webgpu'))
@@ -1791,6 +2067,9 @@ async function main() {
     results.push(await testVolumeInPlanarReflection(browser, port, 'webgpu'))
     results.push(await testVolumeInReflectionProbe(browser, port))
     results.push(await testVolumeCrossBackendParity(browser, port))
+    results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
+    results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
+    results.push(await testVoxelCrossBackendParity(browser, port))
   } else if (PLANAR_REFLECTION_ONLY) {
     results.push(await testFlatPlanarReflection(browser, port, 'webgl2'))
     results.push(await testFlatPlanarReflection(browser, port, 'webgpu'))
@@ -1814,11 +2093,14 @@ async function main() {
     results.push(await testVolumeInPlanarReflection(browser, port, 'webgl2'))
     results.push(await testVolumeInPlanarReflection(browser, port, 'webgpu'))
     results.push(await testVolumeInReflectionProbe(browser, port))
+    results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
+    results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
     results.push(...(await testCrossBackendParity(browser, port)))
     results.push(await testVolumeCrossBackendParity(browser, port))
+    results.push(await testVoxelCrossBackendParity(browser, port))
   }
   if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY
-      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY) {
+      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY && !VOXEL_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']
     const backends = ['webgl2', 'webgpu']
     for (const scene of scenes) {

@@ -154,11 +154,18 @@ const wgsl = volumeFragmentWGSL()
 
 // The 2D atlas emulates a 3D texture the same way every existing marcher does:
 // texel (x, y + z * volSize), trilinear by hand across the eight corners.
+//
+// The corner fetches are counted by their own call shape rather than by the
+// texture name: the voxel branch fetches the atlas too, and it must NOT be
+// counted among the trilinear corners — nor must a trilinear corner ever be
+// lost to it.
 {
   assert.ok(glsl.includes('ivec2(p.x, p.y + p.z * u_volumeSize)'), 'GLSL atlas index')
   assert.ok(wgsl.includes('vec2i(p.x, p.y + p.z * u.u_volumeSize)'), 'WGSL atlas index')
-  assert.strictEqual((glsl.match(/texelFetch\(u_volumeAtlas/g) || []).length, 8, 'GLSL fetches eight corners')
-  assert.strictEqual((wgsl.match(/textureLoad\(u_volumeAtlas/g) || []).length, 8, 'WGSL loads eight corners')
+  assert.strictEqual((glsl.match(/texelFetch\(u_volumeAtlas, atlasTexel\(ivec3\(/g) || []).length, 8,
+    'GLSL fetches eight corners')
+  assert.strictEqual((wgsl.match(/textureLoad\(u_volumeAtlas, atlasTexel\(vec3i\(/g) || []).length, 8,
+    'WGSL loads eight corners')
   // Eight corners then three interpolation stages, in both languages.
   for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
     for (const corner of ['c000', 'c100', 'c010', 'c110', 'c001', 'c101', 'c011', 'c111']) {
@@ -196,6 +203,144 @@ const wgsl = volumeFragmentWGSL()
     assert.ok(declared.test(vertex), `precondition: mesh vertex emits @location(${location})`)
   }
   assert.ok(wgsl.includes('@location(0) v_worldPos: vec3f,'), 'WGSL fragment input matches vertex output 0')
+}
+
+// ---------------------------------------------------------------------------
+// Voxel mode.
+//
+// render3d carries two marching modes behind a compile-time `FILTERING` define
+// the expander injects per effect instance. The scene renderer has no define
+// machinery — it compiles named programs directly — and mode is a per-NODE
+// property, so two volumes in one scene can want different ones. So it is a
+// uniform, which is also this pair's own established convention for selecting
+// behaviour: u_hasMaterial and u_clipEnabled already do exactly this, and
+// renderLit3d selects its bounding shape from a runtime `shape` uniform the
+// same way. One program, one branch.
+// ---------------------------------------------------------------------------
+{
+  // One source serves both modes. A source function that took a mode argument
+  // would mean two compiled programs and two pass variants per node.
+  assert.strictEqual(volumeFragmentGLSL.length, 0, 'the GLSL source takes no mode argument')
+  assert.strictEqual(volumeFragmentWGSL.length, 0, 'the WGSL source takes no mode argument')
+
+  assert.ok(glsl.includes('uniform int u_mode;'), 'GLSL declares the mode selector')
+  assert.ok(wgsl.includes('u_mode: i32,'), 'WGSL declares the mode selector')
+  assert.ok(glsl.includes('#define MODE_VOXEL 1'), 'GLSL names the voxel mode value')
+  assert.ok(wgsl.includes('const MODE_VOXEL: i32 = 1;'), 'WGSL names the voxel mode value')
+
+  // The branch is on the named constant, not a bare literal, and it is what
+  // selects the DDA.
+  assert.ok(glsl.includes('if (u_mode == MODE_VOXEL) {'), 'GLSL branches on the mode selector')
+  assert.ok(wgsl.includes('if (u.u_mode == MODE_VOXEL) {'), 'WGSL branches on the mode selector')
+}
+
+// The DDA itself: an Amanatides & Woo walk over the atlas grid, in both
+// languages. Per-axis next-wall distances, per-axis crossing costs, an integer
+// step, and a bounded loop.
+{
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    assert.ok(/fn voxelTrace|VoxelHit voxelTrace/.test(src), `${lang} declares the DDA traversal`)
+    assert.ok(src.includes('tMax'), `${lang} tracks the per-axis distance to the next wall`)
+    assert.ok(src.includes('tDelta'), `${lang} tracks the per-axis cost of crossing one cell`)
+    assert.ok(src.includes('VOXEL_MAX_STEPS'), `${lang} bounds the DDA loop`)
+    // All three axes step, and each advances its own cell index.
+    for (const axis of ['x', 'y', 'z']) {
+      assert.ok(src.includes(`cell.${axis} = cell.${axis} + step.${axis}`) ||
+                src.includes(`cell.${axis} += step.${axis}`),
+        `${lang} steps the cell index on ${axis}`)
+    }
+  }
+  assert.ok(glsl.includes('#define VOXEL_MAX_STEPS 512'), 'GLSL DDA step bound')
+  assert.ok(wgsl.includes('const VOXEL_MAX_STEPS: i32 = 512;'), 'WGSL DDA step bound')
+}
+
+// The next wall is a cell BOUNDARY, not a cell centre.
+//
+// render3d builds it with voxelToWorld(voxel + max(step, 0)), which returns the
+// centre of that cell — half a cell past the wall on every axis. In a shader
+// that only shades and writes dist/MAX_DIST the bias is invisible; here the hit
+// point becomes the G-buffer's world position and the fragment's depth, so the
+// wall must be the wall. Cell c spans [-1 + 2c/N, -1 + 2(c+1)/N].
+{
+  assert.ok(glsl.includes('vec3(cell + max(step, ivec3(0))) / n * 2.0 - 1.0'),
+    'GLSL next wall is the cell boundary')
+  assert.ok(wgsl.includes('vec3f(cell + max(step, vec3i(0))) / n * 2.0 - 1.0'),
+    'WGSL next wall is the cell boundary')
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    assert.ok(!/\+ 0\.5\) \/ n/.test(src), `${lang} must not take the wall from a cell centre`)
+  }
+}
+
+// A voxel hit's normal is the face of the wall it entered through: the axis
+// just stepped, pointing back along the step. The first cell has no such step,
+// so its face is the box face the ray entered by — the slab whose tmin won
+// tEnter, facing back along the ray.
+{
+  for (const axis of ['x', 'y', 'z']) {
+    assert.ok(glsl.includes(`-float(step.${axis})`), `GLSL face normal on ${axis} opposes the step`)
+    assert.ok(wgsl.includes(`-f32(step.${axis})`), `WGSL face normal on ${axis} opposes the step`)
+    assert.ok(glsl.includes(`-sign(rd.${axis})`), `GLSL entry face on ${axis} opposes the ray`)
+    assert.ok(wgsl.includes(`-sign(rd.${axis})`), `WGSL entry face on ${axis} opposes the ray`)
+  }
+}
+
+// The face normal goes to world through u_normalMatrix, exactly as the smooth
+// branch's gradient does — one transform, applied after the branch, so neither
+// mode can acquire its own.
+//
+// It is not decorative. u_normalMatrix is transpose(inverse(model)), the only
+// transform that preserves perpendicularity: a normal is defined by n.v = 0 for
+// every surface tangent v, and under v' = Mv only n' = (M^-1)^T n keeps
+// n'.(Mv) = n.v = 0. For an axis-aligned face under a bare T*R*S the naive
+// model matrix happens to agree, because the axis vectors are eigenvectors of
+// both S and S^-1 — but a volume parented to a non-uniformly scaled, rotated
+// group has a SHEARED world matrix, and there the two diverge.
+{
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    assert.strictEqual((src.match(/u_normalMatrix \* vec4f?\(/g) || []).length, 1,
+      `${lang} carries exactly one local normal to world`)
+    assert.ok(src.includes('nLocal'), `${lang} names the local-space normal both branches produce`)
+  }
+  assert.ok(glsl.includes('normalize((u_normalMatrix * vec4(nLocal, 0.0)).xyz)'),
+    'GLSL transforms the shared local normal')
+  assert.ok(wgsl.includes('normalize((u.u_normalMatrix * vec4f(nLocal, 0.0)).xyz)'),
+    'WGSL transforms the shared local normal')
+}
+
+// The voxel branch reads whole cells. Trilinear filtering across cell centres
+// is precisely the blockiness this mode exists to keep, so the cell colour and
+// the solidity test go through a nearest-neighbour fetch — exactly one each.
+{
+  assert.strictEqual((glsl.match(/texelFetch\(u_volumeAtlas, atlasTexel\(clamp/g) || []).length, 1,
+    'GLSL has one nearest-neighbour cell fetch')
+  assert.strictEqual((wgsl.match(/textureLoad\(u_volumeAtlas, atlasTexel\(clamp/g) || []).length, 1,
+    'WGSL has one nearest-neighbour cell fetch')
+  // render3d's voxel threshold semantics: a cell is solid when its density
+  // EXCEEDS the threshold. Same sense as the smooth branch's signed field
+  // (threshold - density < 0 inside), read as a hard per-cell predicate.
+  assert.ok(glsl.includes('sampleVoxel(cell).r > u_threshold'), 'GLSL cell solidity test')
+  assert.ok(wgsl.includes('sampleVoxel(cell).r > u.u_threshold'), 'WGSL cell solidity test')
+}
+
+// Both branches feed ONE tail. The clip-plane reject, the near-plane reject and
+// the depth write each appear once and after the mode branch closes, so a voxel
+// hit is clipped, near-rejected and depth-composited on exactly the same terms
+// as an isosurface hit. The discard count staying at four is the same fact from
+// the other side: voxel mode added no exit of its own.
+{
+  for (const [lang, src] of [['GLSL', glsl], ['WGSL', wgsl]]) {
+    const branchAt = src.indexOf('MODE_VOXEL) {')
+    const missAt = src.indexOf('if (!hit)')
+    const clipAt = src.indexOf('u_clipEnabled == 1')
+    const nearAt = src.indexOf('clip.w <= 0.0 || clip.z < -clip.w')
+    assert.ok(branchAt > 0 && missAt > branchAt, `${lang}: the miss test follows the mode branch`)
+    assert.ok(clipAt > missAt, `${lang}: the clip-plane reject follows the mode branch`)
+    assert.ok(nearAt > clipAt, `${lang}: the near-plane reject follows the clip-plane reject`)
+    assert.strictEqual((src.match(/u_clipEnabled == 1/g) || []).length, 1,
+      `${lang} tests the clip plane once, for both modes`)
+    assert.strictEqual((src.match(/clip\.w <= 0\.0 \|\| clip\.z < -clip\.w/g) || []).length, 1,
+      `${lang} tests the near plane once, for both modes`)
+  }
 }
 
 console.log('Volume shader tests passed')

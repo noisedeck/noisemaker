@@ -55,6 +55,7 @@ export class SceneTree {
             ...opts,
             surface: desc.surface,
             threshold: desc.threshold,
+            mode: desc.mode,
             material: desc.material
           })
         } else {

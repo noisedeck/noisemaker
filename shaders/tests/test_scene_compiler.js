@@ -698,6 +698,23 @@ function irFor(src) {
   assert.deepStrictEqual(ir.nodes[0].transform, {}, 'no transform keywords')
 }
 
+// mode picks the marching algorithm. "smooth" is the trilinear isosurface every
+// volume() has rendered since the node existed; "voxel" is render3d's other
+// branch — a 3D-DDA walk of the atlas grid that stops at the first cell over
+// the threshold and shades its face. The default is the old behaviour, so no
+// existing program changes meaning.
+{
+  const implicit = irFor('search synth\nscene(camera(fov: 60), volume(vol0)).write(o0)')
+  assert.strictEqual(implicit.nodes[0].mode, 'smooth', 'mode defaults to the isosurface')
+
+  const explicit = irFor('search synth\nscene(camera(fov: 60), volume(vol0, mode: "smooth")).write(o0)')
+  assert.strictEqual(explicit.nodes[0].mode, 'smooth', 'mode: "smooth" is spelled out and accepted')
+
+  const voxel = irFor('search synth\nscene(camera(fov: 60), volume(vol0, mode: "voxel")).write(o0)')
+  assert.strictEqual(voxel.nodes[0].mode, 'voxel', 'mode: "voxel" reaches the IR')
+  assert.strictEqual(voxel.nodes[0].threshold, 0.5, 'voxel mode still carries the threshold')
+}
+
 // A volume nests in a group and inherits the group's material, like a mesh.
 {
   const ir = irFor(`
@@ -749,6 +766,12 @@ function irFor(src) {
       /threshold must be a finite number/],
     ['threshold range', 'scene(camera(fov: 60), volume(vol0, threshold: 1.5)).write(o0)',
       /threshold must be between 0 and 1/],
+    // mode is a closed set, named in the message. Without the check a typo
+    // fell through to the default and the node rendered smooth in silence.
+    ['unknown mode', 'scene(camera(fov: 60), volume(vol0, mode: "blocky")).write(o0)',
+      /Unknown volume mode 'blocky' \(expected: smooth, voxel\)/],
+    ['mode is not a string', 'scene(camera(fov: 60), volume(vol0, mode: 1)).write(o0)',
+      /Unknown volume mode '1' \(expected: smooth, voxel\)/],
     ['bad transform', 'scene(camera(fov: 60), volume(vol0, pos: [0, 1])).write(o0)',
       /pos must contain exactly 3 values/],
     ['surface material', 'scene(camera(fov: 60), volume(vol0).material(surface(o2))).write(o0)',
@@ -790,6 +813,7 @@ function irFor(src) {
     ['volume pos is a ref', 'scene(camera(fov: 60), volume(vol0, pos: o2)).write(o0)'],
     ['volume pos holds a ref', 'scene(camera(fov: 60), volume(vol0, pos: [o2, 0, 0])).write(o0)'],
     ['volume id is a ref', 'scene(camera(fov: 60), volume(vol0, id: o2)).write(o0)'],
+    ['volume mode is a ref', 'scene(camera(fov: 60), volume(vol0, mode: o2)).write(o0)'],
     // The same class at the sibling scene nodes.
     ['mesh unknown ref keyword', 'scene(camera(fov: 60), mesh("box", geo: geo0)).write(o0)'],
     ['camera unknown ref keyword', 'scene(camera(fov: 60, geo: geo0)).write(o0)'],

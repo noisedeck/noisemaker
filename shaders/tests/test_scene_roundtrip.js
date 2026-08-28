@@ -129,6 +129,38 @@ render(o0)`
         'the reparsed program compiles to the same scene IR')
 })
 
+// ---------------------------------------------------------------------------
+// mode is a string keyword, so it round-trips through the unparser's string
+// branch. It is asserted on its own because it is the one volume keyword whose
+// value is drawn from a closed set: a round-trip that dropped it would leave a
+// voxel volume compiling back to a smooth one, silently.
+// ---------------------------------------------------------------------------
+
+test('volume() mode round-trips and recompiles to the same IR', () => {
+    const src = `search synth
+noise3d().write3d(vol0, geo0)
+scene(
+  camera(fov: 60, pos: [0, 2, -6]),
+  light(type: "directional", dir: [1, -1, 1]),
+  volume(vol0, threshold: 0.4, mode: "voxel", pos: [0, 1, 0])
+    .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7))
+).write(o0)
+render(o0)`
+    const out = assertStable(src, 'voxel volume scene')
+    assert.match(out, /mode: "voxel"/, 'keeps the mode keyword and its value')
+
+    const sourceIr = compileScene(compile(src))
+    const volumes = sourceIr.nodes.filter(node => node.type === 'volume')
+    assert.strictEqual(volumes.length, 1, 'the source compiles to exactly one volume node')
+    assert.strictEqual(volumes[0].mode, 'voxel', 'the volume node keeps its voxel mode')
+    assert.strictEqual(volumes[0].threshold, 0.4, 'the volume node keeps its threshold')
+
+    assert.deepStrictEqual(
+        compileScene(compile(out)),
+        sourceIr,
+        'the reparsed program compiles to the same scene IR')
+})
+
 test('an object literal in a let binding round-trips', () => {
     assertStable(`search synth
 let cfg = {x: 1, y: 2}

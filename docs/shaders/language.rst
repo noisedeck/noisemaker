@@ -69,7 +69,10 @@ rather than by the grammar: it takes exactly one positional argument, a volume
 reference ``( VolRef | Ident )`` naming ``vol0``–``vol7`` — written directly or
 reached through a ``let`` binding — and every other argument is a keyword.
 Positional and keyword arguments may appear in any order, and a trailing comma
-is permitted, as they are in any other ``ArgList``.
+is permitted, as they are in any other ``ArgList``. Keyword *values* are
+constrained there too, not by the grammar: ``mode`` is an ordinary ``String`` to
+the parser and one of ``"smooth"`` or ``"voxel"`` to the compiler. See
+:ref:`shader-scene` for the keyword set.
 
 Productions marked ``(preview)`` are experimental. ``SceneCall`` and everything
 reachable from it — ``SceneArg``, ``NodeChain``, ``VolumeCall``, ``NodeLink``,

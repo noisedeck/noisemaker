@@ -352,9 +352,14 @@ positional raises
      - Meaning
    * - ``threshold``
      - ``0.5``
-     - Iso level, in ``0..1``. The isosurface is where the volume's density
-       crosses this value — the same meaning the ``threshold`` uniform carries
-       in the ``render3d`` family.
+     - Level, in ``0..1``. In ``smooth`` mode the isosurface is where the
+       volume's density crosses this value; in ``voxel`` mode a cell is solid
+       when its density exceeds it. Both are the meaning the ``threshold``
+       uniform carries in the ``render3d`` family.
+   * - ``mode``
+     - ``"smooth"``
+     - Marching mode, one of ``"smooth"`` or ``"voxel"``. Anything else raises
+       ``Unknown volume mode '<name>' (expected: smooth, voxel)``.
    * - ``id``
      - —
      - Optional name, useful for locating a node from host code.
@@ -372,6 +377,42 @@ Anything outside that set raises ``Unknown keyword '<name>' for volume()``
 rather than being dropped in silence. The transform keywords behave exactly as
 they do on ``mesh()``: they compose down a ``group()`` hierarchy and accept
 ``osc()`` descriptors in place of numbers.
+
+Marching modes
+~~~~~~~~~~~~~~
+
+``mode`` picks the algorithm that turns the density atlas into a surface. Both
+fill the same G-buffer and are lit, shadowed by depth, reflected and
+occlusion-tested identically; they differ only in where the surface is and
+which way it faces.
+
+``mode: "smooth"`` — the default, and what ``volume()`` has always done. The
+atlas is sampled trilinearly, the ray steps until ``threshold - density``
+changes sign, and bisection refines the crossing. The normal is the central
+difference of the field, so the surface is continuous and curved.
+
+``mode: "voxel"`` — a 3D-DDA walk of the atlas grid. The ray crosses one cell
+wall at a time and stops at the first cell whose density exceeds ``threshold``.
+The hit is on that cell's wall and the normal is the wall's own face, so the
+surface is made of axis-aligned squares one cell across. With no material the
+albedo is the hit cell's own colour, read without filtering.
+
+.. code-block:: none
+
+   volume(vol0, threshold: 0.5, mode: "voxel")
+     .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7))
+
+Cell size follows the atlas, not the node: the ``vol0``–``vol7`` atlases are
+64 cubed, so a voxel volume is 64 cells per axis whatever its ``scale``. Scaling
+the node makes the cells bigger, not more numerous.
+
+.. note::
+
+   ``mode`` selects the marching algorithm and nothing else. The bounding volume
+   is always the local ``[-1, 1]`` cube described under **Extent** below —
+   ``volume()`` has no alternate bounds, and in particular no spherical bound
+   like the one ``renderLit3d`` carries as a ``shape`` uniform. A volume's
+   silhouette is always that of its box.
 
 A volume takes a ``.material()`` on the same terms as a mesh — ``solid()``,
 refined by ``.pbr()`` and ``.emit()`` — and inherits a group's material when it

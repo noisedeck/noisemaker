@@ -1035,6 +1035,7 @@ function reflectedVolumeTree(extraNodes = [], settings = {}) {
   assert.ok(/^global_scene_mesh_\d+_normals$/.test(pass.inputs.u_normals), 'box normals bound')
   assert.ok(/^global_scene_mesh_\d+_uvs$/.test(pass.inputs.u_uvs), 'box uvs bound')
   assert.strictEqual(pass.uniforms.u_threshold, 0.4, 'the node\'s iso level reaches the marcher')
+  assert.strictEqual(pass.uniforms.u_mode, 0, 'a node with no mode marches the smooth isosurface')
   assert.strictEqual(pass.uniforms.u_volumeSize, 64, 'the global vol atlases are 64 cubed')
   assert.strictEqual(pass.uniforms.u_invModelMatrix.length, 16, 'world -> local for the ray')
   assert.strictEqual(pass.uniforms.u_normalMatrix.length, 16, 'local -> world for the gradient')
@@ -1052,6 +1053,51 @@ function reflectedVolumeTree(extraNodes = [], settings = {}) {
   assert.ok(
     backend.passes.indexOf(pass) < backend.passes.findIndex(p => p.id === 'scene_lighting'),
     'the volume fills the G-buffer before lighting reads it')
+}
+
+// mode reaches the marcher as u_mode, and it is per NODE — not per program.
+// Two volumes in one scene with different modes must produce two passes of the
+// SAME program carrying different uniform values, or the second would silently
+// march the first one's algorithm.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'blocky', type: 'volume', surface: 'vol0', threshold: 0.5, mode: 'voxel', transform: {}, children: [], parent: null },
+    { id: 'smooth', type: 'volume', surface: 'vol1', threshold: 0.5, mode: 'smooth', transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+
+  const volumePasses = backend.passes.filter(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(volumePasses.length, 2, 'one pass per volume node')
+  assert.deepStrictEqual(
+    volumePasses.map(p => p.program), ['scene_volume_gbuf', 'scene_volume_gbuf'],
+    'mode is a uniform, not a second program')
+  assert.deepStrictEqual(
+    volumePasses.map(p => p.uniforms.u_mode), [1, 0],
+    'each node carries its own mode into the uniform')
+
+  // The pass-state reuse pattern is what makes that non-trivial: uniforms
+  // objects are rewritten in place per frame, so a mode written once and never
+  // rewritten would leak into the next node reusing the same state.
+  const modes = new Set(volumePasses.map(p => p.uniforms))
+  assert.strictEqual(modes.size, 2, 'the two nodes hold distinct uniform objects')
+}
+
+// An unknown mode string can only arrive from a hand-built tree — the compiler
+// rejects it — and must not become an out-of-range uniform the shader branches
+// on unpredictably.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = volumeTree([
+    { id: 'odd', type: 'volume', surface: 'vol0', threshold: 0.5, mode: 'blocky', transform: {}, children: [], parent: null }
+  ])
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  const pass = backend.passes.find(p => p.program === 'scene_volume_gbuf')
+  assert.strictEqual(pass.uniforms.u_mode, 0, 'an unrecognized mode falls back to the smooth default')
 }
 
 // Volume passes run after mesh passes, and only the very first pass into the

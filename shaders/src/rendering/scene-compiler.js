@@ -39,11 +39,26 @@ const VOLUME_REF = /^vol[0-7]$/
 const CAMERA_KEYS = new Set(['fov', 'near', 'far', 'pos', 'target'])
 const ENVIRONMENT_KEYS = new Set(['intensity'])
 /**
- * volume() takes placement plus the iso level. `threshold` matches the range
- * render3d's own uniform declares (0..1, default 0.5) so a program moved from
- * the marcher to the scene graph keeps its value.
+ * volume() takes placement, the iso level and the marching mode. `threshold`
+ * matches the range render3d's own uniform declares (0..1, default 0.5) so a
+ * program moved from the marcher to the scene graph keeps its value.
  */
-const VOLUME_KEYS = new Set(['id', 'pos', 'rot', 'scale', 'threshold'])
+const VOLUME_KEYS = new Set(['id', 'pos', 'rot', 'scale', 'threshold', 'mode'])
+
+/**
+ * The two ways a volume() can be marched, mirroring render3d's two branches.
+ *
+ * `smooth` is its FILTERING == 0 path: trilinear sampling, a sign change in
+ * `threshold - density` bracketed by bisection, and a central-difference
+ * gradient for the normal. `voxel` is FILTERING == 1: a 3D-DDA walk of the
+ * atlas grid that stops at the first cell whose density EXCEEDS the threshold
+ * and takes the normal from the cell wall it entered through.
+ *
+ * A closed set with the members named in the diagnostic. Left open, `mode:
+ * "blocky"` fell through to the default and rendered smooth without a word.
+ */
+const VOLUME_MODES = ['smooth', 'voxel']
+const DEFAULT_VOLUME_MODE = 'smooth'
 const SCENE_SETTING_KEYS = new Set([
     'ambient', 'background', 'exposure', 'ground', 'sky',
     'reflections', 'reflectionProbe', 'reflectionProbeSize',
@@ -345,6 +360,27 @@ function volumeReference(call) {
 }
 
 /**
+ * Read volume()'s `mode` keyword against the closed set of marching modes.
+ *
+ * Anchored at the keyword's VALUE (falling back to the call) for the same
+ * reason every other volume diagnostic is: a value node without a `loc` would
+ * otherwise report line 0 col 0. A non-string value is the same mistake as a
+ * misspelled one and gets the same message — the set is what the author needs
+ * to see, not the JavaScript type of what they wrote.
+ */
+function volumeMode(call) {
+    const value = kw(call, 'mode')
+    if (value === undefined) return DEFAULT_VOLUME_MODE
+    if (typeof value !== 'string' || !VOLUME_MODES.includes(value)) {
+        throw sceneError(
+            `Unknown volume mode '${value}' (expected: ${VOLUME_MODES.join(', ')})`,
+            located(call.kwargs?.mode, call)
+        )
+    }
+    return value
+}
+
+/**
  * Resolve an inline `.material(...)` link into a material record, interning it
  * under a generated key. Returns the key, or undefined when absent.
  */
@@ -539,6 +575,7 @@ function walkNode(
         assertKnownKeywords(head, VOLUME_KEYS)
         node.surface = volumeReference(head)
         node.threshold = numberKw(head, 'threshold', 0.5, { min: 0, max: 1 })
+        node.mode = volumeMode(head)
         // A raymarched isosurface has no UVs, so surface() has nothing to map
         // onto it. Rejecting here beats binding an albedo texture the volume
         // pass would silently ignore. An inherited material is rejected too,

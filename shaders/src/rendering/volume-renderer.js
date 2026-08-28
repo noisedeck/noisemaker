@@ -40,6 +40,21 @@ const BOX_PARAMS = Object.freeze({ size: [2, 2, 2] })
  */
 const VOLUME_ATLAS_SIZE = 64
 
+/**
+ * The `u_mode` values the volume fragment shader branches on.
+ *
+ * mode is a per-NODE property, so it is a uniform on one program rather than a
+ * second program: two volumes in one scene can want different algorithms, and
+ * the scene renderer compiles its programs by name with no define machinery to
+ * specialize them with. The shader names the same values (MODE_VOXEL 1).
+ *
+ * Anything unrecognized falls back to smooth. The compiler rejects an unknown
+ * mode with a located error, so this only guards a hand-built tree — but an
+ * out-of-range int would leave the shader's branch to chance.
+ */
+const VOLUME_MODES = Object.freeze({ smooth: 0, voxel: 1 })
+const DEFAULT_VOLUME_MODE = 0
+
 function finiteVector(value, length, fallback) {
   if (!Array.isArray(value) || value.length !== length) return fallback
   for (let i = 0; i < length; i++) {
@@ -125,6 +140,7 @@ export class VolumeRenderer {
       u_meshTexWidth: handle.texWidth,
       u_volumeSize: VOLUME_ATLAS_SIZE,
       u_threshold: 0.5,
+      u_mode: DEFAULT_VOLUME_MODE,
       u_baseColor: baseColorRgba,
       u_hasMaterial: 0,
       u_metallic: 0,
@@ -251,6 +267,10 @@ export class VolumeRenderer {
       uniforms.u_cameraPos = cameraPos
       uniforms.u_meshTexWidth = handle.texWidth
       uniforms.u_threshold = boundedNumber(node.threshold, 0.5, 0, 1)
+      // Rewritten every frame like every other uniform here: the pass state is
+      // reused in place, so a mode written only at construction would pin the
+      // node to whatever it was built with.
+      uniforms.u_mode = VOLUME_MODES[node.mode] ?? DEFAULT_VOLUME_MODE
       // A material replaces the atlas-derived albedo outright; without one the
       // shader falls back to the volume's own RGB. surface() albedo is rejected
       // at compile time (an isosurface has no UVs), so there is never a texture.
