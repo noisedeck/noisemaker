@@ -4,11 +4,14 @@
  *
  * The parity attestation (scripts/attest-shader-parity.mjs) asks "do the two
  * backends agree?". This asks a different question: "does each backend still
- * produce what it produced before?". It never compares WebGL2 against WebGPU —
- * the legacy volumetric marchers legitimately diverge cross-backend because
- * GLSL derives its ray from gl_FragCoord (bottom-left origin) while WGSL uses
- * @builtin(position) (top-left origin). Each backend is only ever compared
- * against its own prior self.
+ * produce what it produced before?". It never compares WebGL2 against WebGPU:
+ * the two readbacks arrive in opposite row order, so their raw bytes never
+ * hash alike even when the rendered images are identical pixel for pixel.
+ * Aligning the two rasters is the attestation's job — see comparePixelFrames
+ * in scripts/lib/shader-parity-attestation.mjs, and the epsilon-0
+ * parity-attestation.json committed beside each volumetric marcher. Here each
+ * backend is only ever compared against its own prior self, which is what
+ * makes this the right gate for a refactor that must not move a single pixel.
  *
  *   node shaders/scripts/pin-effect-pixels.mjs --case <case.json> --out <pin.json>
  *   node shaders/scripts/pin-effect-pixels.mjs --case <case.json> --check <pin.json>

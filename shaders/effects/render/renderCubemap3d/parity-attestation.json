@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "effect": "render/renderCubemap3d",
+  "sourceHash": "189b6fe60e4179158a8088a9f9ed3ad0e286722508e5ba7c9a6022e0ca9e6bda",
+  "caseHash": "767c4fbdb3ba0b326014028606d264790972f11e43e7f03afbf1197efbadab00",
+  "resolution": [
+    192,
+    192
+  ],
+  "frames": {
+    "webgl2": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 31
+    },
+    "webgpu": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 31
+    }
+  },
+  "execution": {
+    "webgl2TargetPasses": 1,
+    "webgpuTargetPasses": 1
+  },
+  "parity": {
+    "epsilon": 0,
+    "maxDiff": 0,
+    "meanDiff": 0,
+    "mismatchCount": 0,
+    "mismatchPercent": 0
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "effect": "render/renderCubemapSurface",
+  "sourceHash": "6df7f5005b54c82947d69d4e86492e8db3b7cb5e29dc0d75ebb503805518ba31",
+  "caseHash": "244e8bfe9de7e538efd1d0a8a2bbae62ac8ed929fb27f3f59e67815fce06ce71",
+  "resolution": [
+    192,
+    192
+  ],
+  "frames": {
+    "webgl2": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 70
+    },
+    "webgpu": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 70
+    }
+  },
+  "execution": {
+    "webgl2TargetPasses": 1,
+    "webgpuTargetPasses": 1
+  },
+  "parity": {
+    "epsilon": 0,
+    "maxDiff": 0,
+    "meanDiff": 0,
+    "mismatchCount": 0,
+    "mismatchPercent": 0
+  }
+}

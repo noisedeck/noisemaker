@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "effect": "render/render3d",
+  "sourceHash": "6b0bc2601acc9fe1a07ce42d6dc5f9a447fa8bb15df41c3576f3de2065dc74f5",
+  "caseHash": "2456018bf773bea690609b07caf1875c5dcf7c54bb74d912927a6100c5cd749e",
+  "resolution": [
+    192,
+    192
+  ],
+  "frames": {
+    "webgl2": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 137
+    },
+    "webgpu": {
+      "width": 192,
+      "height": 192,
+      "nonzeroRgbPixels": 36864,
+      "nonzeroAlphaPixels": 36864,
+      "uniqueColors": 137
+    }
+  },
+  "execution": {
+    "webgl2TargetPasses": 1,
+    "webgpuTargetPasses": 1
+  },
+  "parity": {
+    "epsilon": 0,
+    "maxDiff": 0,
+    "meanDiff": 0,
+    "mismatchCount": 0,
+    "mismatchPercent": 0
+  }
+}
