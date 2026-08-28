@@ -313,6 +313,12 @@ export class CanvasRenderer {
         this._sceneRenderer = null
         this._clock = null
 
+        // Tile region for tiled hi-res export, or null. The pipeline keeps its
+        // own copy for the 2D passes; the scene renderer is handed this one on
+        // every render, because a scene tiles by sub-frustum rather than by
+        // shifting a fragment coordinate.
+        this._tileRegion = null
+
         // Bound render loop for proper `this` context
         this._boundRenderLoop = this._renderLoop.bind(this)
 
@@ -692,9 +698,15 @@ export class CanvasRenderer {
 
     /**
      * Set tile region for tiled large-resolution rendering.
+     *
+     * Reaches both renderers. The pipeline hands `tileOffset` /
+     * `fullResolution` to 2D effects so they can shift their fragment
+     * coordinate into full-image space; a scene program has no such coordinate,
+     * so the scene renderer turns the same region into a camera sub-frustum.
      * @param {{offset: number[], fullResolution: number[]}} region
      */
     setTileRegion(region) {
+        this._tileRegion = region || null
         if (this._pipeline) this._pipeline.setTileRegion(region)
     }
 
@@ -702,6 +714,7 @@ export class CanvasRenderer {
      * Clear tile region, returning to normal rendering.
      */
     clearTileRegion() {
+        this._tileRegion = null
         if (this._pipeline) this._pipeline.clearTileRegion()
     }
 
@@ -882,10 +895,15 @@ export class CanvasRenderer {
                 this._clock.tick(timeMs)
             }
             if (this._sceneBindings && this._sceneBindings.length > 0 && sceneModules) {
-                sceneModules.evaluateBindings(this._sceneBindings, normalizedTime)
+                // The third argument is the pipeline's own externalState record —
+                // the same object setMidiState/setAudioState write into — so
+                // midi()/audio() scene bindings read exactly what effect
+                // uniforms read, not a copy that could go stale.
+                sceneModules.evaluateBindings(this._sceneBindings, normalizedTime, this._pipeline?.externalState)
             }
             this._sceneTree.updateWorldMatrices()
-            await this._sceneRenderer.render(this._sceneTree, this._clock, SCENE_COLOR_TEXTURE)
+            await this._sceneRenderer.render(
+                this._sceneTree, this._clock, SCENE_COLOR_TEXTURE, this._tileRegion)
         } catch (err) {
             console.error('Scene render error:', err)
             if (this._onError) {

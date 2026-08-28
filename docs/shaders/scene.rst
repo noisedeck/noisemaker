@@ -376,7 +376,9 @@ positional raises
 Anything outside that set raises ``Unknown keyword '<name>' for volume()``
 rather than being dropped in silence. The transform keywords behave exactly as
 they do on ``mesh()``: they compose down a ``group()`` hierarchy and accept
-``osc()`` descriptors in place of numbers.
+``osc()``, ``midi()`` and ``audio()`` descriptors in place of numbers.
+``threshold`` does not — it is read as a plain number, and all three
+descriptors are rejected there alike.
 
 Marching modes
 ~~~~~~~~~~~~~~
@@ -445,6 +447,22 @@ Three behaviours worth knowing:
   reflection rather than clipped at the bounding box. A volume in the probe
   costs one extra march per probe face: six on the frame that primes the cube,
   then one per frame as the probe amortizes.
+
+Tiled export
+------------
+
+``setTileRegion`` tiles a scene by restricting the camera to the tile's
+sub-frustum, not by shifting a fragment coordinate; offsets are bottom-left,
+matching the 2D path. Geometry, volume marching, deferred lighting and the
+tonemap are tile-exact — a stitched render matches the untiled one to a single
+least-significant bit. Two passes are not: SSAO can seam within its kernel's
+projected reach (occluders outside the tile are not in its G-buffer) and
+re-dithers per tile, and local screen-space reflections cannot be tiled at all
+— rays leaving the tile find nothing. For tiled exports prefer a planar
+``reflector()``, whose mirrored camera inherits the same sub-frustum and is
+tile-exact, or set ``reflections: 0``. The reflection probe is never tiled: it
+is a world-space cubemap and captures all six full faces regardless of the
+region.
 
 Groups and transforms
 ---------------------
@@ -545,18 +563,31 @@ constraint, which was never the thing those nodes failed.
 Animation
 ---------
 
-Transform components and light intensity accept :ref:`oscillators
-<shader-language>` in place of numbers, using the same ``osc()`` descriptors as
-effect uniforms.
+Transform components and light intensity accept the same three :ref:`automation
+descriptors <shader-language>` an effect uniform does, in place of numbers:
+``osc()`` for a built-in waveform, ``midi()`` for a MIDI channel, and
+``audio()`` for a frequency band.
 
 .. code-block:: none
 
    group(id: "spinner", rot: [0, osc(type: oscKind.saw), 0], ... )
+   mesh("sphere", scale: [audio(audioBand.low), 1, 1])
+   light(type: "point", intensity: midi(channel: 1, mode: midiMode.velocity))
 
-Oscillators are hoisted out of the tree at compile time and advanced in place
-each frame against the same normalized loop time that drives effect automation,
-so scene motion and effect automation stay locked to one clock. Only ``osc()``
-calls are accepted here; an oscillator-shaped object literal is rejected.
+Each call means exactly what it means in an effect uniform — same arguments,
+same enums, same defaults, same normalized ``[0, 1]`` sub-range from ``min``
+and ``max``. Descriptors are hoisted out of the tree at compile time and
+advanced in place each frame: ``osc()`` against the same normalized loop time
+that drives effect automation, so scene motion and effect automation stay
+locked to one clock, and ``midi()``/``audio()`` against the same live
+``MidiState`` and ``AudioState`` the pipeline resolves effect uniforms from. A
+scene and the effects around it therefore respond to one performance, not two.
+
+Where no MIDI or audio input has been connected, a ``midi()`` or ``audio()``
+component holds at its ``min`` rather than going undefined.
+
+Only these three calls are accepted here; a descriptor-shaped object literal
+is rejected in favour of the call that builds it.
 
 Composition
 -----------

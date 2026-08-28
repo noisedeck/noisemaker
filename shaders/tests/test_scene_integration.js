@@ -161,6 +161,63 @@ await test('dispose() drops the in-flight scene render', async () => {
         'teardown must clear the in-flight scene render')
 })
 
+/**
+ * A CanvasRenderer whose scene renderer records the tile region argument, and
+ * whose pipeline records the region it was handed. Tiled export drives both.
+ */
+function tileHarness() {
+    const sceneRegions = []
+    const pipelineRegions = []
+    const renderer = new CanvasRenderer({ width: 8, height: 8 })
+    renderer._isScene = true
+    renderer._sceneBindings = []
+    renderer._clock = null
+    renderer._sceneTree = { updateWorldMatrices() {} }
+    renderer._sceneRenderer = {
+        async render(tree, clock, target, region) { sceneRegions.push(region) }
+    }
+    renderer._pipeline = {
+        lastPassCount: 0,
+        render() {},
+        setTileRegion(region) { pipelineRegions.push(region) },
+        clearTileRegion() { pipelineRegions.push(null) }
+    }
+    return { renderer, sceneRegions, pipelineRegions }
+}
+
+await test('a tile region set on the canvas reaches the scene renderer', async () => {
+    // Tiled hi-res export sets one region and renders each tile. The 2D path
+    // learns of it through Pipeline.setTileRegion; the scene path has no
+    // fragment coordinate to shift, so it needs the region itself in order to
+    // build the tile's sub-frustum.
+    const { renderer, sceneRegions, pipelineRegions } = tileHarness()
+    const region = { offset: [64, 0], fullResolution: [128, 128] }
+    renderer.setTileRegion(region)
+    await renderer.render(0.5)
+    assert.deepStrictEqual(sceneRegions, [region],
+        'the scene renderer must receive the same region object the pipeline got')
+    assert.deepStrictEqual(pipelineRegions, [region],
+        'the 2D pipeline still receives it unchanged')
+})
+
+await test('clearing the tile region returns the scene to full-frame rendering', async () => {
+    const { renderer, sceneRegions } = tileHarness()
+    renderer.setTileRegion({ offset: [64, 0], fullResolution: [128, 128] })
+    await renderer.render(0.5)
+    renderer.clearTileRegion()
+    await renderer.render(0.5)
+    assert.strictEqual(sceneRegions.length, 2)
+    assert.strictEqual(sceneRegions[1], null,
+        'a cleared region must reach the scene renderer as null, not linger')
+})
+
+await test('an untiled canvas hands the scene renderer no region', async () => {
+    const { renderer, sceneRegions } = tileHarness()
+    await renderer.render(0.5)
+    assert.deepStrictEqual(sceneRegions, [null],
+        'the default is untiled')
+})
+
 await test('createRuntime reuses an already-compiled graph', async () => {
     // A scene program needs no registered effect definitions, which do not
     // load under node — only scene syntax and pipeline builtins.

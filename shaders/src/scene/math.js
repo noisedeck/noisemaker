@@ -75,6 +75,59 @@ export function perspectiveMatrix(fovDeg, aspect, near, far) {
   return out
 }
 
+/**
+ * The projection matrix for ONE TILE of a larger image.
+ *
+ * Hi-res export renders the image in tiles (Pipeline.setTileRegion). A 2D
+ * effect is told the tile's pixel offset and the full image size and shifts its
+ * own gl_FragCoord to recover a full-image pixel. A projected view has no such
+ * coordinate to shift — its pixels come from the rasterizer — so the equivalent
+ * for a camera is to restrict its frustum to the tile's sub-rectangle. That
+ * renders exactly the tile's content, at the tile's full resolution, with no
+ * shader change at all: the projection matrix is the only thing that moves.
+ *
+ * Derivation. `perspectiveMatrix(fov, aspect, near, far)` is, by definition,
+ * the symmetric frustum
+ *
+ *   top = near * tan(fov / 2)      right = top * aspect
+ *   frustum(-right, right, -top, top, near, far)
+ *
+ * The near-plane rectangle [-right, right] x [-top, top] maps onto the whole
+ * image. A tile owning image pixels [x, x + width) x [y, y + height) therefore
+ * owns the same fraction of that rectangle, so its bounds are the full ones
+ * linearly interpolated by the tile's pixel fractions. The result is an
+ * off-centre (asymmetric) frustum — mat4.frustum, not mat4.perspective — and
+ * the four tiles of a 2x2 split tessellate the original frustum exactly.
+ *
+ * `aspect` is the FULL image's, not the tile's: the slicing is what gives the
+ * tile its own aspect, and deriving from the tile's would stretch every tile.
+ *
+ * Tile offsets are measured from the BOTTOM-LEFT of the full image, matching
+ * the 2D path (gl_FragCoord.y is bottom-up, and the tile-parity gate crops
+ * full frames from the bottom-left on both backends).
+ *
+ * @param {number} fovDeg - Vertical field of view in degrees
+ * @param {number} near - Near plane distance
+ * @param {number} far - Far plane distance
+ * @param {{x: number, y: number, width: number, height: number,
+ *          fullWidth: number, fullHeight: number}} tile - Tile rectangle in
+ *   full-image pixels, with the origin at the bottom-left
+ * @returns {Float32Array} Off-centre projection matrix for the tile
+ */
+export function tileFrustumMatrix(fovDeg, near, far, tile) {
+  const top = near * Math.tan(degToRad(fovDeg) * 0.5)
+  const right = top * (tile.fullWidth / tile.fullHeight)
+
+  const left = -right + 2 * right * (tile.x / tile.fullWidth)
+  const tileRight = -right + 2 * right * ((tile.x + tile.width) / tile.fullWidth)
+  const bottom = -top + 2 * top * (tile.y / tile.fullHeight)
+  const tileTop = -top + 2 * top * ((tile.y + tile.height) / tile.fullHeight)
+
+  const out = mat4.create()
+  mat4.frustum(out, left, tileRight, bottom, tileTop, near, far)
+  return out
+}
+
 export function reflectPointAcrossPlane(out, point, planePoint, planeNormal) {
   const dx = point[0] - planePoint[0]
   const dy = point[1] - planePoint[1]

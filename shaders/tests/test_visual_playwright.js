@@ -32,6 +32,7 @@ const SCENE_ANIMATION_ONLY = process.argv.includes('--scene-animation-only')
 const CROSS_BACKEND_ONLY = process.argv.includes('--cross-backend-only')
 const VOLUME_ONLY = process.argv.includes('--volume-only')
 const VOXEL_ONLY = process.argv.includes('--voxel-only')
+const TILE_ONLY = process.argv.includes('--tile-only')
 
 /**
  * Cross-backend maxDelta ceiling for the volume scene's lit colour.
@@ -2029,6 +2030,327 @@ async function testVolumeSamplingConvention(browser, port) {
   return { scene: sceneName, backend: 'webgl2+webgpu', status: 'pass', metrics: results }
 }
 
+/**
+ * Full-image size for the tiled-export gate, and its 2x2 tile size.
+ *
+ * Small enough to render the scene forty times in one page, large enough that
+ * a seam band is measurable in pixels rather than inferred. Non-square on
+ * purpose: the sub-frustum is sliced out of the FULL image's aspect, and a
+ * square image would let a tile-aspect derivation pass by coincidence.
+ */
+const TILE_FULL = [320, 240]
+
+/**
+ * Ceilings for the stitched tiled render. All MEASURED on real GPU hardware
+ * (`npm run test:shaders:visual`, system Chrome), identically on both backends.
+ *
+ * SEAM_BAND is the distance from an interior seam beyond which a pixel counts
+ * as interior. 32px is the SSAO kernel's reach in this scene: a 0.75 world-unit
+ * radius on the floor, about 5 units from a 55-degree camera over 240 rows,
+ * projects to roughly 34px of diameter. Nothing else here samples that far.
+ * Measured, the SSAO seam collapses from 156 inside 24px to 32 beyond 32px,
+ * which is exactly where the kernel stops reaching across.
+ *
+ * EXACT_* apply with SSAO off, where tiling is genuinely exact: the mesh
+ * rasterizer, the volume marcher and the deferred lighting all reconstruct the
+ * frame from the sub-frustum with nothing left over. Measured maxDelta 1 over
+ * 0.04% of pixels, at every distance from the seam — half-float rounding, not
+ * a seam.
+ *
+ * SSAO_* apply with SSAO on, where they are a gross-regression net rather than
+ * a parity claim. See testSceneTileStitch for why the residual beyond the band
+ * is not a seam at all.
+ */
+const TILE_SEAM_BAND = 32
+const TILE_EXACT_INTERIOR_TOL = 2
+const TILE_EXACT_MAX_TOL = 4
+const TILE_SSAO_INTERIOR_TOL = 48
+
+/**
+ * A deterministic scene exercising every pass tiling has to get right.
+ *
+ * A polished near-mirror floor (roughness 0.12) is what makes SSR actually
+ * march — the volume test's 0.9-rough plane is above MAX_SSR_ROUGHNESS and
+ * skips the loop entirely — so the screen-space reflection seam is measured
+ * rather than assumed absent. The sphere and the volume both fill the
+ * G-buffer, from the rasterizer and from the marcher respectively, and nothing
+ * in the scene has a time term.
+ * @param {number} ssao - Strength of the SSAO pass, 0 or 1
+ */
+function tileStitchScene(ssao) {
+  return `search synth3d
+noise3d(speed: 0, seed: 4, scale: 3).write3d(vol0, geo0)
+scene(
+  background: [0.02, 0.02, 0.03],
+  ambient: 0.25,
+  ssao: ${ssao},
+  reflections: 1,
+  camera(fov: 55, pos: [0, 2.2, -4.5], target: [0, 0.5, 0]),
+  light(type: "directional", dir: [0.4, -1, 0.6], intensity: 2.2),
+  mesh("plane", width: 14, height: 14)
+    .material(solid(color: [0.35, 0.38, 0.45]).pbr(metallic: 0.9, roughness: 0.12)),
+  mesh("sphere", radius: 0.9, pos: [-1.5, 0.9, 0])
+    .material(solid(color: [0.9, 0.4, 0.1]).pbr(metallic: 0.2, roughness: 0.35)),
+  volume(vol0, threshold: 0.5, pos: [1.4, 1.0, 0])
+    .material(solid(color: [0.95, 0.15, 0.05]).pbr(metallic: 0, roughness: 0.6))
+).write(o0)
+render(o0)`
+}
+
+/**
+ * Page-side body of the tiled-export measurement.
+ *
+ * Renders the loaded scene once at full size, then as four tiles through the
+ * real export entry — CanvasRenderer.setTileRegion, the same one the 2D tiled
+ * export drives, plus a resize to the tile size — stitches the tiles and
+ * profiles the difference by distance from an interior seam.
+ *
+ * All arithmetic happens in the page on purpose. Shipping five 320x240 RGBA
+ * buffers per configuration back over the CDP bridge to diff them in node
+ * costs seconds and buys nothing.
+ */
+const measureTileStitch = async ({ full }) => {
+  const [W, H] = full
+  const tileW = W / 2
+  const tileH = H / 2
+  // Bottom-left pixel offsets, the convention Pipeline.setTileRegion uses.
+  const offsets = [[0, 0], [tileW, 0], [0, tileH], [tileW, tileH]]
+
+  const renderer = window.__noisemakerCanvasRenderer
+  renderer.stop()
+  renderer._clock?.reset()
+
+  // The scene renders BEFORE the pipeline each tick, so a volume reads the
+  // atlas the PREVIOUS frame wrote. Settle every configuration.
+  const settle = async () => {
+    for (let i = 0; i < 4; i++) await renderer.render(0.25)
+  }
+  const read = async () => {
+    const lit = await renderer.sceneRenderer.backend.readPixels('scene_lit_color')
+    const refl = await renderer.sceneRenderer.backend.readPixels('scene_reflect_color')
+    return { width: lit.width, height: lit.height, lit: lit.data, refl: refl.data }
+  }
+
+  renderer.clearTileRegion()
+  renderer.resize(W, H)
+  await settle()
+  const untiled = await read()
+
+  renderer.resize(tileW, tileH)
+  const tiles = []
+  for (const offset of offsets) {
+    renderer.setTileRegion({ offset, fullResolution: [W, H] })
+    await settle()
+    tiles.push(await read())
+  }
+  renderer.clearTileRegion()
+  renderer.resize(W, H)
+
+  const badSize = tiles.find(t => t.width !== tileW || t.height !== tileH)
+  if (badSize || untiled.width !== W || untiled.height !== H) {
+    return { error: `unexpected readback size: untiled ${untiled.width}x${untiled.height}, ` +
+      `tile ${badSize ? `${badSize.width}x${badSize.height}` : 'ok'}` }
+  }
+
+  // readPixels returns TOP-DOWN on both backends; tile offsets are bottom-up,
+  // so a tile at offset (ox, oy) starts at row H - oy - tileH.
+  const stitch = (key) => {
+    const out = new Uint8Array(W * H * 4)
+    for (let t = 0; t < tiles.length; t++) {
+      const [ox, oy] = offsets[t]
+      const top = H - oy - tileH
+      for (let y = 0; y < tileH; y++) {
+        const src = y * tileW * 4
+        out.set(tiles[t][key].subarray(src, src + tileW * 4), ((top + y) * W + ox) * 4)
+      }
+    }
+    return out
+  }
+
+  // Only the two INTERIOR seams can disagree. The outer edges of the tile grid
+  // are the image's own edges, where the untiled render's screen-space passes
+  // run out of data in exactly the same way.
+  const bands = [0, 1, 2, 4, 8, 12, 16, 24, 32, 48]
+  const compare = (a, b) => {
+    const maxAtBand = new Array(bands.length).fill(0)
+    let maxAll = 0
+    let sum = 0
+    let differing = 0
+    for (let y = 0; y < H; y++) {
+      const dy = Math.abs(y - (H / 2 - 0.5)) - 0.5
+      for (let x = 0; x < W; x++) {
+        const dx = Math.abs(x - (W / 2 - 0.5)) - 0.5
+        const distance = Math.min(dx, dy)
+        const base = (y * W + x) * 4
+        let pixelMax = 0
+        for (let c = 0; c < 3; c++) {
+          const delta = Math.abs(a[base + c] - b[base + c])
+          sum += delta
+          if (delta > pixelMax) pixelMax = delta
+        }
+        if (pixelMax > 0) differing++
+        if (pixelMax > maxAll) maxAll = pixelMax
+        for (let i = 0; i < bands.length; i++) {
+          if (distance >= bands[i] && pixelMax > maxAtBand[i]) maxAtBand[i] = pixelMax
+        }
+      }
+    }
+    return {
+      maxAll,
+      maxAtBand,
+      meanDelta: sum / (W * H * 3),
+      differingPercent: (differing / (W * H)) * 100
+    }
+  }
+
+  return {
+    backend: renderer.pipeline?.backend?.getName?.() ?? 'unknown',
+    bands,
+    lit: compare(untiled.lit, stitch('lit')),
+    refl: compare(untiled.refl, stitch('refl'))
+  }
+}
+
+/**
+ * Tiled hi-res export of a scene program.
+ *
+ * A scene has no fragment coordinate to shift, so it tiles by restricting the
+ * camera to the tile's sub-frustum. The proof is that four tiles stitch back
+ * into the frame they were sliced out of.
+ *
+ * Two configurations of one scene, because they gate different claims.
+ *
+ * SSAO OFF is the tight gate, and it is tight because the sub-frustum really is
+ * exact: the mesh rasterizer, the volume marcher and the deferred lighting
+ * reproduce the untiled frame to within one LSB on 0.04% of pixels, with no
+ * seam structure at all. A regression in the frustum derivation, the
+ * bottom-left offset convention or the mirrored camera's projection cannot
+ * survive it.
+ *
+ * SSAO ON is reported and loosely bounded, and the reason is worth stating
+ * exactly. Two separate effects, measured on GPU hardware:
+ *
+ *   1. A genuine seam, and a strong one. Occluders outside the tile are not in
+ *      the tile's G-buffer, so pixels within the kernel's projected radius of a
+ *      seam darken less than they would in a full frame: up to 156/255 within
+ *      24px of a seam, collapsing to 32/255 beyond 32px. That distance is the
+ *      kernel's reach, so the band is as wide as SSAO can see and no wider.
+ *      Unavoidable for any screen-space pass, and the same trade the 2D
+ *      pipeline accepts for its neighbourhood effects (test_tiling_parity gates
+ *      the tile INTERIOR and skips an 18px border of a 64px tile).
+ *
+ *   2. A dither phase shift, everywhere. SSAO rotates its kernel per pixel by
+ *      hashing gl_FragCoord.xy, which in a tile is the TILE-LOCAL coordinate.
+ *      Every tile therefore gets a different — not worse, but different —
+ *      realisation of the same AO noise: 28-32/255 on individual pixels with a
+ *      0.29/255 mean, flat across the whole image rather than concentrated at
+ *      the seams, which is exactly what the band profile shows beyond 32px. It
+ *      does not read as a seam because a per-pixel rotation has no structure to
+ *      break at a boundary. Making it identical would mean adding the tile
+ *      offset to that hash, i.e. a uniform on the SSAO shader — the same fix
+ *      every tile-aware 2D effect applies to its own procedural seed. That is a
+ *      shader change, deliberately out of scope here, and it is recorded as a
+ *      finding rather than papered over by a loose "interior" tolerance that
+ *      would also hide a real regression.
+ *
+ * The post-SSR colour is reported for both configurations and gated in neither:
+ * local SSR marches in screen space, so a ray leaving the tile has nothing to
+ * hit and its `edgeFade` covers a tenth of the tile. That is a property of
+ * screen-space reflection, not of tiling.
+ */
+async function testSceneTileStitch(browser, port, backendName) {
+  const sceneName = 'tiled hi-res export stitches back to the untiled frame'
+  console.log(`\n--- Testing ${sceneName} on ${backendName.toUpperCase()} ---`)
+
+  const backendQuery = backendName === 'webgpu' ? 'wgsl' : 'glsl'
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 } })
+  const page = await context.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message || String(error)))
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+
+  let exact
+  let withSSAO
+  try {
+    await page.goto(`http://127.0.0.1:${port}/demo/shaders/index.html?backend=${backendQuery}`,
+      { waitUntil: 'domcontentloaded', timeout: 15000 })
+    await page.locator('#app-container').waitFor({ state: 'visible', timeout: 30000 })
+
+    await loadSceneSource(page, tileStitchScene(0))
+    exact = await page.evaluate(measureTileStitch, { full: TILE_FULL })
+    await loadSceneSource(page, tileStitchScene(1))
+    withSSAO = await page.evaluate(measureTileStitch, { full: TILE_FULL })
+  } finally {
+    await context.close()
+  }
+
+  const metrics = { exact, withSSAO }
+  const fail = (reason) => ({ scene: sceneName, backend: backendName, status: 'fail', reason, metrics })
+
+  if (exact.error) return fail(`SSAO off: ${exact.error}`)
+  if (withSSAO.error) return fail(`SSAO on: ${withSSAO.error}`)
+  if (errors.length) return fail(errors.slice(0, 3).join(' / '))
+
+  // Both backends must genuinely be exercised; a silent fallback would make one
+  // of these two cases a duplicate of the other.
+  const expectedBackend = backendName === 'webgpu' ? 'WebGPU' : 'WebGL2'
+  if (exact.backend !== expectedBackend) {
+    return fail(`expected the ${expectedBackend} backend, got ${exact.backend}`)
+  }
+
+  const report = (label, result) => {
+    for (const [key, stats] of [['lit', result.lit], ['SSR', result.refl]]) {
+      const profile = result.bands
+        .map((band, i) => `>=${band}px:${stats.maxAtBand[i]}`)
+        .join(' ')
+      console.log(`  ${label} / ${key}: maxDelta=${stats.maxAll} mean=${stats.meanDelta.toFixed(3)} ` +
+        `differing=${stats.differingPercent.toFixed(2)}%`)
+      console.log(`    max delta by distance from an interior seam: ${profile}`)
+    }
+  }
+  report('SSAO off', exact)
+  report('SSAO on ', withSSAO)
+
+  const bandIndex = exact.bands.indexOf(TILE_SEAM_BAND)
+  const nearIndex = exact.bands.indexOf(2)
+
+  // The tight gate. Without a sub-frustum every tile renders the same
+  // full-frame image and the stitch is four shrunken copies: measured at
+  // maxDelta 255 over 72% of pixels, so this cannot pass by accident.
+  if (exact.lit.maxAtBand[nearIndex] > TILE_EXACT_INTERIOR_TOL) {
+    return fail(
+      `SSAO off: the stitch differs from the untiled render by ` +
+      `${exact.lit.maxAtBand[nearIndex]} more than 2px from a seam ` +
+      `(ceiling ${TILE_EXACT_INTERIOR_TOL})`)
+  }
+  if (exact.lit.maxAll > TILE_EXACT_MAX_TOL) {
+    return fail(
+      `SSAO off: seam pixels differ by ${exact.lit.maxAll} ` +
+      `(ceiling ${TILE_EXACT_MAX_TOL})`)
+  }
+
+  // The loose net: SSAO's dither phase is expected to differ, a broken frustum
+  // is not.
+  if (withSSAO.lit.maxAtBand[bandIndex] > TILE_SSAO_INTERIOR_TOL) {
+    return fail(
+      `SSAO on: the stitch differs by ${withSSAO.lit.maxAtBand[bandIndex]} at ` +
+      `${TILE_SEAM_BAND}px from a seam (ceiling ${TILE_SSAO_INTERIOR_TOL}) — ` +
+      'larger than the AO dither alone can account for')
+  }
+
+  return {
+    scene: sceneName,
+    backend: backendName,
+    status: 'pass',
+    reason:
+      `SSAO off: exact beyond 2px (maxDelta ${exact.lit.maxAll}, mean ` +
+      `${exact.lit.meanDelta.toFixed(3)}); SSAO on: ${withSSAO.lit.maxAtBand[bandIndex]} ` +
+      `interior / ${withSSAO.lit.maxAll} at the seam; with SSR ` +
+      `${exact.refl.maxAll} / ${withSSAO.refl.maxAll}`,
+    metrics
+  }
+}
+
 async function main() {
   const { server, port } = await startServer()
   console.log(`Server on port ${port}`)
@@ -2054,6 +2376,9 @@ async function main() {
     results.push(await testRoughMetalEnvironmentLighting(browser, port, 'webgpu'))
   } else if (CROSS_BACKEND_ONLY) {
     results.push(...(await testCrossBackendParity(browser, port)))
+  } else if (TILE_ONLY) {
+    results.push(await testSceneTileStitch(browser, port, 'webgl2'))
+    results.push(await testSceneTileStitch(browser, port, 'webgpu'))
   } else if (VOXEL_ONLY) {
     results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
     results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
@@ -2095,12 +2420,14 @@ async function main() {
     results.push(await testVolumeInReflectionProbe(browser, port))
     results.push(await testVoxelVolumeScene(browser, port, 'webgl2'))
     results.push(await testVoxelVolumeScene(browser, port, 'webgpu'))
+    results.push(await testSceneTileStitch(browser, port, 'webgl2'))
+    results.push(await testSceneTileStitch(browser, port, 'webgpu'))
     results.push(...(await testCrossBackendParity(browser, port)))
     results.push(await testVolumeCrossBackendParity(browser, port))
     results.push(await testVoxelCrossBackendParity(browser, port))
   }
   if (!DEMO_ONLY && !PLANAR_REFLECTION_ONLY && !MATERIAL_BANDING_ONLY && !SCENE_ANIMATION_ONLY
-      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY && !VOXEL_ONLY) {
+      && !CROSS_BACKEND_ONLY && !VOLUME_ONLY && !VOXEL_ONLY && !TILE_ONLY) {
     const scenes = ['hello-engine.dsl', 'materials-lab.dsl']
     const backends = ['webgl2', 'webgpu']
     for (const scene of scenes) {

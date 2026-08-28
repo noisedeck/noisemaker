@@ -107,6 +107,44 @@ const PROBE_GBUF_OUTPUTS = Object.freeze({
 const REFLECTION_PROBE_TEXTURE = 'scene_reflection_probe'
 const REFLECTION_PROBE_FALLBACK = 'scene_reflection_probe_fallback'
 
+/**
+ * Turn a pipeline tile region into the camera's tile rectangle, or null.
+ *
+ * The region is the same object the 2D path receives through
+ * Pipeline.setTileRegion: a bottom-left pixel offset into the full image, plus
+ * the full image's size. The tile's own size is the size the scene renderer is
+ * currently rendering at, which is what the export resizes between tiles.
+ *
+ * Null means "render the full frame", and so does a region that describes the
+ * whole image: a degenerate tile is not a tile, and routing it through
+ * mat4.frustum instead of mat4.perspective would perturb the matrix by an ulp
+ * for no reason. Malformed regions are ignored rather than allowed to poison a
+ * projection with NaN.
+ *
+ * The rectangle is a fresh object, but only on the tiled path — a live,
+ * untiled render loop returns null here and allocates nothing. Tiled export is
+ * a one-shot capture, not a loop.
+ * @param {?{offset: number[], fullResolution: number[]}} region - Tile region
+ * @param {number} width - Current render width (this tile's width)
+ * @param {number} height - Current render height (this tile's height)
+ * @returns {?{x: number, y: number, width: number, height: number,
+ *             fullWidth: number, fullHeight: number}}
+ */
+function resolveTile(region, width, height) {
+  if (!region) return null
+  const { offset, fullResolution } = region
+  if (!Array.isArray(offset) || offset.length !== 2) return null
+  if (!Array.isArray(fullResolution) || fullResolution.length !== 2) return null
+  const [x, y] = offset
+  const [fullWidth, fullHeight] = fullResolution
+  for (const value of [x, y, fullWidth, fullHeight]) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  }
+  if (fullWidth <= 0 || fullHeight <= 0) return null
+  if (x === 0 && y === 0 && fullWidth === width && fullHeight === height) return null
+  return { x, y, width, height, fullWidth, fullHeight }
+}
+
 const LIGHT_TYPE_CODE = Object.freeze({ point: 0, directional: 1, spot: 2 })
 const ALL_TEXTURES = [...GBUF_TEXTURES, ...PLANAR_GBUF_TEXTURES, ...WORK_TEXTURES]
 
@@ -242,8 +280,12 @@ export class SceneRenderer {
    * @param {Clock} clock - Supplies elapsed time
    * @param {string} [target='screen'] - Texture to present into. Scene
    *   programs pass a pipeline surface so 2D effects can consume the result.
+   * @param {?{offset: number[], fullResolution: number[]}} [tileRegion=null] -
+   *   The region set on the canvas for tiled hi-res export, or null for a full
+   *   frame. The same object the 2D pipeline is given; the scene turns it into
+   *   a camera sub-frustum rather than a fragment-coordinate shift.
    */
-  async render(sceneTree, clock, target = 'screen') {
+  async render(sceneTree, clock, target = 'screen', tileRegion = null) {
     if (!this._initialized || !this.backend) return
 
     const camera = sceneTree.camera
@@ -255,6 +297,15 @@ export class SceneRenderer {
     const width = this._width
     const height = this._height
     const time = clock?.elapsed || 0
+
+    // Tiled hi-res export. Written on EVERY frame, null included, so a tile
+    // set for one export can never leak into a later untiled frame. Everything
+    // that projects the main view — the mesh and volume G-buffer fills, the
+    // mirrored planar view, and the view-projection SSAO and SSR reconstruct
+    // through — reads this camera, so this single assignment tiles all of them.
+    // The reflection probe deliberately does NOT: see _renderReflectionProbe.
+    camera.tile = resolveTile(tileRegion, width, height)
+
     const reflStrength = settings.reflections ?? 1
     const probeActive = reflStrength > 0 && this._prepareReflectionProbe(settings)
     if (probeActive) this._ensureReflectionProbeResources(this._resolvedProbeSize)
@@ -438,10 +489,32 @@ export class SceneRenderer {
       }
     }
 
-    // View-projection is shared by SSAO reprojection and SSR marching.
+    // View-projection is shared by SSAO reprojection and SSR marching. While
+    // tiling this is the TILE's: both passes project world points back into the
+    // G-buffer they are reading, and that G-buffer holds only the tile.
     mat4.multiply(this._viewProj, camera.getProjectionMatrix(aspect), camera.getViewMatrix())
 
     // --- 1b. SSAO pass ---
+    // u_radius is a WORLD-space radius, so tiling does not rescale it: the
+    // kernel is built around the world position the G-buffer stores and
+    // reprojected through u_viewProj, which the tile already accounts for.
+    //
+    // SEAM: occluders that fall outside the tile are not in the tile's
+    // G-buffer, so a reprojected sample landing outside [0,1] is skipped and
+    // pixels within the kernel's projected radius of a tile edge darken less
+    // than they would in a full frame. Measured on hardware at up to 156/255
+    // within 24px of a seam, back to the noise floor beyond 32px — the band is
+    // as wide as the kernel reaches and no wider. This is the same class of
+    // seam the 2D path accepts for every neighbourhood-sampling effect
+    // (test_tiling_parity gates the tile INTERIOR and skips an 18px border on a
+    // 64px tile); a screen-space effect cannot see beyond its own screen.
+    //
+    // Separately, the per-pixel kernel rotation hashes gl_FragCoord, which in a
+    // tile is tile-local, so each tile realises the AO dither with a different
+    // phase (28-32/255 per pixel, 0.29/255 mean, flat across the image). Making
+    // that identical needs the tile offset inside the hash — a uniform on the
+    // SSAO shader, the same fix tile-aware 2D effects apply to their own
+    // procedural seeds. testSceneTileStitch measures both effects separately.
     const ssaoStrength = settings.ssao ?? 1
     if (ssaoStrength > 0) {
       this.backend.executePass({
@@ -531,6 +604,19 @@ export class SceneRenderer {
     // The existing reflection stage composites the mirrored scene on the
     // explicit planar receiver, then uses SSR only for all other materials.
     // Keeping this in one fullscreen pass preserves WebGPU texture parity.
+    //
+    // TILING: the planar half is tile-exact — the mirrored G-buffer is the
+    // matching tile of the mirrored view, so u_reflectionViewProj lands on the
+    // right texel — except for its own `planarEdgeFade`, which fades the last
+    // 2.5% of the mirrored image and now fades at tile edges too.
+    //
+    // The SSR half cannot be tile-exact, and no projection fixes that: a ray
+    // marched off the side of the tile has nothing to hit, because the geometry
+    // it would have hit was never rasterized into this tile's G-buffer. The
+    // march therefore breaks early and `edgeFade` (10% of the image, now 10% of
+    // the TILE) attenuates hits near the border. Reflections seam more widely
+    // than SSAO does, exactly as a 24-step screen-space march must. The 2D
+    // pipeline accepts the identical trade for its own neighbourhood effects.
     if (reflStrength > 0) {
       this.backend.executePass({
         id: 'scene_ssr_pass',
@@ -558,6 +644,10 @@ export class SceneRenderer {
     }
 
     // --- 3. Present (with tone mapping + gamma) ---
+    // Tile-exact by construction: a fullscreen pass over the tile, mapping each
+    // of the tile's texels through a per-pixel tone curve. Nothing here reads a
+    // neighbour or a screen position, so the tile's output is byte-identical to
+    // the corresponding rectangle of a full-frame present of the same input.
     this.backend.executePass({
       id: 'scene_tonemap_present',
       program: 'scene_tonemap_present',
@@ -605,6 +695,19 @@ export class SceneRenderer {
     this._probeNextFace = 0
   }
 
+  /**
+   * Capture the world-space reflection cubemap.
+   *
+   * TILING: the probe is never tiled, and `this._probeCamera.tile` is left null
+   * for the life of the renderer. A probe face is not a view of the screen —
+   * it is one 90-degree face of a cubemap at probe resolution, sampled by
+   * reflection DIRECTION rather than by screen position. Restricting a face to
+   * the screen tile's sub-rectangle would capture a fraction of that face's
+   * world and leave every reflection direction outside it reading the wrong
+   * texel, so each tile would carry a different, wrong cubemap. Capturing all
+   * six full faces per tile is both correct and the same cost it always was.
+   * @private
+   */
   _renderReflectionProbe(frameState, meshNodes, volumeNodes, materials, lights, envTexture, envIntensity, background, sky, ground) {
     const camera = this._probeCamera
     const position = this._probePosition
@@ -724,6 +827,11 @@ export class SceneRenderer {
     reflectedCamera.fov = camera.fov
     reflectedCamera.near = camera.near
     reflectedCamera.far = camera.far
+    // The mirrored view fills a G-buffer of the same size as the main one and
+    // SSR projects the receiver into it with u_reflectionViewProj, so when the
+    // main view is a tile the mirror is the same tile of the mirrored image.
+    // Any other frustum here would sample the planar target at the wrong UV.
+    reflectedCamera.tile = camera.tile
     reflectPointAcrossPlane(
       reflectedCamera._position,
       cameraPosition,

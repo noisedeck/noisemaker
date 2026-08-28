@@ -321,6 +321,16 @@ scene surface is always opaque.
 
 ``exposure`` is a pre-tonemap linear multiplier and is not range-validated.
 
+Tiling
+------
+
+Scene tiling is sub-frustum projection: the camera's projection is sliced to
+the tile's rectangle and everything downstream follows the matrices, so no
+scene shader takes a tile uniform. ``ssaoRadius`` is world-space and needs no
+render-scale treatment. SSAO can seam within its kernel's projected reach and
+re-dithers per tile; local SSR is not tileable (a planar reflector is); the
+probe captures all six full faces per tile.
+
 Backend parity
 --------------
 

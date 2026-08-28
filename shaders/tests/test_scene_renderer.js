@@ -4,6 +4,7 @@ import { SceneRenderer } from '../src/rendering/scene-renderer.js'
 import { MeshRenderer } from '../src/rendering/mesh-renderer.js'
 
 import { SceneTree } from '../src/scene/tree.js'
+import { mat4, perspectiveMatrix } from '../src/scene/math.js'
 
 /**
  * The world matrix an untransformed node actually produces.
@@ -1542,6 +1543,257 @@ function reflectedVolumeTree(extraNodes = [], settings = {}) {
   assert.deepStrictEqual(
     backend.clearedTextures, Object.values(GBUF_OUTPUTS),
     'nothing drew, so the four targets are zeroed directly')
+}
+
+// --- Tiled hi-res export: the sub-frustum ---
+//
+// Pipeline.setTileRegion drives 2D effects by handing them tileOffset /
+// fullResolution so gl_FragCoord + tileOffset reconstructs a full-image pixel.
+// A scene has no such coordinate to shift: its geometry is projected, not
+// sampled. The equivalent for a projected view is an off-centre (asymmetric)
+// frustum restricted to the tile's sub-rectangle, which renders exactly that
+// tile at full per-tile resolution with no shader change at all.
+//
+// Tile offsets follow the 2D path's convention exactly: pixels from the
+// BOTTOM-LEFT of the full image (gl_FragCoord.y is bottom-up, and
+// test_tiling_parity crops full frames from the bottom-left on both backends).
+
+/** Assert two 16-element matrices agree to `eps`. */
+function assertMatrixClose(actual, expected, label, eps = 1e-5) {
+  assert.ok(actual, `${label}: no matrix`)
+  for (let i = 0; i < 16; i++) {
+    assert.ok(Math.abs(actual[i] - expected[i]) <= eps,
+      `${label}[${i}]: ${actual[i]} != ${expected[i]}`)
+  }
+}
+
+/** A mesh + volume + reflector scene whose camera has hand-checkable numbers. */
+function tileTree({ fov = 90, near = 1, far = 1000, reflector = false } = {}) {
+  const nodes = [
+    { id: 'box', type: 'mesh', meshType: 'box', meshParams: {}, transform: {}, children: [], parent: null },
+    { id: 'cloud', type: 'volume', surface: 'vol0', threshold: 0.5, transform: {}, children: [], parent: null }
+  ]
+  if (reflector) {
+    nodes.unshift({
+      id: 'mirror',
+      type: 'mesh',
+      meshType: 'plane',
+      meshParams: { width: 16, height: 16 },
+      transform: { position: [0, -2, 0] },
+      planarReflection: true,
+      children: [],
+      parent: null
+    })
+  }
+  return SceneTree.fromIR({
+    camera: { fov, near, far, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    settings: {},
+    materials: {},
+    nodes
+  })
+}
+
+/** Snapshot the projection uniform of the first pass running `program`. */
+function projectionOf(backend, program, passId) {
+  const pass = backend.passes.find(p =>
+    p.program === program && (passId === undefined || p.id === passId))
+  assert.ok(pass, `no ${program} pass${passId ? ` with id ${passId}` : ''}`)
+  return Array.from(pass.uniforms.u_projectionMatrix)
+}
+
+// Regression pin: with NO tile, every projection is byte-identical to the
+// plain perspective matrix it has always been. mat4.frustum and mat4.perspective
+// agree mathematically but not always to the last ulp, so the untiled path must
+// keep calling perspective rather than routing through the tile helper.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color')
+
+  const expected = perspectiveMatrix(90, 320 / 240, 1, 1000)
+  assert.deepStrictEqual(projectionOf(backend, 'scene_mesh_gbuf'), Array.from(expected),
+    'untiled mesh projection must be bit-identical to the pre-tiling perspective matrix')
+  assert.deepStrictEqual(projectionOf(backend, 'scene_volume_gbuf'), Array.from(expected),
+    'untiled volume projection must be bit-identical to the pre-tiling perspective matrix')
+}
+
+// A tile becomes an off-centre frustum sliced out of the full-frame one.
+//
+// Hand derivation, fov 90 / near 1 / far 1000, full image 100x100 (aspect 1),
+// tile 50x50 at bottom-left offset [50, 50] (the top-right quadrant):
+//   top   = near * tan(fov/2) = 1,  right = top * fullAspect = 1
+//   left   = -1 + 2 * (50 / 100)  = 0     right = -1 + 2 * (100 / 100) = 1
+//   bottom = -1 + 2 * (50 / 100)  = 0     top   = -1 + 2 * (100 / 100) = 1
+// frustum(0, 1, 0, 1, 1, 1000):
+//   m0 = 2n/(r-l) = 2   m5 = 2n/(t-b) = 2
+//   m8 = (r+l)/(r-l) = 1   m9 = (t+b)/(t-b) = 1
+//   m10 = (f+n)/(n-f) = -1001/999   m14 = 2fn/(n-f) = -2000/999
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(50, 50)
+  await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color',
+    { offset: [50, 50], fullResolution: [100, 100] })
+
+  const meshProjection = projectionOf(backend, 'scene_mesh_gbuf')
+  const handDerived = [
+    2, 0, 0, 0,
+    0, 2, 0, 0,
+    1, 1, -1001 / 999, -1,
+    0, 0, -2000 / 999, 0
+  ]
+  assertMatrixClose(meshProjection, handDerived,
+    'tile [50,50] of a 100x100 frame is the top-right sub-frustum')
+
+  // The volume's bounding box is rasterized with the same vertex stage, so it
+  // must carry the identical matrix or volumes would drift against meshes.
+  assert.deepStrictEqual(projectionOf(backend, 'scene_volume_gbuf'), meshProjection,
+    'the volume pass carries the same sub-frustum as the mesh pass')
+}
+
+// An off-centre tile of a non-square image, checked against mat4.frustum built
+// from independently derived bounds.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(50, 50)
+  await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color',
+    { offset: [50, 25], fullResolution: [200, 100] })
+
+  // top = 1, right = top * (200/100) = 2
+  //   left = -2 + 4 * (50/200) = -1     right = -2 + 4 * (100/200) = 0
+  //   bottom = -1 + 2 * (25/100) = -0.5 top   = -1 + 2 * (75/100) = 0.5
+  const expected = mat4.frustum(mat4.create(), -1, 0, -0.5, 0.5, 1, 1000)
+  assertMatrixClose(projectionOf(backend, 'scene_mesh_gbuf'), expected,
+    'a non-square full image slices on the full-image aspect, not the tile aspect')
+}
+
+// The union of the four tiles of a 2x2 split must reconstruct the full frustum:
+// each tile's near-plane rectangle is a quadrant of the untiled one.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(64, 64)
+  const seen = []
+  for (const offset of [[0, 0], [64, 0], [0, 64], [64, 64]]) {
+    backend.passes.length = 0
+    await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color',
+      { offset, fullResolution: [128, 128] })
+    seen.push(projectionOf(backend, 'scene_mesh_gbuf'))
+  }
+  // m8 = (r+l)/(r-l): -1 for a left column, +1 for a right one. m9 likewise
+  // for bottom/top. Four distinct quadrants, no duplicates.
+  assert.deepStrictEqual(seen.map(m => [m[8], m[9]]),
+    [[-1, -1], [1, -1], [-1, 1], [1, 1]],
+    'the four tiles occupy the four quadrants of the full frustum')
+}
+
+// A degenerate "tile" that covers the whole image is not a tile at all, and
+// must take the untiled path so the regression pin above still describes it.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color',
+    { offset: [0, 0], fullResolution: [320, 240] })
+  assert.deepStrictEqual(
+    projectionOf(backend, 'scene_mesh_gbuf'),
+    Array.from(perspectiveMatrix(90, 320 / 240, 1, 1000)),
+    'a full-frame tile region renders exactly as an untiled frame')
+}
+
+// SSAO and SSR reconstruct screen positions from the view-projection. A tile's
+// view-projection must be the TILE's, or every reprojected sample lands in the
+// full frame's UV space and the passes read the wrong texels.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(50, 50)
+  await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color',
+    { offset: [50, 50], fullResolution: [100, 100] })
+
+  const projection = projectionOf(backend, 'scene_mesh_gbuf')
+  const view = SceneTree.fromIR({
+    camera: { fov: 90, near: 1, far: 1000, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [], settings: {}, materials: {}, nodes: []
+  }).camera.getViewMatrix()
+  const expected = mat4.multiply(mat4.create(), projection, view)
+
+  const ssao = backend.passes.find(p => p.id === 'scene_ssao_pass')
+  assertMatrixClose(ssao.uniforms.u_viewProj, expected, 'SSAO reprojects through the tile view-projection')
+  const ssr = backend.passes.find(p => p.id === 'scene_ssr_pass')
+  assertMatrixClose(ssr.uniforms.u_viewProj, expected, 'SSR marches in the tile view-projection')
+}
+
+// The mirrored camera renders the SAME sub-rectangle of its own view, so it
+// carries the same sub-frustum — the planar G-buffer is a tile too, and SSR
+// projects the receiver into it with u_reflectionViewProj.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(50, 50)
+  await renderer.render(tileTree({ reflector: true }), { elapsed: 0 }, 'scene_color',
+    { offset: [50, 50], fullResolution: [100, 100] })
+
+  const main = projectionOf(backend, 'scene_mesh_gbuf', 'scene_gbuf_pass')
+  const planar = projectionOf(backend, 'scene_mesh_gbuf', 'scene_planar_gbuf_pass')
+  assert.deepStrictEqual(planar, main,
+    'the mirrored camera projects through the same sub-frustum as the main view')
+  const planarVolume = projectionOf(backend, 'scene_volume_gbuf', 'scene_planar_gbuf_pass')
+  assert.deepStrictEqual(planarVolume, main,
+    'the mirrored volume pass carries it too')
+
+  // u_reflectionViewProj is the mirrored camera's own view-projection, so it
+  // must be built on the same sub-frustum.
+  const ssr = backend.passes.find(p => p.id === 'scene_ssr_pass')
+  const expected = mat4.multiply(mat4.create(), main, renderer._reflectionCamera.getViewMatrix())
+  assertMatrixClose(ssr.uniforms.u_reflectionViewProj, expected,
+    'the planar reprojection matrix is the mirrored sub-frustum view-projection')
+}
+
+// The reflection probe is a world-space cubemap, not a view of the screen. Its
+// six faces are captured at probe resolution with a 90-degree square frustum
+// and are sampled by direction, so a tile must never reach them: tiling a probe
+// face would capture a sixth of a sixth of the world and every reflection would
+// be wrong.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(50, 50)
+  const tree = tileTree()
+  tree.settings.reflectionProbe = [0, 0, 0]
+  tree.settings.reflectionProbeSize = 64
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color',
+    { offset: [50, 50], fullResolution: [100, 100] })
+
+  const probeProjection = projectionOf(backend, 'scene_mesh_gbuf', 'scene_probe_gbuf_face_0')
+  assert.deepStrictEqual(probeProjection, Array.from(perspectiveMatrix(90, 1, 0.1, 1000)),
+    'probe faces keep the untiled 90-degree square frustum')
+  for (let face = 0; face < 6; face++) {
+    assert.deepStrictEqual(
+      projectionOf(backend, 'scene_mesh_gbuf', `scene_probe_gbuf_face_${face}`),
+      probeProjection,
+      `probe face ${face} is untiled`)
+  }
+}
+
+// A tile set on one frame must not leak into the next. The scene renderer is
+// handed the region on every render entry, so passing nothing means untiled.
+{
+  const backend = stubBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = tileTree()
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color',
+    { offset: [160, 120], fullResolution: [320, 240] })
+  backend.passes.length = 0
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+  assert.deepStrictEqual(
+    projectionOf(backend, 'scene_mesh_gbuf'),
+    Array.from(perspectiveMatrix(90, 320 / 240, 1, 1000)),
+    'a frame rendered without a tile region is untiled, whatever the previous frame did')
 }
 
 console.log('Scene renderer tests passed')

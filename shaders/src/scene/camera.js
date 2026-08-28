@@ -1,6 +1,6 @@
 // shaders/src/scene/camera.js
 import { SceneNode } from './node.js'
-import { lookAtMatrix, perspectiveMatrix } from './math.js'
+import { lookAtMatrix, perspectiveMatrix, tileFrustumMatrix } from './math.js'
 
 /**
  * A perspective camera.
@@ -22,6 +22,19 @@ export class CameraNode extends SceneNode {
     this.target = target || [0, 0, 0]
     this.up = up || [0, 1, 0]
     this._warnedParenting = false
+    /**
+     * Tile rectangle for tiled hi-res export, or null for a full frame.
+     *
+     * Owned by SceneRenderer, which writes it on EVERY frame (null included) so
+     * a tile can never outlive the export that set it. It lives here rather
+     * than being threaded through the renderers because the mesh and volume
+     * renderers consume `camera.getProjectionMatrix(aspect)` and nothing else —
+     * putting the sub-frustum behind that call is what lets a tiled scene need
+     * no changes below the camera. See tileFrustumMatrix.
+     * @type {?{x: number, y: number, width: number, height: number,
+     *          fullWidth: number, fullHeight: number}}
+     */
+    this.tile = null
   }
 
   getViewMatrix() {
@@ -47,7 +60,15 @@ export class CameraNode extends SceneNode {
     return lookAtMatrix(this._position, this.target, this.up)
   }
 
+  /**
+   * @param {number} aspect - Aspect ratio of the target being rendered. Ignored
+   *   while tiling: the tile derives its bounds from the FULL image's aspect,
+   *   and the slice is what gives the tile its own.
+   */
   getProjectionMatrix(aspect) {
+    if (this.tile) {
+      return tileFrustumMatrix(this.fov, this.near, this.far, this.tile)
+    }
     return perspectiveMatrix(this.fov, aspect, this.near, this.far)
   }
 }
