@@ -293,6 +293,152 @@ const wgsl = volumeFragmentWGSL()
   }
 }
 
+// An exactly axis-aligned ray must not poison the walk.
+//
+// A ray with a zero component crosses no wall on that axis, and its raw
+// distance there is unusable rather than merely large: (wall - ro) * (1/0) is
+// +/-Inf, or NaN where the ray sits exactly on the wall (0 * Inf). NaN loses
+// every comparison, so the walk selects that axis, steps nowhere, and the exit
+// test — also a comparison against NaN — can never fire. The fragment marches
+// its whole iteration budget and reports a miss.
+//
+// This is not a corner case to wave at: a cubemap export of odd size has a
+// texel at each face's exact centre, whose ray is exactly a cube axis, and the
+// scene camera sitting on a volume's local axis plane puts a whole row there.
+//
+// The standard guard: park the non-moving axes past every real crossing, so
+// they lose every comparison instead of winning it.
+{
+  assert.ok(glsl.includes('#define DDA_EPSILON 1e-8'), 'GLSL names the axis-aligned epsilon')
+  assert.ok(glsl.includes('#define DDA_HUGE 1e30'), 'GLSL names the parked distance')
+  assert.ok(wgsl.includes('const DDA_EPSILON: f32 = 1e-8;'), 'WGSL names the axis-aligned epsilon')
+  assert.ok(wgsl.includes('const DDA_HUGE: f32 = 1e30;'), 'WGSL names the parked distance')
+
+  // Componentwise SELECTION, in each language's own idiom. It must not be an
+  // arithmetic blend: mix(x, y, float) is x*(1-a) + y*a, and Inf * 0 is NaN —
+  // the very value the guard exists to keep out.
+  assert.ok(glsl.includes('bvec3 marching = greaterThan(abs(rd), vec3(DDA_EPSILON));'),
+    'GLSL selects on the axes the ray actually moves along')
+  assert.ok(glsl.includes('vec3 tMax = mix(vec3(DDA_HUGE), (wall - ro) * invRd, marching);'),
+    'GLSL parks the wall distance of a non-moving axis')
+  assert.ok(glsl.includes('vec3 tDelta = mix(vec3(DDA_HUGE), abs(2.0 / n * invRd), marching);'),
+    'GLSL parks the crossing cost of a non-moving axis')
+
+  assert.ok(wgsl.includes('let marching = abs(rd) > vec3f(DDA_EPSILON);'),
+    'WGSL selects on the axes the ray actually moves along')
+  assert.ok(wgsl.includes('var tMax = select(vec3f(DDA_HUGE), (wall - ro) * invRd, marching);'),
+    'WGSL parks the wall distance of a non-moving axis')
+  assert.ok(wgsl.includes('let tDelta = select(vec3f(DDA_HUGE), abs(2.0 / n * invRd), marching);'),
+    'WGSL parks the crossing cost of a non-moving axis')
+
+  // The guard is worth nothing if the raw quotient reaches tMax anyway.
+  assert.ok(!/vec3 tMax = \(wall - ro\)/.test(glsl), 'GLSL takes tMax only through the guard')
+  assert.ok(!/var tMax = \(wall - ro\)/.test(wgsl), 'WGSL takes tMax only through the guard')
+}
+
+// ...and the walk it describes, executed.
+//
+// The assertions above pin the guard's text; this runs the algorithm. JS and
+// GLSL agree on exactly the arithmetic that matters here — 1/0 is Inf, Inf minus
+// Inf and 0 * Inf are NaN, and every comparison against NaN is false — so the
+// stall reproduces faithfully, which is what makes the guarded/unguarded pair
+// evidence rather than decoration.
+{
+  const VOXEL_MAX_STEPS = Number(/#define VOXEL_MAX_STEPS (\d+)/.exec(glsl)[1])
+  const DDA_EPSILON = Number(/#define DDA_EPSILON (\S+)/.exec(glsl)[1])
+  const DDA_HUGE = Number(/#define DDA_HUGE (\S+)/.exec(glsl)[1])
+  const SIZE = 8
+  const SOLID = [4, 4, 4]
+  const isSolid = (cell) => cell.every((c, i) => c === SOLID[i])
+
+  /** voxelTrace(), transcribed. `guarded: false` is the shape before the fix. */
+  function voxelTrace(ro, rd, { guarded }) {
+    const invRd = rd.map((c) => 1 / c)
+    const t0 = ro.map((o, i) => (-1 - o) * invRd[i])
+    const t1 = ro.map((o, i) => (1 - o) * invRd[i])
+    const tmin = t0.map((v, i) => Math.min(v, t1[i]))
+    const tmax = t0.map((v, i) => Math.max(v, t1[i]))
+    const tEnter = Math.max(...tmin)
+    const tExit = Math.min(...tmax)
+    assert.ok(!(tEnter > tExit || tExit < 0), 'precondition: the ray meets the box')
+
+    let t = Math.max(tEnter + 1e-3, 0)
+    const cell = ro.map((o, i) =>
+      Math.min(SIZE - 1, Math.max(0, Math.floor((((o + rd[i] * t) * 0.5 + 0.5) * SIZE)))))
+    const step = rd.map(Math.sign)
+    const wall = cell.map((c, i) => (c + Math.max(step[i], 0)) / SIZE * 2 - 1)
+    const marching = rd.map((c) => !guarded || Math.abs(c) > DDA_EPSILON)
+    const tMax = wall.map((w, i) => marching[i] ? (w - ro[i]) * invRd[i] : DDA_HUGE)
+    const tDelta = invRd.map((v, i) => marching[i] ? Math.abs(2 / SIZE * v) : DDA_HUGE)
+
+    for (let steps = 1; steps <= VOXEL_MAX_STEPS; steps++) {
+      if (isSolid(cell)) return { hit: true, t, cell: [...cell], steps }
+      if (tMax[0] < tMax[1] && tMax[0] < tMax[2]) {
+        t = tMax[0]; tMax[0] += tDelta[0]; cell[0] += step[0]
+      } else if (tMax[1] < tMax[2]) {
+        t = tMax[1]; tMax[1] += tDelta[1]; cell[1] += step[1]
+      } else {
+        t = tMax[2]; tMax[2] += tDelta[2]; cell[2] += step[2]
+      }
+      if (t > tExit) return { hit: false, steps }
+      if (cell.some((c) => c < 0 || c >= SIZE)) return { hit: false, steps }
+    }
+    return { hit: false, steps: VOXEL_MAX_STEPS, exhausted: true }
+  }
+
+  // The six cube axes, each aimed through the centre cell from outside the box.
+  // These are the export's own face-centre rays.
+  const axisAligned = []
+  for (let axis = 0; axis < 3; axis++) {
+    for (const sign of [1, -1]) {
+      const rd = [0, 0, 0]
+      const ro = [0, 0, 0]
+      rd[axis] = sign
+      ro[axis] = -2 * sign
+      axisAligned.push({ ro, rd, name: `${sign > 0 ? '+' : '-'}${'xyz'[axis]}` })
+    }
+  }
+  assert.strictEqual(axisAligned.length, 6, 'all six axis-aligned directions')
+
+  for (const { ro, rd, name } of axisAligned) {
+    const guarded = voxelTrace(ro, rd, { guarded: true })
+    assert.ok(guarded.hit, `${name}: the guarded walk finds the solid cell`)
+    assert.deepStrictEqual(guarded.cell, SOLID, `${name}: it stops in the solid cell`)
+    assert.ok(Number.isFinite(guarded.t), `${name}: it reports a finite hit distance`)
+    // A DDA crosses at most one wall per axis per step, so a ray through an
+    // N-cube visits at most 3N cells. Anything near the iteration cap is a stall.
+    assert.ok(guarded.steps <= 3 * SIZE,
+      `${name}: it walks ${guarded.steps} cells, within the 3N bound`)
+  }
+
+  // The shape of the bug, so the guard cannot be quietly dropped: four of these
+  // six rays stall unguarded, missing a solid cell squarely in front of them
+  // after burning the entire iteration budget.
+  //
+  // The other two survive by accident, and the accident is worth naming: the
+  // selection is `x < y && x < z`, else `y < z`, else Z. Every comparison
+  // against a NaN is false, so a poisoned x and y fall through to the final
+  // else — which happens to be the one axis a +/-Z ray does move along. Move
+  // that branch and the last two break too. Nothing about the walk's meaning
+  // makes Z special; only the order the branches are written in does.
+  const stalled = axisAligned
+    .filter(({ ro, rd }) => !voxelTrace(ro, rd, { guarded: false }).hit)
+    .map(({ name }) => name)
+  assert.deepStrictEqual(stalled, ['+x', '-x', '+y', '-y'],
+    'unguarded, every ray whose poisoned axis does not fall through to Z is lost')
+  for (const { ro, rd, name } of axisAligned.filter(({ name }) => stalled.includes(name))) {
+    assert.strictEqual(voxelTrace(ro, rd, { guarded: false }).steps, VOXEL_MAX_STEPS,
+      `${name}: unguarded, the walk stalls for the whole iteration budget`)
+  }
+
+  // The guard changes nothing for a ray that moves on every axis.
+  const diagonal = [1, 1, 1].map((c) => c / Math.sqrt(3))
+  const oblique = voxelTrace([-2, -2, -2].map((c) => c / 2), diagonal, { guarded: true })
+  const obliqueRaw = voxelTrace([-2, -2, -2].map((c) => c / 2), diagonal, { guarded: false })
+  assert.deepStrictEqual(oblique, obliqueRaw,
+    'a ray with no zero component walks identically with and without the guard')
+}
+
 // A voxel hit's normal is the face of the wall it entered through: the axis
 // just stepped, pointing back along the step. The first cell has no such step,
 // so its face is the box face the ray entered by — the slab whose tmin won
@@ -400,7 +546,7 @@ function normalizeMarcher(src) {
     .trim()
 }
 
-/** One brace-balanced top-level function, from its signature to its closing brace. */
+/** One brace-balanced block, from its opening line to its closing brace. */
 function extractFunction(src, signature) {
   const start = src.indexOf(signature)
   assert.ok(start >= 0, `precondition: ${signature} is present`)
@@ -410,6 +556,20 @@ function extractFunction(src, signature) {
     else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1)
   }
   throw new Error(`unbalanced braces after ${signature}`)
+}
+
+/**
+ * The same block WITHOUT its signature — normalized body text.
+ *
+ * Two implementations of one function can differ in signature by a documented
+ * delta (a parameter this file reads from a uniform instead) while owing each
+ * other the same body. Comparing bodies is what makes this a drift gate rather
+ * than a presence check: counting occurrences of a call passes just as happily
+ * against a transposed atlas layout.
+ */
+function extractBody(src, signature) {
+  const fn = extractFunction(src, signature)
+  return normalizeMarcher(fn.slice(fn.indexOf('{')))
 }
 
 // calcNormal: the same six central-difference samples, the same eps, the same
@@ -468,6 +628,60 @@ function extractFunction(src, signature) {
   }
 }
 
+// atlasTexel: the same index arithmetic, compared as a BODY.
+//
+// This is the row that makes body comparison necessary rather than tidy. The
+// atlas layout — slices stacked down Y — is a shared convention between the
+// two implementations and nothing else here would notice it changing on one
+// side: the corner-count assertions above, and the corner-order comparison in
+// sampleVolume, all pass unchanged against a transposed layout, because both
+// still fetch eight corners in the same order through a function of the same
+// name. Only the arithmetic inside that function says which texel is which.
+//
+// Documented delta: the fragment takes volSize as a parameter (in WGSL, three
+// scalars, named volumeToAtlas), this file reads the uniform.
+{
+  assert.strictEqual(
+    extractBody(glsl, 'ivec2 atlasTexel'),
+    extractBody(GLSL_FRAGMENTS.atlasIndex, 'ivec2 atlasTexel'),
+    'GLSL atlasTexel indexes the atlas differently than the shared fragment')
+
+  // The WGSL fragment names the coordinate as three scalars; this file passes
+  // the vector. That is the whole delta, so it is the whole rewrite.
+  const wgslFragment = extractBody(WGSL_FRAGMENTS.atlasIndex, 'fn volumeToAtlas')
+    .replace(/\b([xyz])\b/g, 'p.$1')
+  assert.strictEqual(
+    extractBody(wgsl, 'fn atlasTexel'), wgslFragment,
+    'WGSL atlasTexel indexes the atlas differently than the shared fragment')
+}
+
+// sampleVoxel: the same clamped nearest-neighbour fetch, inlined here.
+//
+// Documented deltas, all in the fragment's locals: a redundant volSize copy, a
+// `clamped` temp this file inlines into the call, the atlasTexel arity above,
+// and the parameter's name. Each is undone from the fragment's OWN text — a
+// clamp that changed shape would leave its statement behind and fail here.
+{
+  for (const [lang, fragment, scene, signature, temp, call] of [
+    ['GLSL', GLSL_FRAGMENTS.sampleVoxel, glsl, 'vec4 sampleVoxel',
+      /ivec3 clamped = ([^;]+);/, 'atlasTexel(clamped, SIZE)'],
+    ['WGSL', WGSL_FRAGMENTS.sampleVoxel, wgsl, 'fn sampleVoxel',
+      /let clamped = ([^;]+);/, 'volumeToAtlas(clamped.x, clamped.y, clamped.z, SIZE)'],
+  ]) {
+    let body = extractBody(fragment, signature)
+      .replace(/(?:int|let) SIZE = SIZE; /, '')
+    const clamped = temp.exec(body)
+    assert.ok(clamped, `precondition: the ${lang} fragment clamps into a named temp`)
+    body = body
+      .replace(`${clamped[0]} `, '')
+      .replace(call, `atlasTexel(${clamped[1]})`)
+      .replace(/\bvoxel\b/g, 'cell')
+
+    assert.strictEqual(extractBody(scene, signature), body,
+      `${lang} sampleVoxel has drifted from the shared fragment's clamped fetch`)
+  }
+}
+
 // getField: the same signed field, minus render3d's compile-time INVERT branch,
 // which this pass has no define machinery to supply.
 {
@@ -504,6 +718,68 @@ function extractFunction(src, signature) {
     assert.ok(fragment.includes('prevField < 0.0'),
       `precondition: the ${lang} fragment hits the box face when it starts inside`)
     assert.ok(scene.includes('prevField < 0.0'), `${lang} keeps the enters-already-inside early hit`)
+  }
+}
+
+// ...and the march CORE, compared as bodies. Everything above this point is
+// presence: the same names and the same counts appear on both sides. What
+// actually has to agree is the arithmetic — where a step lands, what brackets a
+// crossing, and how the bisection narrows it — because that is what decides
+// which isosurface the two implementations resolve.
+//
+// Only the epilogue is out of scope: the fragment fills an IsoHit and returns,
+// this file sets hit/tHit and breaks, which is the shape difference documented
+// above. Everything before it is compared verbatim.
+{
+  // The literal the fragments carry, which this file names BISECTION_STEPS.
+  const BISECTION_COUNT = Number(
+    /for \(int j = 0; j < (\d+); j\+\+\)/.exec(GLSL_FRAGMENTS.isosurfaceTrace)[1])
+
+  // Both loop headers, per side: the scene file carries a second `for (int i`
+  // (the DDA) and WGSL states the counter's type in the fragment only.
+  const GLSL_OUTER = 'for (int i = 0; i < MAX_STEPS;'
+  const GLSL_INNER = 'for (int j'
+
+  for (const [lang, fragment, scene, outer, inner, deltas] of [
+    ['GLSL', GLSL_FRAGMENTS.isosurfaceTrace, glsl,
+      [GLSL_OUTER, GLSL_OUTER], [GLSL_INNER, GLSL_INNER],
+      (src) => src
+        // The fragment names the sample point; here it is inlined into the call.
+        .replace('vec3 p = ro + rd * t; float field = getField(p);',
+          'float field = getField(ro + rd * t);')
+        // The bisection count is a literal there and a #define here — asserted
+        // equal to that literal by the constants block above.
+        .replace(`j < ${BISECTION_COUNT};`, 'j < BISECTION_STEPS;')],
+    ['WGSL', WGSL_FRAGMENTS.isosurfaceTrace, wgsl,
+      ['for (var i = 0; i < MAX_STEPS;', 'for (var i: i32 = 0; i < MAX_STEPS;'],
+      ['for (var j = 0;', 'for (var j: i32 = 0;'],
+      (src) => src
+        .replace('let p = ro + rd * t; let field = getField(p);',
+          'let field = getField(ro + rd * t);')
+        .replace(`j < ${BISECTION_COUNT};`, 'j < BISECTION_STEPS;')
+        // WGSL infers the loop counter's type here and states it there.
+        .replace(/\bvar ([ij]): i32 = 0;/g, 'var $1 = 0;')
+        // The fragment copies prevField into a local before mutating it; this
+        // file mutates prevField itself, which nothing reads after the break.
+        .replace('var pf = prevField; ', '')
+        .replace(/\bpf\b/g, 'prevField')],
+  ]) {
+    // The bisection: the load-bearing half, identical top to bottom.
+    assert.strictEqual(
+      normalizeMarcher(extractFunction(scene, inner[0])),
+      deltas(normalizeMarcher(extractFunction(fragment, inner[1]))),
+      `${lang} bisection refinement has drifted from the shared fragment`)
+
+    // The stepping loop, up to the point where the two epilogues diverge.
+    const upToCrossing = (src) => {
+      const end = src.indexOf('tHi = t;')
+      assert.ok(end > 0, `precondition: ${lang} brackets a crossing with tLo/tHi`)
+      return src.slice(0, end + 'tHi = t;'.length)
+    }
+    assert.strictEqual(
+      upToCrossing(normalizeMarcher(extractFunction(scene, outer[0]))),
+      upToCrossing(deltas(normalizeMarcher(extractFunction(fragment, outer[1])))),
+      `${lang} march stepping has drifted from the shared fragment`)
   }
 }
 

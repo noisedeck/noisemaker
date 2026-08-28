@@ -1207,6 +1207,19 @@ export class Pipeline {
      * the hook does, drawing the face into the texture this pipeline then blits
      * and reads back. Everything else about the capture stays shared: the
      * resize, the face order, the readback and the reused return buffer.
+     *
+     * That hook order — the scene face BEFORE this pipeline's passes — is why
+     * the scene path takes one priming render first. Whatever the scene reads
+     * from this pipeline (a volume atlas a scene volume() marches, a surface a
+     * material samples) is produced by these passes, so without priming, face 0
+     * would read the last pre-export frame's while faces 1-5 read this export's.
+     *
+     * KNOWN LIMITATION: priming makes all six faces read state produced at the
+     * same size and the same instant, but a stateful chain — cellularAutomata3d,
+     * reactionDiffusion3d — advances one generation per render call, not per
+     * `time`. Those still step once per face, so their six faces are six
+     * consecutive generations rather than one. Fixing that means the pipeline
+     * being able to replay a chain without advancing it, which it cannot.
      * @param {{size?:number, outputSurface?:string, time?:number, yieldBetweenFaces?:boolean, onFace?:?function(number):(void|Promise<void>)}} cfg
      * @returns {Promise<Array<{width:number,height:number,data:Uint8Array}>>} reused buffer — copy if retaining
      */
@@ -1214,32 +1227,43 @@ export class Pipeline {
         const prevW = this.width, prevH = this.height
         if (this.width !== size || this.height !== size) this.resize(size, size)
         if (!this._cubeFaces) this._cubeFaces = new Array(6)
-        for (let face = 0; face < 6; face++) {
-            if (yieldBetweenFaces) {
-                // Race rAF against a timer: rAF alone never fires in a
-                // hidden/backgrounded tab, which would otherwise stall this
-                // loop indefinitely instead of just yielding a paint.
-                await new Promise((resolve) => {
-                    let settled = false
-                    const finish = () => {
-                        if (settled) return
-                        settled = true
-                        resolve()
-                    }
-                    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish)
-                    setTimeout(finish, 120)
-                })
+        try {
+            // Prime, for the scene path only: a 2D graph's own passes ARE the
+            // face, so an extra render before face 0 would only advance it.
+            // After the resize, so what the faces read was produced at the size
+            // they read it at.
+            if (onFace) this.render(time)
+            for (let face = 0; face < 6; face++) {
+                if (yieldBetweenFaces) {
+                    // Race rAF against a timer: rAF alone never fires in a
+                    // hidden/backgrounded tab, which would otherwise stall this
+                    // loop indefinitely instead of just yielding a paint.
+                    await new Promise((resolve) => {
+                        let settled = false
+                        const finish = () => {
+                            if (settled) return
+                            settled = true
+                            resolve()
+                        }
+                        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish)
+                        setTimeout(finish, 120)
+                    })
+                }
+                this.setUniform('cubeBasis', CUBE_FACE_BASES[face])
+                if (onFace) await onFace(face)
+                this.render(time)
+                const surface = this.surfaces.get(outputSurface)
+                if (!surface) {
+                    throw new Error(`renderCubemap: output surface "${outputSurface}" not found — the composition must write its result to it (e.g. .renderCubemapSurface().write(${outputSurface}), or scene(...).write(${outputSurface}))`)
+                }
+                this._cubeFaces[face] = await this.backend.readPixels(surface.read)
             }
-            this.setUniform('cubeBasis', CUBE_FACE_BASES[face])
-            if (onFace) await onFace(face)
-            this.render(time)
-            const surface = this.surfaces.get(outputSurface)
-            if (!surface) {
-                throw new Error(`renderCubemap: output surface "${outputSurface}" not found — the composition must write its result to it (e.g. .renderCubemapSurface().write(${outputSurface}), or scene(...).write(${outputSurface}))`)
-            }
-            this._cubeFaces[face] = await this.backend.readPixels(surface.read)
+        } finally {
+            // In a finally: a face that throws — a missing surface, a failed
+            // readback, a scene hook that rejected — must not strand the canvas
+            // at export resolution until something else happens to resize it.
+            if (prevW !== size || prevH !== size) this.resize(prevW, prevH)
         }
-        if (prevW !== size || prevH !== size) this.resize(prevW, prevH)
         return this._cubeFaces
     }
 

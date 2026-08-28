@@ -157,6 +157,20 @@ const BISECTION_STEPS = 8
  */
 const VOXEL_MAX_STEPS = 512
 
+/**
+ * The DDA's axis guard, as literal shader text so the two languages cannot
+ * drift on it.
+ *
+ * An exactly axis-aligned ray crosses no wall on the axes it is perpendicular
+ * to. Their raw wall distances are not merely wrong but unusable — see the
+ * derivation at voxelTrace — so those axes are parked past every real crossing
+ * and thereby never selected. DDA_HUGE is the conventional stand-in for
+ * infinity here; an actual Inf would step to Inf - Inf = NaN the moment
+ * anything did select it.
+ */
+const DDA_EPSILON = '1e-8'
+const DDA_HUGE = '1e30'
+
 export function volumeFragmentGLSL() {
   return `#version 300 es
 precision highp float;
@@ -164,6 +178,9 @@ precision highp float;
 #define MAX_STEPS ${MAX_STEPS}
 #define BISECTION_STEPS ${BISECTION_STEPS}
 #define VOXEL_MAX_STEPS ${VOXEL_MAX_STEPS}
+// The DDA's axis guard — see voxelTrace.
+#define DDA_EPSILON ${DDA_EPSILON}
+#define DDA_HUGE ${DDA_HUGE}
 // u_mode: 0 is the smooth isosurface, 1 the voxel DDA.
 #define MODE_VOXEL 1
 
@@ -303,8 +320,21 @@ VoxelHit voxelTrace(vec3 ro, vec3 rd, vec3 invRd, vec3 tmin, float tEnter, float
 
   ivec3 step = ivec3(sign(rd));
   vec3 wall = vec3(cell + max(step, ivec3(0))) / n * 2.0 - 1.0;
-  vec3 tMax = (wall - ro) * invRd;
-  vec3 tDelta = abs(2.0 / n * invRd);
+  // A ray with a zero component crosses no wall on that axis, and its raw
+  // distance there is unusable rather than merely large: (wall - ro) * (1/0) is
+  // +/-Inf, or NaN where the ray lies exactly on the wall (0 * Inf). NaN loses
+  // every comparison, so the walk below would select that axis, step nowhere,
+  // and never reach its exit test — a full VOXEL_MAX_STEPS of texelFetch for
+  // that fragment, reported as a miss. Exactly axis-aligned rays are not exotic
+  // here: a cubemap export of odd size has one at each face's exact centre.
+  //
+  // Parked at DDA_HUGE those axes lose every comparison instead, which is the
+  // right answer — a ray with no component on an axis never crosses a wall on
+  // it. mix() with a bvec selects rather than blends, so the Inf is discarded
+  // and never multiplied by zero.
+  bvec3 marching = greaterThan(abs(rd), vec3(DDA_EPSILON));
+  vec3 tMax = mix(vec3(DDA_HUGE), (wall - ro) * invRd, marching);
+  vec3 tDelta = mix(vec3(DDA_HUGE), abs(2.0 / n * invRd), marching);
 
   // The first cell was entered through a box face, not through a wall the walk
   // crossed: it is the slab whose tmin won tEnter, facing back along the ray.
@@ -475,6 +505,9 @@ export function volumeFragmentWGSL() {
   return `const MAX_STEPS: i32 = ${MAX_STEPS};
 const BISECTION_STEPS: i32 = ${BISECTION_STEPS};
 const VOXEL_MAX_STEPS: i32 = ${VOXEL_MAX_STEPS};
+// The DDA's axis guard — see voxelTrace.
+const DDA_EPSILON: f32 = ${DDA_EPSILON};
+const DDA_HUGE: f32 = ${DDA_HUGE};
 // u_mode: 0 is the smooth isosurface, 1 the voxel DDA.
 const MODE_VOXEL: i32 = 1;
 
@@ -627,8 +660,21 @@ fn voxelTrace(ro: vec3f, rd: vec3f, invRd: vec3f, tmin: vec3f, tEnter: f32, tExi
 
   let step = vec3i(sign(rd));
   let wall = vec3f(cell + max(step, vec3i(0))) / n * 2.0 - 1.0;
-  var tMax = (wall - ro) * invRd;
-  let tDelta = abs(2.0 / n * invRd);
+  // A ray with a zero component crosses no wall on that axis, and its raw
+  // distance there is unusable rather than merely large: (wall - ro) * (1/0) is
+  // +/-Inf, or NaN where the ray lies exactly on the wall (0 * Inf). NaN loses
+  // every comparison, so the walk below would select that axis, step nowhere,
+  // and never reach its exit test — a full VOXEL_MAX_STEPS of textureLoad for
+  // that fragment, reported as a miss. Exactly axis-aligned rays are not exotic
+  // here: a cubemap export of odd size has one at each face's exact centre.
+  //
+  // Parked at DDA_HUGE those axes lose every comparison instead, which is the
+  // right answer — a ray with no component on an axis never crosses a wall on
+  // it. select() picks componentwise, so the Inf is discarded and never
+  // multiplied by zero.
+  let marching = abs(rd) > vec3f(DDA_EPSILON);
+  var tMax = select(vec3f(DDA_HUGE), (wall - ro) * invRd, marching);
+  let tDelta = select(vec3f(DDA_HUGE), abs(2.0 / n * invRd), marching);
 
   // The first cell was entered through a box face, not through a wall the walk
   // crossed: it is the slab whose tmin won tEnter, facing back along the ray.

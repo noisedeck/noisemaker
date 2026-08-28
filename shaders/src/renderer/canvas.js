@@ -309,6 +309,9 @@ export class CanvasRenderer {
         // Scene rendering state (for scene() DSL programs)
         this._isScene = false
         this._sceneRenderPending = null
+        // True from the moment a cubemap export is asked for until it settles,
+        // including the wait for an in-flight loop render. See _renderSceneCubemap.
+        this._cubemapExportActive = false
         this._sceneTree = null
         this._sceneRenderer = null
         this._clock = null
@@ -746,33 +749,97 @@ export class CanvasRenderer {
      * The scene state is advanced ONCE for the whole capture rather than per
      * face: an export is a single instant, and six faces of six different
      * instants would not close into a cube.
+     *
+     * An export takes the same guard a loop frame takes, for its whole
+     * duration. Two scene renders in flight at once share the backend's frame
+     * brackets (one command encoder on WebGPU), the scene renderer's pass state
+     * and the pipeline's size — which this path changes underneath anything
+     * that captured it before an await. So the export first drains a render
+     * already in flight, then holds _sceneRenderPending itself: loop frames
+     * that land during a capture take the established skip-and-present route,
+     * exactly as they do for a slow scene render.
      * @private
      * @param {object} [config] - See Pipeline.renderCubemap
      * @returns {Promise<Array<{width,height,data}>>} reused buffer — copy if retaining
      */
     async _renderSceneCubemap(config = {}) {
         if (!this._sceneRenderer || !this._sceneTree) return []
+        // Reentrancy is not a scheduling question. A second export would
+        // overwrite the first's saved probe amortization with the first's own
+        // forced state, and the live loop would never get its rotation back.
+        if (this._cubemapExportActive) {
+            throw new Error('renderCubemap: a cubemap export is already in flight — await it before starting another')
+        }
+        this._cubemapExportActive = true
+        let guard = null
+        try {
+            // A loop render can span many frames (a light-count change
+            // recompiles shaders), and the loop starts at most one at a time,
+            // so this drains rather than spins.
+            while (this._sceneRenderPending) await this._sceneRenderPending
+            const running = this._runSceneCubemapExport(config)
+            // Frames reusing the guard await THIS promise, so it must never
+            // reject: a failed export would otherwise become an unhandled
+            // rejection on an innocent frame. The caller still gets `running`.
+            guard = running.then(() => {}, () => {})
+            this._sceneRenderPending = guard
+            return await running
+        } finally {
+            if (this._sceneRenderPending === guard) this._sceneRenderPending = null
+            this._cubemapExportActive = false
+        }
+    }
+
+    /**
+     * The capture itself, once the guard is held.
+     *
+     * The scene renderer and tree are captured up front and used throughout:
+     * dispose() and compile() both null those fields, either can land between
+     * two faces, and an export that reached back through `this` for its
+     * teardown would throw a TypeError out of its own finally at that point —
+     * losing the real outcome. It finishes on the renderer it started with.
+     * @private
+     * @param {object} config - See Pipeline.renderCubemap
+     * @returns {Promise<Array<{width,height,data}>>} reused buffer — copy if retaining
+     */
+    async _runSceneCubemapExport(config) {
+        const sceneRenderer = this._sceneRenderer
+        const sceneTree = this._sceneTree
+        const pipeline = this._pipeline
+        const clock = this._clock
+        // Draining an in-flight render spans awaits, and a teardown can land in
+        // that window. Same answer as being asked to export nothing at all.
+        if (!sceneRenderer || !sceneTree || !pipeline) return []
         const size = config.size ?? 512
         const normalizedTime = config.time ?? 0
         this._advanceSceneState(normalizedTime * this._loopDuration * 1000, normalizedTime)
 
         // The scene renderer's G-buffer has to be the face size while the faces
         // render; the pipeline resizes itself inside renderCubemap.
-        const previousWidth = this._pipeline.width
-        const previousHeight = this._pipeline.height
+        const previousWidth = pipeline.width
+        const previousHeight = pipeline.height
         const resized = previousWidth !== size || previousHeight !== size
-        if (resized) this._sceneRenderer.resize(size, size)
-        this._sceneRenderer.beginCubemapExport()
+        if (resized) sceneRenderer.resize(size, size)
+        // A tile region belongs to the live 2D view. The scene renderer already
+        // ignores it for a face — a face is sampled by direction, so a screen
+        // tile would capture a fraction of it — but the pipeline does not, and
+        // any 2D effect downstream of scene() would shade all six faces as one
+        // tile of a larger image. Restored after, so a tiled hi-res render that
+        // exports mid-run keeps its tile.
+        const tileRegion = this._tileRegion
+        if (tileRegion) pipeline.clearTileRegion()
+        sceneRenderer.beginCubemapExport()
         try {
-            return await this._pipeline.renderCubemap({
+            return await pipeline.renderCubemap({
                 ...config,
-                onFace: (face) => this._sceneRenderer.renderCubemapFace(
-                    this._sceneTree, this._clock, face, SCENE_COLOR_TEXTURE)
+                onFace: (face) => sceneRenderer.renderCubemapFace(
+                    sceneTree, clock, face, SCENE_COLOR_TEXTURE)
             })
         } finally {
-            this._sceneRenderer.endCubemapExport()
+            sceneRenderer.endCubemapExport()
+            if (tileRegion) pipeline.setTileRegion(tileRegion)
             // Back to whatever the pipeline restored itself to.
-            if (resized) this._sceneRenderer.resize(this._pipeline.width, this._pipeline.height)
+            if (resized) sceneRenderer.resize(pipeline.width, pipeline.height)
         }
     }
 
@@ -1236,7 +1303,8 @@ export class CanvasRenderer {
                         width: this._width,
                         height: this._height,
                         preferWebGPU: this._preferWebGPU,
-                        shaderOverrides
+                        shaderOverrides,
+                        graph
                     })
                     if (!this._isLifecycleCurrent(lifecycleGeneration) ||
                         this._pipeline !== previousPipeline) {
