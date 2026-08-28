@@ -11,7 +11,7 @@
  * trailing .write(oN) blits it into the pipeline like any other source.
  */
 
-import { stdEnums } from '../lang/std_enums.js'
+import { resolveDescriptorEnum } from '../lang/descriptorEnums.js'
 
 /** Texture the scene renderer presents into. */
 export const SCENE_COLOR_TEXTURE = 'scene_color'
@@ -162,15 +162,18 @@ function descriptorNumber(node, name, fallback, descriptorNode) {
 
 /**
  * Resolve a descriptor's enum-valued argument (osc() type, midi() mode,
- * audio() band) against the standard enums, accepting a bare number too.
+ * audio() band).
+ *
+ * The three accepted spellings — `oscKind.saw`, `saw`, `2` — are defined once,
+ * in lang/descriptorEnums.js, and read from there by the effect-uniform path
+ * too, so the same descriptor text cannot mean two things. What is local here
+ * is the failure: a scene refuses a value it cannot resolve rather than
+ * substituting a default, because a transform quietly falling back to
+ * oscKind.sine moves geometry in a way nothing reports.
  */
 function descriptorEnum(node, name, enumName, descriptorNode) {
-    if (node?.type === 'Number') return node.value
-    if (node?.type === 'Member' && node.path?.length === 2) {
-        const [path, memberName] = node.path
-        const resolved = stdEnums[path]?.[memberName]
-        if (resolved?.type === 'Number') return resolved.value
-    }
+    const resolved = resolveDescriptorEnum(node, enumName)
+    if (resolved !== undefined) return resolved
     const fn = DESCRIPTOR_FUNCTION[descriptorNode.type]
     throw sceneError(`${fn}() ${name} must be a ${enumName} value`, descriptorNode)
 }

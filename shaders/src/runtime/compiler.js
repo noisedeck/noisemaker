@@ -338,8 +338,12 @@ export function recompile(pipeline, newSource, options = {}) {
             shaderOverrides: options.shaderOverrides
         })
 
-        // Swap graph on pipeline
+        // Swap graph on pipeline. The scene volume() constraint the runtime
+        // guard enforces is read off the graph, so the guard's warn-once memo
+        // belongs to the graph being replaced: kept, it would silence every
+        // later refusal of a value already refused under the old program.
         pipeline.graph = newGraph
+        pipeline.resetSceneVolumeAtlasWarnings()
 
         // Recreate global surfaces and textures to reflect new graph requirements
         pipeline.createSurfaces()

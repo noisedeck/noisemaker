@@ -2,6 +2,8 @@
 import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
 import { compile } from '../src/lang/index.js'
+import { registerStarterOps } from '../src/lang/validator.js'
+import { registerOp } from '../src/lang/ops.js'
 import { compileScene } from '../src/rendering/scene-compiler.js'
 
 function irFor(src) {
@@ -1090,6 +1092,101 @@ function irFor(src) {
   assert.deepStrictEqual(ok.materials[volume.material].baseColor, [1, 0, 0], 'volume material still chains')
   assert.deepStrictEqual(ok.materials[floor.material].baseColor, [0, 1, 0], 'mesh material still chains')
   assert.strictEqual(floor.planarReflection, true, 'reflector() still chains alongside material()')
+}
+
+// ---------------------------------------------------------------------------
+// Cross-system oracle: one descriptor, one meaning.
+//
+// osc()/midi()/audio() are read twice by two different modules — lang/validator
+// canonicalizes them for effect uniforms, rendering/scene-compiler for scene
+// transforms. Every assertion above pins ONE of those readings, so the two
+// drifted apart in both directions without a single test going red: the scene
+// side accepted a bare number for an enum argument and the 2D side silently
+// dropped it (audio(2) rendered band 0), while the 2D side resolved a bare
+// identifier and the scene side threw.
+//
+// This compiles the SAME descriptor text down both paths and compares the
+// canonical objects field by field. It is the invariant the two readings owe
+// each other, not a restatement of either one's rules.
+// ---------------------------------------------------------------------------
+{
+  // A minimal float parameter to hang a descriptor off, so the effect side of
+  // the oracle does not depend on any real effect's argument spec.
+  registerOp('synth.descprobe', {
+    name: 'descprobe',
+    args: [{ name: 'scale', type: 'float', default: 1, min: 0, max: 1000 }]
+  })
+  registerStarterOps(['synth.descprobe'])
+
+  // The canonical descriptor fields each kind is compared on. `_ast` and
+  // `_varRef` are unparser bookkeeping the 2D path carries and the scene path
+  // does not; they are not part of what the descriptor MEANS.
+  const DESCRIPTOR_FIELDS = {
+    Oscillator: ['type', 'oscType', 'min', 'max', 'speed', 'offset', 'seed'],
+    Midi: ['type', 'channel', 'mode', 'min', 'max', 'sensitivity'],
+    Audio: ['type', 'band', 'min', 'max']
+  }
+
+  const canonical = (value) => {
+    if (!value || typeof value !== 'object') return value
+    const fields = DESCRIPTOR_FIELDS[value.type]
+    if (!fields) return value
+    const out = {}
+    for (const field of fields) out[field] = value[field]
+    return out
+  }
+
+  // The descriptor as an effect uniform, through lang/validator.
+  const asEffectUniform = (desc) => {
+    const result = compile(`search synth\ndescprobe(scale: ${desc}).write(o0)`)
+    const errors = (result.diagnostics || []).filter(d => d.severity === 'error')
+    assert.strictEqual(errors.length, 0,
+      `${desc}: effect-uniform path reported ${errors.map(e => e.message).join('; ')}`)
+    return canonical(result.plans[0].chain[0].args.scale)
+  }
+
+  // The same descriptor in a scene transform, through rendering/scene-compiler.
+  const asSceneTransform = (desc) => {
+    const ir = irFor(`search synth\nscene(camera(fov: 60), group(rot: [0, ${desc}, 0])).write(o0)`)
+    return canonical(ir.nodes[0].transform.rotation[1])
+  }
+
+  // number x member x ident, over the enum argument of each descriptor kind.
+  // `osc(2)` and `osc(saw)` are deliberately absent: the parser only treats an
+  // osc() call as a value oscillator when its first argument is an oscKind
+  // member or `type:` is written as a keyword, so those two spellings are the
+  // synth.osc GENERATOR and never reach either canonicalizer.
+  const matrix = [
+    ['osc type number',   'osc(type: 2)',                   { type: 'Oscillator', oscType: 2 }],
+    ['osc type member',   'osc(type: oscKind.saw)',         { type: 'Oscillator', oscType: 2 }],
+    ['osc type ident',    'osc(type: saw)',                 { type: 'Oscillator', oscType: 2 }],
+    ['midi mode number',  'midi(1, 2)',                     { type: 'Midi', mode: 2 }],
+    ['midi mode member',  'midi(1, midiMode.gateVelocity)', { type: 'Midi', mode: 2 }],
+    ['midi mode ident',   'midi(1, gateVelocity)',          { type: 'Midi', mode: 2 }],
+    ['midi mode kwarg n', 'midi(channel: 1, mode: 2)',      { type: 'Midi', mode: 2 }],
+    ['audio band number', 'audio(2)',                       { type: 'Audio', band: 2 }],
+    ['audio band member', 'audio(audioBand.high)',          { type: 'Audio', band: 2 }],
+    ['audio band ident',  'audio(high)',                    { type: 'Audio', band: 2 }],
+    ['audio band kwarg n', 'audio(band: 2)',                { type: 'Audio', band: 2 }]
+  ]
+
+  for (const [label, desc, expected] of matrix) {
+    const effect = asEffectUniform(desc)
+    const scene = asSceneTransform(desc)
+    assert.deepStrictEqual(scene, effect,
+      `${label}: '${desc}' must canonicalize identically in a scene transform and an ` +
+      `effect uniform; effect=${JSON.stringify(effect)} scene=${JSON.stringify(scene)}`)
+    // Both agreeing on the WRONG value would still be a silent drop, so the
+    // intended enum value is pinned too.
+    for (const [field, want] of Object.entries(expected)) {
+      assert.strictEqual(effect[field], want,
+        `${label}: '${desc}' must honour the written enum (${field})`)
+    }
+  }
+
+  // Defaults still apply when the enum argument is omitted, on both paths.
+  assert.strictEqual(asEffectUniform('midi(1)').mode, 4, 'midi() default mode, effect path')
+  assert.strictEqual(asSceneTransform('midi(1)').mode, 4, 'midi() default mode, scene path')
 }
 
 console.log('Scene compiler tests passed')

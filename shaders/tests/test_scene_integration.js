@@ -251,7 +251,10 @@ function recompileTarget() {
         createSurfaces() { calls.push('createSurfaces') },
         collectDefaultUniforms() { calls.push('collectDefaultUniforms'); return {} },
         recreateTextures() { calls.push('recreateTextures') },
-        initAsyncEffects() { calls.push('initAsyncEffects') }
+        initAsyncEffects() { calls.push('initAsyncEffects') },
+        // The scene volume() guard's warn-once memo belongs to the graph being
+        // replaced; see test_volume_atlas_size.js for what keeping it costs.
+        resetSceneVolumeAtlasWarnings() { calls.push('resetSceneVolumeAtlasWarnings') }
     }
 }
 
@@ -280,7 +283,8 @@ await test('recompile reuses an already-compiled graph', async () => {
     assert.strictEqual(result, graph, `the provided graph must be used: ${logged.join(' ')}`)
     assert.strictEqual(pipeline.graph, graph, 'the graph must be swapped onto the pipeline')
     assert.deepStrictEqual(pipeline.calls,
-        ['createSurfaces', 'collectDefaultUniforms', 'recreateTextures', 'initAsyncEffects'],
+        ['resetSceneVolumeAtlasWarnings', 'createSurfaces', 'collectDefaultUniforms',
+            'recreateTextures', 'initAsyncEffects'],
         'the post-swap sequence must be unchanged')
 })
 
@@ -293,6 +297,79 @@ await test('recompile without a graph still compiles the source', async () => {
     assert.strictEqual(pipeline.graph, null, 'nothing may be swapped onto the pipeline')
     assert.deepStrictEqual(pipeline.calls, [], 'no surfaces may be recreated for a failed compile')
     assert.ok(/Recompilation failed/.test(logged.join(' ')), `the failure is reported: ${logged.join(' ')}`)
+})
+
+/**
+ * When recompile() cannot reuse the live pipeline, compile() replaces it. That
+ * replacement is a full pipeline like any other and owes the same setup as the
+ * first one: the MIDI and audio state the host attached, and the graph this
+ * call already compiled.
+ *
+ * Neither was carried over. Scene bindings read midi()/audio() through
+ * pipeline.externalState, so after this path every midi() and audio() binding
+ * in the scene sat pinned at its minimum with nothing reporting it — and the
+ * source was parsed, validated and expanded a third time to rebuild a graph
+ * that was sitting in a local variable.
+ */
+await test('a failed recompile carries external state and the graph onto the replacement', async () => {
+    const dsl = 'search synth\nscene(camera(fov: 60), mesh("sphere")).write(o0)\nrender(o0)'
+    const renderer = new CanvasRenderer({ width: 8, height: 8 })
+
+    // A live pipeline whose surface recreation fails: recompile() catches,
+    // reports, and returns null — the branch under test.
+    let disposed = false
+    renderer._pipeline = {
+        isCompiling: false,
+        graph: null,
+        createSurfaces() { throw new Error('surface allocation failed') },
+        collectDefaultUniforms() { return {} },
+        recreateTextures() {},
+        initAsyncEffects() {},
+        resetSceneVolumeAtlasWarnings() {},
+        dispose() { disposed = true }
+    }
+
+    const midiState = { marker: 'midi' }
+    const audioState = { marker: 'audio' }
+    renderer._midiState = midiState
+    renderer._audioState = audioState
+
+    const replacement = {
+        externalState: {},
+        setMidiState(state) { replacement.externalState.midi = state },
+        setAudioState(state) { replacement.externalState.audio = state },
+        async compilePrograms() {}
+    }
+    let handedOptions = null
+    renderer._createRuntime = async (source, options) => {
+        handedOptions = options
+        return replacement
+    }
+
+    const logged = []
+    const originalError = console.error
+    console.error = (...args) => logged.push(args.join(' '))
+    let result
+    try {
+        result = await renderer.compile(dsl)
+    } finally {
+        console.error = originalError
+    }
+
+    assert.ok(/Recompilation failed/.test(logged.join(' ')),
+        `precondition: the recompile must have failed: ${logged.join(' ')}`)
+    assert.strictEqual(result, replacement, 'the replacement pipeline is adopted')
+    assert.strictEqual(renderer._pipeline, replacement, 'the renderer holds the replacement')
+    assert.ok(disposed, 'precondition: the failed pipeline is disposed')
+
+    assert.strictEqual(replacement.externalState.midi, midiState,
+        'the replacement must receive the MIDI state, or every midi() binding pins at min')
+    assert.strictEqual(replacement.externalState.audio, audioState,
+        'the replacement must receive the audio state, or every audio() binding pins at min')
+
+    assert.ok(handedOptions?.graph, 'the already-compiled graph must be handed through')
+    assert.strictEqual(handedOptions.graph.source, dsl, 'and it must be this source\'s graph')
+    assert.strictEqual(handedOptions.graph._isScene, true, 'and the scene graph it detected')
 })
 
 console.log(`\nScene integration: ${passed} passed, ${failed} failed`)

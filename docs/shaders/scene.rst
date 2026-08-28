@@ -598,6 +598,14 @@ locked to one clock, and ``midi()``/``audio()`` against the same live
 ``MidiState`` and ``AudioState`` the pipeline resolves effect uniforms from. A
 scene and the effects around it therefore respond to one performance, not two.
 
+The enum argument of each call — ``osc()``'s ``type``, ``midi()``'s ``mode``,
+``audio()``'s ``band`` — accepts three spellings that mean the same thing in a
+scene and in an effect uniform: the qualified member (``audioBand.high``), the
+bare member name (``high``), and the member's value written out (``2``). One
+difference remains, and it is in the failure: a scene rejects an enum argument
+it cannot resolve, naming the line, where an effect uniform falls back to the
+descriptor's default.
+
 Where no MIDI or audio input has been connected, a ``midi()`` or ``audio()``
 component holds at its ``min`` rather than going undefined.
 

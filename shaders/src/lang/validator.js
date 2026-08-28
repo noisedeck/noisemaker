@@ -3,6 +3,7 @@ import enums from './enums.js'
 import { stdEnums } from './std_enums.js'
 import { ops } from './ops.js'
 import { normalizeMemberPath, pathStartsWith, applyEnumPrefix } from './enumPaths.js'
+import { resolveDescriptorEnum } from './descriptorEnums.js'
 import { resolveParamAliases } from './paramAliases.js'
 import { checkEffectAlias } from './effectAliases.js'
 
@@ -1193,25 +1194,10 @@ export function validate(ast) {
                             }
                         } else if (node && node.type === 'Oscillator') {
                             // Oscillator node - resolve the oscType enum value and pass through
-                            // The oscillator will be evaluated at runtime by the pipeline
-                            const oscTypeNode = node.oscType
-                            let oscTypeValue = 0
-                            if (oscTypeNode && oscTypeNode.type === 'Member') {
-                                const resolved = resolveEnum(oscTypeNode.path)
-                                if (typeof resolved === 'number') {
-                                    oscTypeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    oscTypeValue = resolved.value
-                                }
-                            } else if (oscTypeNode && oscTypeNode.type === 'Ident') {
-                                // Try resolving as oscKind.{name}
-                                const resolved = resolveEnum(['oscKind', oscTypeNode.name])
-                                if (typeof resolved === 'number') {
-                                    oscTypeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    oscTypeValue = resolved.value
-                                }
-                            }
+                            // The oscillator will be evaluated at runtime by the pipeline.
+                            // The three spellings (oscKind.saw / saw / 2) are defined once, in
+                            // descriptorEnums.js, and read from there by the scene compiler too.
+                            const oscTypeValue = resolveDescriptorEnum(node.oscType, 'oscKind', resolveEnum) ?? 0
                             // Resolve min, max, speed, offset, seed from the oscillator node
                             const resolveOscParam = (param) => {
                                 if (!param) return undefined
@@ -1239,25 +1225,9 @@ export function validate(ast) {
                             }
                         } else if (node && node.type === 'Midi') {
                             // MIDI node - resolve the mode enum value and pass through
-                            // The MIDI value will be evaluated at runtime by the pipeline
-                            const modeNode = node.mode
-                            let modeValue = 4 // default: velocity
-                            if (modeNode && modeNode.type === 'Member') {
-                                const resolved = resolveEnum(modeNode.path)
-                                if (typeof resolved === 'number') {
-                                    modeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    modeValue = resolved.value
-                                }
-                            } else if (modeNode && modeNode.type === 'Ident') {
-                                // Try resolving as midiMode.{name}
-                                const resolved = resolveEnum(['midiMode', modeNode.name])
-                                if (typeof resolved === 'number') {
-                                    modeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    modeValue = resolved.value
-                                }
-                            }
+                            // The MIDI value will be evaluated at runtime by the pipeline.
+                            // 4 (velocity) is the default the parser also writes in.
+                            const modeValue = resolveDescriptorEnum(node.mode, 'midiMode', resolveEnum) ?? 4
                             // Resolve channel, min, max, sensitivity from the MIDI node
                             const resolveMidiParam = (param) => {
                                 if (!param) return undefined
@@ -1284,25 +1254,8 @@ export function validate(ast) {
                             }
                         } else if (node && node.type === 'Audio') {
                             // Audio node - resolve the band enum value and pass through
-                            // The audio value will be evaluated at runtime by the pipeline
-                            const bandNode = node.band
-                            let bandValue = 0 // default: low
-                            if (bandNode && bandNode.type === 'Member') {
-                                const resolved = resolveEnum(bandNode.path)
-                                if (typeof resolved === 'number') {
-                                    bandValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    bandValue = resolved.value
-                                }
-                            } else if (bandNode && bandNode.type === 'Ident') {
-                                // Try resolving as audioBand.{name}
-                                const resolved = resolveEnum(['audioBand', bandNode.name])
-                                if (typeof resolved === 'number') {
-                                    bandValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    bandValue = resolved.value
-                                }
-                            }
+                            // The audio value will be evaluated at runtime by the pipeline.
+                            const bandValue = resolveDescriptorEnum(node.band, 'audioBand', resolveEnum) ?? 0
                             // Resolve min, max from the Audio node
                             const resolveAudioParam = (param) => {
                                 if (!param) return undefined

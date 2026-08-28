@@ -675,6 +675,20 @@ export class Pipeline {
     }
 
     /**
+     * Forget which refusals have already been reported.
+     *
+     * The memo above is keyed by scope and requested value, and it is the
+     * refusal's only signal — the drag is reverted in place and nothing is
+     * returned to the caller. Carried across a graph swap it would mute every
+     * later refusal of a value already refused once, so a hot recompile leaves
+     * the guard working and silent. Called from recompile(), where the graph
+     * the memo was built against is replaced.
+     */
+    resetSceneVolumeAtlasWarnings() {
+        this._warnedVolumeConstraints = null
+    }
+
+    /**
      * Clamp every volumeSize-family uniform baked into the graph's passes
      * (expander output) to the device limit. Runs from createSurfaces() so
      * cold init, resize, and hot recompile all pass through it before any

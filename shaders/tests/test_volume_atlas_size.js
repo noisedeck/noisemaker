@@ -32,7 +32,7 @@ import {
     registerEffect, registerOp, registerStarterOps,
     mergeIntoEnums, stdEnums
 } from '../src/index.js'
-import { compileGraph } from '../src/runtime/compiler.js'
+import { compileGraph, recompile } from '../src/runtime/compiler.js'
 import { Pipeline } from '../src/runtime/pipeline.js'
 import { CanvasRenderer } from '../src/renderer/canvas.js'
 
@@ -395,6 +395,40 @@ check('Pipeline.setUniform is refused on a scene volume program', () => {
     assert.strictEqual(producer.uniforms.volumeSize, 64, 'the uniform must be left unchanged')
     assert.strictEqual(atlasSize(pipeline, 'node_0_volumeCache'), '64x4096')
     assert.ok(/vol0/.test(warnings.join(' ')), `warns: ${warnings.join(' ')}`)
+})
+
+// The refusal's ONLY signal is the warning: the drag is silently reverted to
+// the pinned size and no diagnostic reaches the caller. The warn-once memo is
+// therefore load-bearing, and it is keyed by scope and value — not by graph.
+// A memo that outlives the graph it was built against makes every refusal
+// after the first recompile completely silent, which is the failure mode the
+// guard exists to prevent.
+check('a refusal warns again after the graph is swapped by a recompile', () => {
+    const { graph, pipeline, renderer } = buildPipeline(program({ volumeSize: 64 }))
+    const producer = emitter(graph)
+    const drag = () => renderer.applyStepParameterValues({
+        [`step_${producer.stepIndex}`]: { volumeSize: 32 }
+    })
+
+    const first = captureWarnings(drag)
+    assert.ok(/vol0/.test(first.join(' ')), `the first refusal warns: ${first.join(' ')}`)
+
+    // Within one graph the memo does its job: an identical drag is silent.
+    assert.deepStrictEqual(captureWarnings(drag), [],
+        'a repeated identical drag stays quiet on the same graph')
+
+    const newGraph = recompile(pipeline, program({ volumeSize: 64 }))
+    assert.ok(newGraph, 'precondition: the recompile succeeded')
+    assert.strictEqual(pipeline.graph, newGraph, 'precondition: the graph was swapped')
+
+    const afterProducer = emitter(newGraph)
+    const afterWarnings = captureWarnings(() => renderer.applyStepParameterValues({
+        [`step_${afterProducer.stepIndex}`]: { volumeSize: 32 }
+    }))
+    assert.strictEqual(afterProducer.uniforms.volumeSize, 64,
+        'the new graph is still refused')
+    assert.ok(/vol0/.test(afterWarnings.join(' ')),
+        `the refusal must warn again against the new graph: ${JSON.stringify(afterWarnings)}`)
 })
 
 console.log(`Volume atlas size tests passed (${passed})`)

@@ -1224,7 +1224,11 @@ export class CanvasRenderer {
             try {
                 const newGraph = recompile(compilationPipeline, dsl, { shaderOverrides, graph })
                 if (!newGraph) {
-                    // Recompile failed, need to create a new pipeline from scratch
+                    // Recompile failed, need to create a new pipeline from scratch.
+                    // This is a first pipeline in every respect except that one
+                    // already existed, so it takes the same graph handoff — the
+                    // source is already compiled, a few lines up — and the same
+                    // external-input replay as the branch above.
                     compilationPipeline.isCompiling = false
                     const previousPipeline = compilationPipeline
                     const replacementPipeline = await this._createRuntime(dsl, {
@@ -1240,6 +1244,15 @@ export class CanvasRenderer {
                         return null
                     }
                     this._pipeline = replacementPipeline
+                    // Scene bindings read midi()/audio() through
+                    // pipeline.externalState. Dropped here, every one of them
+                    // pins at its minimum for the rest of the session.
+                    if (this._midiState) {
+                        replacementPipeline.setMidiState(this._midiState)
+                    }
+                    if (this._audioState) {
+                        replacementPipeline.setAudioState(this._audioState)
+                    }
                     try {
                         previousPipeline?.dispose?.()
                     } catch (err) {
