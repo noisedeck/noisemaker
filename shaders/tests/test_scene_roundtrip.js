@@ -83,6 +83,43 @@ render(o0)`, 'oscillator')
 })
 
 // ---------------------------------------------------------------------------
+// midi() and audio() are transform values wherever osc() is, so they travel
+// the same unparse path. A descriptor that survived compilation but not the
+// unparser would be silently dropped by every save-and-reload.
+// ---------------------------------------------------------------------------
+
+test('midi() inside a scene transform round-trips', () => {
+    const src = `search synth
+scene(
+  camera(fov: 60),
+  mesh("torus", rot: [0, midi(channel: 3, mode: midiMode.gateVelocity, min: 0.25, max: 0.75, sensitivity: 2), 0])
+).write(o0)
+render(o0)`
+    const out = assertStable(src, 'midi transform')
+    assert.match(out, /midi\(/, 'keeps the midi() call')
+    assert.deepStrictEqual(
+        compileScene(compile(out)).nodes[0].transform.rotation[1],
+        compileScene(compile(src)).nodes[0].transform.rotation[1],
+        'the reparsed midi() descriptor is identical')
+})
+
+test('audio() inside a scene transform round-trips', () => {
+    const src = `search synth
+scene(
+  camera(fov: 60),
+  light(type: "point", pos: [0, 4, 0], intensity: audio(audioBand.vol, min: 0.25)),
+  mesh("box", scale: [audio(audioBand.low, min: 0.5, max: 1), 1, 1])
+).write(o0)
+render(o0)`
+    const out = assertStable(src, 'audio transform')
+    assert.match(out, /audio\(/, 'keeps the audio() call')
+    assert.deepStrictEqual(
+        compileScene(compile(out)),
+        compileScene(compile(src)),
+        'the reparsed program compiles to the same scene IR')
+})
+
+// ---------------------------------------------------------------------------
 // volume() carries a VolRef positional, which the unparser emits from the same
 // branch as every other surface reference. The reparsed program must compile to
 // the same scene IR, not merely to text that parses.

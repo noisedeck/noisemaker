@@ -114,33 +114,101 @@ function located(node, fallback) {
     return node?.loc ? node : fallback
 }
 
-function oscillatorNumber(node, name, fallback, oscillatorNode) {
+/**
+ * osc(), midi() and audio() are one feature with three sources, so they share
+ * every rule: the same argument reader, the same enum resolution, the same
+ * [0, 1] clamp on the min/max sub-range, and the same defaults the 2D uniform
+ * path applies (see the Oscillator/Midi/Audio branches in lang/validator.js).
+ * A midi() call must mean the same thing in a scene transform as in an effect
+ * uniform, or the DSL has two dialects.
+ */
+const DESCRIPTOR_FUNCTION = Object.freeze({
+    Oscillator: 'osc',
+    Midi: 'midi',
+    Audio: 'audio'
+})
+
+/** The canonical field each descriptor kind is identified by once compiled. */
+const DESCRIPTOR_DISCRIMINANT = Object.freeze({
+    Oscillator: 'oscType',
+    Midi: 'channel',
+    Audio: 'band'
+})
+
+/**
+ * Is this compiled value one of the three animation descriptors?
+ *
+ * Shared with scene/bindings.js so the compiler and the per-frame evaluator
+ * cannot disagree about what animates: a value the compiler let through but
+ * bindings did not recognize would sit in a transform as an object and reach
+ * the matrix math as NaN.
+ *
+ * @param {*} value - A value produced by litValue()
+ * @returns {boolean}
+ */
+export function isAnimationDescriptor(value) {
+    if (value === null || typeof value !== 'object') return false
+    const discriminant = DESCRIPTOR_DISCRIMINANT[value.type]
+    return discriminant !== undefined && Number.isFinite(value[discriminant])
+}
+
+function descriptorNumber(node, name, fallback, descriptorNode) {
     if (node === undefined) return fallback
     if (node?.type === 'Number') return node.value
     if (node?.type === 'Boolean') return node.value ? 1 : 0
-    throw sceneError(`osc() ${name} must be a number`, oscillatorNode)
+    const fn = DESCRIPTOR_FUNCTION[descriptorNode.type]
+    throw sceneError(`${fn}() ${name} must be a number`, descriptorNode)
 }
 
-function oscillatorType(node, oscillatorNode) {
+/**
+ * Resolve a descriptor's enum-valued argument (osc() type, midi() mode,
+ * audio() band) against the standard enums, accepting a bare number too.
+ */
+function descriptorEnum(node, name, enumName, descriptorNode) {
     if (node?.type === 'Number') return node.value
     if (node?.type === 'Member' && node.path?.length === 2) {
-        const [enumName, memberName] = node.path
-        const resolved = stdEnums[enumName]?.[memberName]
+        const [path, memberName] = node.path
+        const resolved = stdEnums[path]?.[memberName]
         if (resolved?.type === 'Number') return resolved.value
     }
-    throw sceneError('osc() type must be an oscKind value', oscillatorNode)
+    const fn = DESCRIPTOR_FUNCTION[descriptorNode.type]
+    throw sceneError(`${fn}() ${name} must be a ${enumName} value`, descriptorNode)
 }
 
+const clampPercentage = value => Math.max(0, Math.min(1, value))
+
 function canonicalOscillator(node) {
-    const clampPercentage = value => Math.max(0, Math.min(1, value))
     return {
         type: 'Oscillator',
-        oscType: oscillatorType(node.oscType, node),
-        min: clampPercentage(oscillatorNumber(node.min, 'min', 0, node)),
-        max: clampPercentage(oscillatorNumber(node.max, 'max', 1, node)),
-        speed: oscillatorNumber(node.speed, 'speed', 1, node),
-        offset: oscillatorNumber(node.offset, 'offset', 0, node),
-        seed: oscillatorNumber(node.seed, 'seed', 1, node)
+        oscType: descriptorEnum(node.oscType, 'type', 'oscKind', node),
+        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
+        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node)),
+        speed: descriptorNumber(node.speed, 'speed', 1, node),
+        offset: descriptorNumber(node.offset, 'offset', 0, node),
+        seed: descriptorNumber(node.seed, 'seed', 1, node)
+    }
+}
+
+function canonicalMidi(node) {
+    return {
+        type: 'Midi',
+        channel: descriptorNumber(node.channel, 'channel', 1, node),
+        // The parser fills `mode` with midiMode.velocity when it is omitted;
+        // the fallback here is the same mode by value, for a node built
+        // without it.
+        mode: node.mode === undefined ? 4 : descriptorEnum(node.mode, 'mode', 'midiMode', node),
+        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
+        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node)),
+        sensitivity: descriptorNumber(node.sensitivity, 'sensitivity', 1, node)
+    }
+}
+
+function canonicalAudio(node) {
+    return {
+        type: 'Audio',
+        band: node.band === undefined ? 0 : descriptorEnum(node.band, 'band', 'audioBand', node),
+        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
+        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node))
     }
 }
 
@@ -163,13 +231,21 @@ function litValue(node, anchor) {
             return node.elements.map(element => litValue(element, here))
         case 'Oscillator':
             return canonicalOscillator(node)
+        case 'Midi':
+            return canonicalMidi(node)
+        case 'Audio':
+            return canonicalAudio(node)
         case 'Object': {
             const out = {}
             for (const [key, val] of Object.entries(node.properties)) {
                 out[key] = litValue(val, here)
             }
-            if (out.type === 'Oscillator') {
-                throw sceneError('Oscillator object literals are invalid; use osc()', here)
+            const impostor = DESCRIPTOR_FUNCTION[out.type]
+            if (impostor) {
+                throw sceneError(
+                    `${out.type} object literals are invalid; use ${impostor}()`,
+                    here
+                )
             }
             return out
         }
@@ -472,10 +548,11 @@ function buildTransform(call) {
         }
         for (const component of value) {
             const number = typeof component === 'number' && Number.isFinite(component)
-            const oscillator = component?.type === 'Oscillator'
-                && Number.isFinite(component.oscType)
-            if (!number && !oscillator) {
-                throw sceneError(`${name} values must be finite numbers or osc()`, located(call.kwargs?.[name], call))
+            if (!number && !isAnimationDescriptor(component)) {
+                throw sceneError(
+                    `${name} values must be finite numbers or osc(), midi() or audio()`,
+                    located(call.kwargs?.[name], call)
+                )
             }
         }
         return value

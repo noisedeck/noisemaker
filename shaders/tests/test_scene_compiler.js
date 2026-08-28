@@ -254,6 +254,184 @@ function irFor(src) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// midi() and audio() are accepted exactly where osc() is, and canonicalize to
+// the same descriptors the 2D uniform path produces. A scene that could only
+// be driven by a built-in waveform could not be played; the three descriptor
+// kinds are one feature, not three.
+// ---------------------------------------------------------------------------
+
+// midi() in a transform compiles to the canonical MIDI descriptor.
+{
+  const ir = irFor(`
+    search synth
+    scene(
+      group(rot: [0, midi(channel: 3, mode: midiMode.gateVelocity, min: 0.25, max: 0.75, sensitivity: 2), 0])
+    ).write(o0)
+  `)
+  assert.deepStrictEqual(ir.nodes[0].transform.rotation[1], {
+    type: 'Midi',
+    channel: 3,
+    mode: 2,
+    min: 0.25,
+    max: 0.75,
+    sensitivity: 2
+  }, 'midi() compiles to the canonical automation descriptor')
+}
+
+// midi() defaults match the 2D path: velocity mode, full [0, 1] range,
+// sensitivity 1. A descriptor that meant something different in a scene than
+// in an effect would make the same call two different features.
+{
+  const ir = irFor(`
+    search synth
+    scene(group(pos: [midi(1), 0, 0])).write(o0)
+  `)
+  assert.deepStrictEqual(ir.nodes[0].transform.position[0], {
+    type: 'Midi', channel: 1, mode: 4, min: 0, max: 1, sensitivity: 1
+  }, 'midi() defaults match the effect-uniform defaults')
+}
+
+// audio() in a transform compiles to the canonical audio descriptor.
+{
+  const ir = irFor(`
+    search synth
+    scene(
+      mesh("box", scale: [audio(band: audioBand.low, min: 0.5, max: 2), 1, 1])
+    ).write(o0)
+  `)
+  assert.deepStrictEqual(ir.nodes[0].transform.scale[0], {
+    type: 'Audio', band: 0, min: 0.5, max: 1
+  }, 'audio() compiles to the canonical descriptor with a clamped [0, 1] sub-range')
+}
+
+// audio() defaults match the 2D path.
+{
+  const ir = irFor(`
+    search synth
+    scene(mesh("box", pos: [0, audio(audioBand.vol), 0])).write(o0)
+  `)
+  assert.deepStrictEqual(ir.nodes[0].transform.position[1], {
+    type: 'Audio', band: 3, min: 0, max: 1
+  }, 'audio() defaults match the effect-uniform defaults')
+}
+
+// Light intensity takes all three descriptor kinds, not just osc().
+{
+  const ir = irFor(`
+    search synth
+    scene(
+      light(type: "point", pos: [0, 4, 0], intensity: midi(channel: 2)),
+      light(type: "directional", dir: [1, -1, 0], intensity: audio(audioBand.high)),
+      mesh("box")
+    ).write(o0)
+  `)
+  assert.strictEqual(ir.lights[0].intensity.type, 'Midi', 'midi() reaches light intensity')
+  assert.strictEqual(ir.lights[0].intensity.channel, 2, 'midi channel retained on light intensity')
+  assert.strictEqual(ir.lights[1].intensity.type, 'Audio', 'audio() reaches light intensity')
+  assert.strictEqual(ir.lights[1].intensity.band, 2, 'audio band retained on light intensity')
+}
+
+// A volume transform takes them too — a volume node animates like a mesh.
+{
+  const ir = irFor(`
+    search synth
+    scene(camera(fov: 60), volume(vol0, rot: [0, midi(4), 0], scale: [audio(audioBand.mid), 1, 1])).write(o0)
+  `)
+  const node = ir.nodes[0]
+  assert.strictEqual(node.transform.rotation[1].type, 'Midi', 'midi() descriptor preserved on a volume')
+  assert.strictEqual(node.transform.scale[0].type, 'Audio', 'audio() descriptor preserved on a volume')
+}
+
+// Hand-authored descriptor-shaped objects are rejected for all three kinds.
+{
+  for (const [label, literal, expected] of [
+    ['Midi', '{ type: "Midi", channel: 1 }', /use midi\(\)/i],
+    ['Audio', '{ type: "Audio", band: 0 }', /use audio\(\)/i]
+  ]) {
+    assert.throws(
+      () => irFor(`search synth\nscene(group(rot: [0, ${literal}, 0])).write(o0)`),
+      expected,
+      `hallucinated ${label} object syntax is rejected`
+    )
+  }
+}
+
+// Symmetry: wherever osc() is rejected, midi() and audio() are rejected the
+// same way. Accepting one descriptor kind on a channel that cannot animate
+// would put a descriptor object where a number is read.
+{
+  const cases = [
+    ['camera pos',    'scene(camera(pos: [midi(1), 0, 5])).write(o0)'],
+    ['camera target', 'scene(camera(target: [0, audio(audioBand.low), 0])).write(o0)'],
+    ['light pos',     'scene(camera(fov: 60), light(type: "point", pos: [midi(1), 2, 0])).write(o0)'],
+    ['light dir',     'scene(camera(fov: 60), light(type: "directional", dir: [audio(audioBand.low), -1, 0])).write(o0)'],
+    ['light color',   'scene(camera(fov: 60), light(type: "point", color: [midi(1), 1, 1])).write(o0)'],
+    ['mesh param',    'scene(camera(fov: 60), mesh("sphere", radius: midi(1))).write(o0)'],
+    ['mesh param a',  'scene(camera(fov: 60), mesh("sphere", radius: audio(audioBand.low))).write(o0)'],
+    ['volume threshold', 'scene(camera(fov: 60), volume(vol0, threshold: midi(1))).write(o0)'],
+    ['volume thresh a',  'scene(camera(fov: 60), volume(vol0, threshold: audio(audioBand.low))).write(o0)']
+  ]
+  for (const [label, body] of cases) {
+    assert.throws(() => irFor('search synth\n' + body),
+      /must contain finite numbers|must be|midi|audio/i,
+      `${label}: expected a compile error rather than a descriptor reaching the GPU`)
+  }
+}
+
+// Symmetry stated as an invariant rather than as a list: on any channel, the
+// three descriptor kinds are accepted together or rejected together. Written
+// this way it stays true if a channel's verdict later changes — what it forbids
+// is one kind diverging from the others.
+{
+  const channels = [
+    ['camera pos',       'scene(camera(pos: [DESC, 0, 5])).write(o0)'],
+    ['light dir',        'scene(camera(fov: 60), light(type: "directional", dir: [DESC, -1, 0])).write(o0)'],
+    ['light intensity',  'scene(camera(fov: 60), light(type: "point", intensity: DESC), mesh("box")).write(o0)'],
+    ['mesh pos',         'scene(camera(fov: 60), mesh("box", pos: [DESC, 0, 0])).write(o0)'],
+    ['group rot',        'scene(camera(fov: 60), group(rot: [0, DESC, 0], mesh("box"))).write(o0)'],
+    ['volume scale',     'scene(camera(fov: 60), volume(vol0, scale: [DESC, 1, 1])).write(o0)'],
+    ['volume threshold', 'scene(camera(fov: 60), volume(vol0, threshold: DESC)).write(o0)'],
+    ['mesh radius',      'scene(camera(fov: 60), mesh("sphere", radius: DESC)).write(o0)'],
+    ['scene setting',    'scene(ambient: DESC, mesh("box")).write(o0)']
+  ]
+  const kinds = ['osc(oscKind.saw)', 'midi(1)', 'audio(audioBand.low)']
+  const rejects = (body, desc) => {
+    try {
+      irFor('search synth\n' + body.replace('DESC', desc))
+      return false
+    } catch {
+      return true
+    }
+  }
+  for (const [label, body] of channels) {
+    const verdicts = kinds.map(kind => rejects(body, kind))
+    assert.ok(
+      verdicts.every(v => v === verdicts[0]),
+      `${label}: osc/midi/audio must be accepted or rejected together, got ` +
+      kinds.map((k, i) => `${k}=${verdicts[i] ? 'rejected' : 'accepted'}`).join(', ')
+    )
+  }
+}
+
+// A let-bound midi()/audio() resolves inside a scene transform just as a
+// let-bound osc() does.
+{
+  const ir = irFor(`
+    search synth
+    let pulse = midi(channel: 5, mode: midiMode.triggerNote)
+    let bass = audio(audioBand.low)
+    scene(
+      group(rot: [0, pulse, 0], scale: [bass, 1, 1])
+    ).write(o0)
+  `)
+  assert.strictEqual(ir.nodes[0].transform.rotation[1].type, 'Midi', 'let-bound midi() is resolved')
+  assert.strictEqual(ir.nodes[0].transform.rotation[1].channel, 5, 'midi channel is retained')
+  assert.strictEqual(ir.nodes[0].transform.rotation[1].mode, 3, 'midiMode.triggerNote is retained')
+  assert.strictEqual(ir.nodes[0].transform.scale[0].type, 'Audio', 'let-bound audio() is resolved')
+  assert.strictEqual(ir.nodes[0].transform.scale[0].band, 0, 'audioBand.low is retained')
+}
+
 // Existing let-bound automation remains usable inside scene transform arrays.
 {
   const ir = irFor(`

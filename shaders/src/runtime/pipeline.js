@@ -145,7 +145,7 @@ export function evaluateOscillator(osc, normalizedTime) {
  * @param {number} currentTime - Current time (Date.now())
  * @returns {number} The evaluated value in min..max range
  */
-function evaluateMidi(config, midiState, currentTime) {
+export function evaluateMidi(config, midiState, currentTime) {
     if (!midiState) return config.min
 
     const channel = midiState.getChannel(config.channel)
@@ -211,7 +211,7 @@ function evaluateMidi(config, midiState, currentTime) {
  * @param {import('./external-input.js').AudioState} audioState - Current audio state
  * @returns {number} The evaluated value in min..max range
  */
-function evaluateAudio(config, audioState) {
+export function evaluateAudio(config, audioState) {
     if (!audioState) return config.min
 
     const { band, min, max } = config

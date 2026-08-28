@@ -353,8 +353,11 @@ compiler rather than validated against the effect registry, which is why terms
 like ``reflector()`` need no registration and why scene errors surface as
 ``SyntaxError`` with a line and column rather than as validator diagnostics.
 
-Transform components and light intensity accept ``osc()`` descriptors in place
-of numbers, evaluated against the same normalized loop time as effect uniforms.
+Transform components and light intensity accept the same three automation
+descriptors as effect uniforms in place of numbers: ``osc()``, ``midi()`` and
+``audio()``. They are evaluated against the same normalized loop time and the
+same live MIDI and audio state, so a scene and the effects around it respond to
+one performance.
 
 See :ref:`shader-scene` for the full node, material and settings reference, and
 :ref:`shader-deferred-rendering` for how the scene is drawn.
