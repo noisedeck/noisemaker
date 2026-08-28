@@ -11,7 +11,7 @@
 
 import assert from 'node:assert'
 import { CanvasRenderer } from '../src/renderer/canvas.js'
-import { compileGraph, createRuntime } from '../src/runtime/compiler.js'
+import { compileGraph, createRuntime, recompile } from '../src/runtime/compiler.js'
 
 let passed = 0
 let failed = 0
@@ -178,6 +178,64 @@ await test('createRuntime reuses an already-compiled graph', async () => {
     const text = (err && (err.message || err.code)) || JSON.stringify(err)
     assert.ok(!/Unexpected character/.test(text),
         `the provided graph should have been used, but the source was recompiled: ${text}`)
+})
+
+/**
+ * A pipeline stand-in exposing only what recompile() touches, recording the
+ * post-swap sequence so a graph handoff can't quietly skip it.
+ */
+function recompileTarget() {
+    const calls = []
+    return {
+        calls,
+        width: 8,
+        height: 8,
+        graph: null,
+        createSurfaces() { calls.push('createSurfaces') },
+        collectDefaultUniforms() { calls.push('collectDefaultUniforms'); return {} },
+        recreateTextures() { calls.push('recreateTextures') },
+        initAsyncEffects() { calls.push('initAsyncEffects') }
+    }
+}
+
+/** Run `fn` with console.error captured — recompile() logs its failures. */
+function quietErrors(fn) {
+    const logged = []
+    const original = console.error
+    console.error = (...args) => logged.push(args.join(' '))
+    try {
+        return { result: fn(), logged }
+    } finally {
+        console.error = original
+    }
+}
+
+await test('recompile reuses an already-compiled graph', async () => {
+    const graph = compileGraph('search synth\nscene(camera(fov: 60), mesh("sphere")).write(o0)\nrender(o0)')
+
+    // The live-edit path in compile() has already compiled this graph to detect
+    // the scene program. Re-parsing the source inside recompile() is the
+    // per-keystroke cost the graph handoff exists to avoid.
+    const pipeline = recompileTarget()
+    const { result, logged } = quietErrors(() =>
+        recompile(pipeline, '!!! not valid dsl !!!', { graph }))
+
+    assert.strictEqual(result, graph, `the provided graph must be used: ${logged.join(' ')}`)
+    assert.strictEqual(pipeline.graph, graph, 'the graph must be swapped onto the pipeline')
+    assert.deepStrictEqual(pipeline.calls,
+        ['createSurfaces', 'collectDefaultUniforms', 'recreateTextures', 'initAsyncEffects'],
+        'the post-swap sequence must be unchanged')
+})
+
+await test('recompile without a graph still compiles the source', async () => {
+    const pipeline = recompileTarget()
+    const { result, logged } = quietErrors(() =>
+        recompile(pipeline, '!!! not valid dsl !!!', {}))
+
+    assert.strictEqual(result, null, 'an unparseable source must still fail')
+    assert.strictEqual(pipeline.graph, null, 'nothing may be swapped onto the pipeline')
+    assert.deepStrictEqual(pipeline.calls, [], 'no surfaces may be recreated for a failed compile')
+    assert.ok(/Recompilation failed/.test(logged.join(' ')), `the failure is reported: ${logged.join(' ')}`)
 })
 
 console.log(`\nScene integration: ${passed} passed, ${failed} failed`)

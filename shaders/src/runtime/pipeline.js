@@ -633,6 +633,48 @@ export class Pipeline {
     }
 
     /**
+     * The scene volume() constraint on a volumeSize uniform scope, if any.
+     *
+     * A volume() node marches a fixed-size atlas, so the chain writing the
+     * surface it reads is pinned to that size — compileGraph enforces it and
+     * records the pinned scopes on the graph (`sceneVolumeAtlasScopes`). The
+     * runtime UI paths patch pass uniforms in place and never recompile, so
+     * this is where the same contract is kept for a slider drag.
+     *
+     * The lookup is exact: a chain writing an unmarched surface keeps its own
+     * scope and stays free to resize.
+     * @param {string} scopeName - 'volumeSize' or a scoped variant
+     * @returns {{surface: string, size: number}|null} The constraint, or null
+     */
+    sceneVolumeAtlasConstraint(scopeName) {
+        return this.graph?.sceneVolumeAtlasScopes?.[scopeName] || null
+    }
+
+    /**
+     * Resolve a runtime volumeSize update against the scene volume() contract:
+     * the requested value when the scope is free, the pinned size when it is
+     * not. Refusing rather than accepting matches the compile-time behaviour —
+     * a stretched atlas renders a plausible-looking wrong volume, so silently
+     * letting the drag through is the one outcome that reports nothing.
+     * @param {string} scopeName - 'volumeSize' or a scoped variant
+     * @param {any} value - Requested value
+     * @returns {any} The value to apply
+     */
+    applySceneVolumeAtlasConstraint(scopeName, value) {
+        if (typeof value !== 'number') return value
+        const constraint = this.sceneVolumeAtlasConstraint(scopeName)
+        if (!constraint || value === constraint.size) return value
+
+        if (!this._warnedVolumeConstraints) this._warnedVolumeConstraints = new Set()
+        const warnKey = `${scopeName}:${value}`
+        if (!this._warnedVolumeConstraints.has(warnKey)) {
+            this._warnedVolumeConstraints.add(warnKey)
+            console.warn(`[Pipeline] Refusing volumeSize x${value} on the chain writing ${constraint.surface}: the scene's volume(${constraint.surface}) marches a ${constraint.size}-cube atlas and would decode a x${value} chain at the wrong slice stride. Keeping volumeSize x${constraint.size}.`)
+        }
+        return constraint.size
+    }
+
+    /**
      * Clamp every volumeSize-family uniform baked into the graph's passes
      * (expander output) to the device limit. Runs from createSurfaces() so
      * cold init, resize, and hot recompile all pass through it before any
@@ -1198,9 +1240,21 @@ export class Pipeline {
         }
 
         // Clamp volumeSize so the 3D volume atlas (volumeSize × volumeSize²)
-        // fits the device's max texture size — see clampVolumeSize().
+        // fits the device's max texture size — see clampVolumeSize(). A chain
+        // a scene volume() marches is pinned instead: the volN globals are a
+        // fixed size regardless of the device, so the clamp cannot help there
+        // and the pin has to win.
         if (this.isVolumeSizeUniform(name) && typeof value === 'number') {
             value = this.clampVolumeSize(value)
+            // An unscoped write fans out to every `_chain_N` variant below, so
+            // a pin on any one chain constrains it. A scoped write reaches
+            // only its own chain.
+            let scopeName = name
+            if (name === 'volumeSize' && !this.sceneVolumeAtlasConstraint(name)) {
+                const pinned = Object.keys(this.graph?.sceneVolumeAtlasScopes || {})
+                if (pinned.length > 0) scopeName = pinned[0]
+            }
+            value = this.applySceneVolumeAtlasConstraint(scopeName, value)
         }
 
         const oldValue = this.globalUniforms[name]
@@ -1300,14 +1354,17 @@ export class Pipeline {
         if (!this.graph || !this.graph.passes || !sourcePass.uniforms) return
         let value = sourcePass.uniforms[uniformName]
         if (uniformName === 'volumeSize' && typeof value === 'number') {
-            const clamped = this.clampVolumeSize(value)
-            if (clamped !== value) {
-                value = clamped
+            // Device clamp first, then the scene volume() pin — a marched
+            // atlas has one legal size and the clamp cannot satisfy it.
+            const resolved = this.applySceneVolumeAtlasConstraint(
+                scopedName, this.clampVolumeSize(value))
+            if (resolved !== value) {
+                value = resolved
                 // The UI paths write the raw value to the source pass before
                 // broadcasting; keep the source aligned with what the chain gets.
-                sourcePass.uniforms[uniformName] = clamped
+                sourcePass.uniforms[uniformName] = resolved
                 if (scopedName in sourcePass.uniforms) {
-                    sourcePass.uniforms[scopedName] = clamped
+                    sourcePass.uniforms[scopedName] = resolved
                 }
             }
         }

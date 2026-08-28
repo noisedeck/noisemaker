@@ -1143,7 +1143,7 @@ export class CanvasRenderer {
             compilationPipeline.isCompiling = true
 
             try {
-                const newGraph = recompile(compilationPipeline, dsl, { shaderOverrides })
+                const newGraph = recompile(compilationPipeline, dsl, { shaderOverrides, graph })
                 if (!newGraph) {
                     // Recompile failed, need to create a new pipeline from scratch
                     compilationPipeline.isCompiling = false
@@ -2141,6 +2141,29 @@ export class CanvasRenderer {
     }
 
     /**
+     * Whether a runtime volumeSize update must be refused because a scene
+     * volume() marches the atlas this pass's chain writes.
+     *
+     * compileGraph rejects a program whose volume() reads a chain written at
+     * anything but the marcher's atlas size — but a slider drag patches pass
+     * uniforms in place and never returns to the compiler, so the same program
+     * can be dragged into the sheared state it was not allowed to compile in.
+     * Refusing the write leaves the uniform at the size the program compiled
+     * with, which is the only one the marcher can decode.
+     * @private
+     * @param {object} pass - The pass being written
+     * @param {string} uniformName - Shader uniform name being written
+     * @param {any} value - The value about to be written
+     * @returns {boolean} True when the write must be skipped
+     */
+    _sceneVolumeSizeRefused(pass, uniformName, value) {
+        if (uniformName !== 'volumeSize') return false
+        if (!this._pipeline?.applySceneVolumeAtlasConstraint) return false
+        const scopeName = pass.scopedParams?.volumeSize || 'volumeSize'
+        return this._pipeline.applySceneVolumeAtlasConstraint(scopeName, value) !== value
+    }
+
+    /**
      * Apply parameter values to the pipeline
      * @param {object} effect - Current effect
      * @param {object} parameterValues - Parameter values to apply
@@ -2193,6 +2216,9 @@ export class CanvasRenderer {
                 // write so a stale local value doesn't clobber the chain's
                 // source via the scopedParams propagation below.
                 if (binding.uniformName === 'volumeSize' && pass.inheritsVolumeSize) continue
+                // A chain a scene volume() marches is pinned to the atlas size
+                // the marcher decodes — see _sceneVolumeSizeRefused.
+                if (this._sceneVolumeSizeRefused(pass, binding.uniformName, converted)) continue
                 pass.uniforms[binding.uniformName] = Array.isArray(converted) ? converted.slice() : converted
 
                 // Propagate to chain-scoped variant so resolveDimension() sees the update,
@@ -2277,6 +2303,11 @@ export class CanvasRenderer {
                 if (uniformName === 'volumeSize' && pass.inheritsVolumeSize) continue
 
                 const converted = this.convertParameterForUniform(value, spec)
+
+                // A chain a scene volume() marches is pinned to the atlas size
+                // the marcher decodes — see _sceneVolumeSizeRefused.
+                if (this._sceneVolumeSizeRefused(pass, uniformName, converted)) continue
+
                 pass.uniforms[uniformName] = Array.isArray(converted) ? converted.slice() : converted
 
                 // Propagate to chain-scoped variant so resolveDimension() sees the update,
