@@ -20,25 +20,50 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## I18n strings
 
-- **Checkpoint:** noisemaker `1ee891a2` (2026-08-18)
-- **Scope:** the translation catalogs
-  `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
-  `strings.en.json` is generated from effect definitions (`npm run strings`)
-  and drift-tested by `npm run test:shaders:i18n`, so it never lags and is
-  not part of this pass. Missing locale keys fall back to English at
-  runtime, so gaps are invisible without the diff below.
-- **Gap detection:** every key present in `strings.en.json` and absent from
-  a locale file needs a translation. From `shaders/effects/`:
+- **Checkpoint:** noisemaker `11b7dd4f` / noisedeck `0d89bef0` (2026-08-29)
+- **Scope:** two translation surfaces:
+  - Noisemaker effect catalogs
+    `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
+    `strings.en.json` is generated from effect definitions (`npm run strings`)
+    and drift-tested by `npm run test:shaders:i18n`.
+  - Noisedeck UI catalogs under
+    `app/js/i18n/locales/{de,es,fr,it,ja,pt}/`. The matching `en/` slices are
+    the hand-authored source of truth.
+  Missing locale keys fall back to English at runtime, so gaps on both
+  surfaces are invisible without the checks below.
+- **Gap detection:**
+  1. Noisemaker — every key present in `strings.en.json` and absent from a
+     locale file needs a translation. From `shaders/effects/`:
 
-  ```
-  node -e 'const fs=require("fs");const en=Object.keys(JSON.parse(fs.readFileSync("strings.en.json","utf8")));for(const l of["de","es","fr","it","ja","pt"]){const t=new Set(Object.keys(JSON.parse(fs.readFileSync("strings."+l+".json","utf8"))));const m=en.filter(k=>!t.has(k));if(m.length)console.log(l+":",m.join(", "))}'
-  ```
+     ```
+     node -e 'const fs=require("fs");const en=Object.keys(JSON.parse(fs.readFileSync("strings.en.json","utf8")));for(const l of["de","es","fr","it","ja","pt"]){const t=new Set(Object.keys(JSON.parse(fs.readFileSync("strings."+l+".json","utf8"))));const m=en.filter(k=>!t.has(k));if(m.length)console.log(l+":",m.join(", "))}'
+     ```
 
-  Keys stay in the same (sorted) order as the English catalog. Match each
-  locale's existing conventions — parameter labels lowercase, effect names
-  capitalized, description tone per locale — and reuse the file's existing
-  translation for a term before inventing a new one.
+     Keys stay in the same (sorted) order as the English catalog. Match each
+     locale's existing conventions — parameter labels lowercase, effect names
+     capitalized, description tone per locale — and reuse the file's existing
+     translation for a term before inventing a new one. Run
+     `npm run test:shaders:i18n` to enforce exact key order and non-empty values
+     across all six translated catalogs, in addition to generated-English drift
+     and runtime fallback behavior.
+  2. Noisedeck — from its repository root, run the catalog-parity test. Its
+     diff names every missing or extra leaf key by locale:
+
+     ```
+     node --test --test-timeout=60000 tests/i18n.node-test.js
+     ```
+
+     Add keys to the matching area slice in English order. The test enforces
+     non-empty string values plus every placeholder, plural leaf, and markup tag
+     from the English catalog.
 - **Log:**
+  - 2026-08-29 — caught up through noisemaker `11b7dd4f` / noisedeck
+    `0d89bef0`: Noisemaker's generated English catalog and all six translated
+    effect catalogs were already complete; added 306 Noisedeck translations
+    (51 new UI leaves in each of six locales) for shader-pipeline export,
+    collaboration, completion, and save-failure copy. Added durable Noisemaker
+    key-order/non-empty-value checks and Noisedeck key-order, non-empty-value,
+    placeholder, and markup integrity checks.
   - 2026-08-19 — caught up through `1ee891a2`: audited the i18n
     catch-up range; the English catalog was unchanged and all six locale
     catalogs remain complete, so no additional translations were needed in
