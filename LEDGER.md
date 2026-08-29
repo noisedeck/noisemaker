@@ -131,14 +131,14 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `f6b22ab3` / shade-mcp `ac4c6ba1`, 2026-08-14
+- **Checkpoint:** noisemaker `c767e481` / shade-mcp `ac4c6ba1`, 2026-08-29
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
   parameters/globals, passes/graph, textures, compatibility/mutation,
   rendered output, cross-backend parity, Shade MCP tool contracts), a fully
   worked validated effect, the surface × capability traceability matrix, and
-  the 28-entry gap register (GAP-001..024 and GAP-026..029). The file pins its
+  the 29-entry gap register (GAP-001..024 and GAP-026..030). The file pins its
   own audited SHAs in the "Source snapshots used for this contract" block at
   its head; that block and this checkpoint are the same two SHAs and must be
   advanced together. There is no generator — every update is a hand edit
@@ -150,7 +150,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline f6b22ab3..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline c767e481..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -163,6 +163,17 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-08-29 — caught up through noisemaker `c767e481` / shade-mcp
+    `ac4c6ba1`: re-audited the two watched device-limit commits and documented
+    the expanded capability object, numeric volume-atlas clamping across graph,
+    host, and UI paths, WebGL MRT budget probing/error cleanup, and ordered
+    full-to-half-float MRT adaptation across WebGL2/WebGPU. Rechecked the
+    changed-source evidence for GAP-001/004/005/006/007/016/026; none closed.
+    Opened GAP-030 because MRT adaptation mutates graph formats without
+    invalidating same-size reused backend textures. Reproduced the worked source
+    graph and device-limit regression gates. Shade MCP did not move in this
+    Tearoff range, so its handshake, 18 tool schemas, historical browser
+    transcript, and MCP-side gaps remain pinned unchanged.
   - 2026-08-14 — caught up through noisemaker `f6b22ab3` / shade-mcp
     `ac4c6ba1`: verified that no Noisemaker watched source root changed,
     re-resolved the unpinned MCP package, and recaptured the

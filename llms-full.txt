@@ -17,7 +17,7 @@ and WebGPU backends and must not be cited as evidence for an external port.
 
 Source snapshots used for this contract:
 
-- Noisemaker: `f6b22ab3698b81c5cc67cc2907fea827c57ac5ce`.
+- Noisemaker: `c767e4819eda5032c75896498e8d8bc37337e977`.
 - Shade MCP: `ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`.
 - Shade MCP protocol: server name `shade-mcp`, server version `0.2.1`, protocol
   `2025-06-18`, with 18 tools returned by `tools/list`.
@@ -1070,6 +1070,28 @@ additive one/one. A two-item blend array selects explicit factors. Unknown
 WebGL factors fall back to `ONE`; WebGPU lowercases/replaces underscores and
 lets device validation reject invalid factors.
 
+Before surface allocation, the pipeline sums the color-attachment byte cost
+of every multi-output pass in output insertion order: `rgba32f` and
+`rgba32float` cost 16 bytes, `rgba8` and `rgba8unorm` cost 4, and every other
+or missing format costs 8. If the sum exceeds
+`capabilities.maxColorBytesPerSample`, it walks attachments from last to first
+and changes only `rgba32f`/`rgba32float` specs to `rgba16f`, subtracting 8 per
+change, until the group fits or no eligible attachment remains. This mutates
+`graph.textures` before allocation and deliberately preserves the precision of
+earlier attachments. It is a best-effort adaptation, not an admission check:
+an over-budget group with insufficient demotable attachments remains
+over-budget and emits no structured failure.
+
+Fresh allocation uses the mutated graph format. Resize, hot recompilation, and
+other texture-recreation paths can instead reuse an existing global or regular
+backend texture when its dimensions (and, for 3D textures, depth) match; those
+reuse checks do not compare format. The graph can therefore report `rgba16f`
+after adaptation while the allocated backend texture remains `rgba32f`, leaving
+the physical attachment group over budget. Validate the format on
+`pipeline.backend.textures`, not only `graph.textures`. See GAP-030; a resulting
+framebuffer failure can also surface only through the unstructured paths in
+GAP-007.
+
 `type` does not select a WebGPU compute program. WebGPU detects a compute-only
 program from `@compute` without `@fragment`; WebGL detects compute-style work
 from `storageTextures` or an `outputBuffer` output and applies a fragment-pass
@@ -1077,7 +1099,8 @@ fallback.
 
 Sources: `shaders/src/runtime/expander.js` - pass construction and input/output
 mapping; `shaders/src/runtime/pipeline.js` - `render()`,
-`resolveRepeatCount()`; backend `executePass()` and blend resolvers.
+`resolveRepeatCount()`, `applyMrtFormatBudget()`; backend `executePass()` and
+blend resolvers.
 
 ### Validate
 
@@ -1181,6 +1204,17 @@ type MeshSurfaceRecord = {
   width: number
   height: number
 }
+
+type DeviceCapabilities = {
+  isMobile: boolean
+  floatBlend: boolean
+  floatLinear: boolean
+  colorBufferFloat: boolean
+  maxDrawBuffers: number
+  maxTextureSize: number
+  maxColorBytesPerSample: number | undefined
+  maxStateSize: number
+}
 ```
 
 Node-local texture names are prefixed with `node_<step>_`. Non-particle names
@@ -1188,9 +1222,23 @@ beginning `global_` are chain-scoped. Particle state names are scoped to the
 creating particle node. Normal global surfaces have `_read`/`_write` backend
 textures.
 
+`pipeline.getCapabilities()` returns the active backend object;
+`CanvasRenderer.capabilities` delegates to it. Before a pipeline/backend is
+available, both public paths use `maxDrawBuffers:8`, `maxTextureSize:4096`,
+`maxColorBytesPerSample:64`, and `maxStateSize:2048` with all float flags true
+and `isMobile:false`. An initialized WebGL2 backend reads draw-buffer and
+texture limits from GL. When `EXT_color_buffer_float` exists, it probes tiny
+MRT groups and reports one of `64`, `48`, `40`, `32`, or the fallback `16`;
+without that extension its byte budget is `undefined`. WebGPU reports
+`device.limits.maxTextureDimension2D || 8192` and
+`device.limits.maxColorAttachmentBytesPerSample || 32`. Both backends use
+`maxStateSize:512` on detected mobile devices and `2048` otherwise.
+
 Sources: `shaders/src/runtime/expander.js` - texture-spec collection/scoping;
 `shaders/src/runtime/compiler.js` - `extractTextureSpecs()`;
-`shaders/src/runtime/pipeline.js` - `createSurfaces()`, `recreateTextures()`.
+`shaders/src/runtime/pipeline.js` - `getCapabilities()`, `createSurfaces()`,
+`recreateTextures()`; `shaders/src/renderer/canvas.js` - `capabilities`;
+backend `init()` methods.
 
 ### Act
 
@@ -1245,6 +1293,23 @@ Dimension resolution:
 | `{scale}` | floor of screenSizexscale, optional min/max clamp, then at least 1 |
 | any other value/string | screen size |
 
+Before each `createSurfaces()` allocation pass, numeric uniforms named exactly
+`volumeSize` or starting with `volumeSize_chain_`/`volumeSize_node_` are
+clamped against `capabilities.maxTextureSize`. A value whose square fits is
+unchanged. Otherwise the algorithm starts at 16 and doubles while the next
+power of two both remains below the requested value and has a square no larger
+than the texture limit. Thus `128` becomes `64` for an `8192` limit and `32`
+for a `2048` limit. A missing/falsy limit or a nonnumeric automation value is
+left untouched. The pipeline mutates every affected pass uniform before
+dimension resolution and warns only once per requested-to-effective pair.
+
+The same clamp applies to `Pipeline.setUniform()` for unscoped, chain-scoped,
+and node-scoped names. `CanvasRenderer.applyStepParameterValues()` reaches the
+chain broadcast path, which aligns the source pass, scoped value, and inherited
+consumer values before texture recreation. These paths prevent atlas
+dimensions (`volumeSize` by `volumeSize^2`) and shader addressing from
+disagreeing after graph load, resize, hot recompile, or a host/UI update.
+
 `"input"` appears in existing definitions but has no special resolver branch;
 it falls through to screen size. It does not query the input texture.
 
@@ -1272,9 +1337,13 @@ There is no 2D mip field, mip-level allocation, or mip generation path. There
 is no authorable `persistent`, `transient`, or 3D filter field. Do not emit
 them. See GAP-004.
 
-Sources: `shaders/src/runtime/pipeline.js` - `resolveDimension()`;
+Sources: `shaders/src/runtime/pipeline.js` - `resolveDimension()`,
+`clampVolumeSize()`, `clampGraphVolumeSizes()`, `applyMrtFormatBudget()`,
+`setUniform()`, `broadcastChainScopedParam()`;
+`shaders/src/renderer/canvas.js` - `applyStepParameterValues()`;
 `shaders/src/runtime/backends/webgl2.js` - `createTexture()`,
-`createTexture3D()`, `resolveFormat()`, `updateTextureFromSource()`;
+`createTexture3D()`, `resolveFormat()`, `probeColorBytesPerSample()`,
+`updateTextureFromSource()`;
 `shaders/src/runtime/backends/webgpu.js` - texture creation, samplers,
 `resolveFormat()`, `updateTextureFromSource()`.
 
@@ -1289,6 +1358,8 @@ every 3D graph texture has matching depth and is3D === true
 every global 2D surface has distinct read and write texture IDs
 every pass output intended for WebGL rendering has an FBO
 every format is recognized by the target backend before compilation/execution
+every numeric volumeSize-family pass uniform agrees with its allocated atlas
+when maxColorBytesPerSample is numeric, every MRT byte sum computed from pipeline.backend.textures is <= it; otherwise reject the graph in host policy
 ```
 
 WebGL FBO completeness is checked during creation but only logged. WebGPU device
@@ -1323,6 +1394,8 @@ WebGPU: {code:"ERR_TEXTURE_NOT_FOUND", pass, texture}
 WebGL console: FBO incomplete for texture <id>: <status>
 WebGL console: MRT FBO incomplete for <id>: <status>
 WebGL console: [executePass] FBO not found for <id> in pass <pass>
+[Pipeline] Capping volumeSize from <requested> to <effective>: the <requested>x<requested-squared> volume atlas exceeds this device's max texture size (<limit>)
+[Pipeline] Demoting MRT attachment <id> from <format> to rgba16f: pass <pass> needs <bytes> bytes/sample, device allows <budget>
 WebGPU console: Storage texture <id> not found
 WebGPU uncaptured error: <device validation message>
 ```
@@ -1333,14 +1406,24 @@ returns a structured authoring diagnostic. There is no mip/persistence
 rejection because those keys are not validated and are ignored. See GAP-004 and
 GAP-007.
 
+After MRT adaptation, a graph/backend format mismatch is evidence of the
+same-size texture-reuse gap in GAP-030. It can leave the real framebuffer over
+budget even when `graph.textures` appears to fit, so inspect the backend texture
+records and retain any FBO/GL diagnostics described by GAP-007.
+
 WebGL per-pass and presentation `gl.getError()` logging is armed only for the
 first three frames after a program compile or 2D texture allocation. It is
 disabled in steady state to avoid a synchronous CPU/GPU round trip; late GL
 errors are therefore not surfaced by those per-frame checks. FBO completeness
-checks still run when render targets are created.
+checks still run when render targets are created. The WebGL MRT budget probe
+restores the default framebuffer, deletes its temporary textures/framebuffer,
+and drains errors raised by rejected probe combinations so later pass checks do
+not misattribute them.
 
-Sources: backend texture and pass execution methods;
-`shaders/src/runtime/pipeline.js` - `resolveDimension()`.
+Sources: backend texture and pass execution methods, including WebGL
+`probeColorBytesPerSample()`; `shaders/src/runtime/pipeline.js` -
+`resolveDimension()`, `clampVolumeSize()`, `createSurfaces()`, and
+`recreateTextures()`.
 
 <!-- SURFACE:MUTATION -->
 ## Compatibility and mutation
@@ -1790,7 +1873,7 @@ Backend authorability from current source:
 | Feature | WebGL2 authoring | WebGPU authoring | Predictable parity status |
 |---|---|---|---|
 | fullscreen fragment | GLSL ES 3 combined fragment or split vertex/fragment | WGSL fragment, optional WGSL vertex | authorable when both sources/bindings implement same math |
-| MRT | multiple fragment outputs; device draw-buffer limit | multiple `@location` outputs/attachments | authorable within both devices' attachment limits |
+| MRT | multiple fragment outputs; queried draw-buffer limit and probed combined-byte budget | multiple `@location` outputs/attachments; device byte limit | pipeline can demote trailing full-float outputs; parity requires inspecting allocated backend formats on both devices; GAP-030 |
 | points/billboards/triangles | draw modes supported | draw modes supported | authorable; coordinate/winding conventions still require pixel test |
 | compile-time define | GLSL `#define` | typed WGSL module `const` | authorable for boolean/numeric compatible uses |
 | native compute | absent | compute-only WGSL selected from `@compute` | impossible as native parity |
@@ -1801,7 +1884,12 @@ Backend authorability from current source:
 
 There is no single capability-preflight API that consumes a definition and
 returns this determination. `pipeline.getCapabilities()` reports device limits,
-not effect authorability. See GAP-016.
+including maximum texture size and color-attachment bytes per sample, not
+effect authorability or a per-pass fit report. See GAP-016.
+
+For a reused pipeline, parity checks must read each allocated backend texture's
+effective format rather than trusting the adapted graph spec; the two can
+diverge as described in GAP-030.
 
 Sources: `shaders/src/renderer/canvas.js` - `loadEffectShaders()`;
 backend `compileProgram()`, `executePass()`, `createTexture3D()`;
@@ -2668,11 +2756,15 @@ Sources: Shade MCP `src/tools/resolve-effects.ts`; all tool registration files;
 ## Fully worked, source-complete effect and validation finding
 
 This instance is the repository's `synth/testPattern` effect. The three source
-blocks below are complete, not excerpts. The MCP evidence was captured against
-Noisemaker commit `f6b22ab3698b81c5cc67cc2907fea827c57ac5ce` and Shade MCP
-commit `ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`. MCP request JSON is shown in
-wire order. Each response is the JSON value decoded from the server's
-`content[0].text` field.
+blocks below are complete, not excerpts, and were re-audited at Noisemaker
+commit `c767e4819eda5032c75896498e8d8bc37337e977`. The preserved MCP evidence was
+captured against Noisemaker commit
+`f6b22ab3698b81c5cc67cc2907fea827c57ac5ce` and Shade MCP commit
+`ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`; the audited device-limit changes
+do not alter this single-output 2D effect and do not resolve GAP-024, so the
+historical browser payloads are not relabeled as a fresh end-to-end capture.
+MCP request JSON is shown in wire order. Each response is the JSON value decoded
+from the server's `content[0].text` field.
 
 ### Authoring inputs
 
@@ -3169,8 +3261,9 @@ the checked-in effect and expands this exact program to two expanded passes:
 ```
 
 The first is the one declared effect pass; the second is the terminal write
-blit. A direct `compileGraph()` invocation against the pinned source reproduced
-this exact pass array. No generator or repository contract test on current
+blit. A direct `compileGraph()` invocation against the current pinned
+Noisemaker source reproduced this exact pass array. No generator or repository
+contract test on current
 `main` locks the worked example to the document; re-run the source-level check
 under the freshness protocol when either pinned source changes.
 
@@ -3264,7 +3357,8 @@ The requested frame resolution was `[256,256]`, but the captured canvas was
 
 Sources: Shade MCP tool implementations and harness helpers cited in the tool
 contract surface; the literal transcript above was produced by that server
-against the two pinned source commits named at the start of this section.
+against the historical capture pair Noisemaker `f6b22ab3` and Shade MCP
+`ac4c6ba1` named at the start of this section.
 
 ## Surfaces x capabilities traceability matrix
 
@@ -3277,11 +3371,11 @@ Every cell points to an executable contract or an explicitly identified gap.
 | DSL program | `Token`, `ParsedProgram`, `CompiledProgram`, registry keys, `CompiledGraph` | Complete EBNF plus call/read/write/render contracts | parse/unparse/compile and render metric predicates | `SyntaxError`, `Diagnostic`, `CompilationFailure`; GAP-001/002/023/027 |
 | Effect definition | `Effect` fields, registry/manifest, `checkEffectStructure` | `EffectDefinition` typed grammar | validator and structure scan; browser backend identity is GAP-024 | exact validator messages, structural arrays, backend errors; GAP-003/007/024/026 |
 | Parameters and globals | `effect.globals`, transformed `uniforms`, registry params | `GlobalSpec` typed grammar and enum/binding rules | compile reflection and numeric response deltas | transform errors, type/range/identity blind spots; GAP-010/011/024 |
-| Passes and render graph | `Effect.passes`, `CompiledGraph.passes`, `CompiledGraph.textures`, `CompiledGraph.allocations` | `PassSpec` typed grammar and sampler/output binding rules | graph analysis and per-pass compile | unresolved inputs and backend compile/resource failures; GAP-005/006 |
-| Textures and surface resources | texture specs plus runtime surface dimensions/formats | `TextureSpec` typed grammar and exact accepted policies | allocation existence, size/format inspection, render metrics | unsupported/missing surface failures and silent fields; GAP-004 |
+| Passes and render graph | `Effect.passes`, `CompiledGraph.passes`, `CompiledGraph.textures`, `CompiledGraph.allocations` | `PassSpec` typed grammar, sampler/output binding rules, and MRT byte adaptation | graph analysis and per-pass compile | unresolved inputs and backend compile/resource failures; GAP-005/006/030 |
+| Textures and surface resources | texture specs, `DeviceCapabilities`, and runtime surface dimensions/formats | `TextureSpec` typed grammar, exact accepted policies, and volume atlas clamp | allocation existence, size/format/limit inspection, render metrics | unsupported/missing surface failures, silent fields, and stale reused formats; GAP-004/030 |
 | Compatibility and mutation | compiled AST, `listSteps`, `getCompatibleReplacements` | typed `replaceEffect` contract | candidate precheck; post-mutation browser identity is GAP-024 | compatibility and transform errors; GAP-008/022/024 |
 | Rendered output | frame dimensions, `ImageMetrics`, sink stats, and `PackedFrame` | `RenderEffectFrameInput`, `Sink`, and `FrameExportQueue` contracts | exact metric predicates plus bounded queue/accounting rules | metric, capture, sink, and export failures; GAP-009/014/015/021/024/028 |
-| Cross-backend parity | source-pair availability and parity report | GLSL ES 3.00/WGSL authoring contracts | buffer diff predicates; requested-effect/backend proof is GAP-024 | compile/readback/divergence/identity reports; GAP-012/016/024 |
+| Cross-backend parity | source-pair availability and parity report | GLSL ES 3.00/WGSL authoring contracts | buffer diff predicates; requested-effect/backend proof and allocated-format parity are GAP-024/030 | compile/readback/divergence/identity reports; GAP-012/016/024/030 |
 | Shade MCP tool contracts | `tools/list`, effect scanners, all output types | Full signatures for all 18 verbs | verb-specific domain predicates | selector errors and tool-specific unions; GAP-013/017/018/019/020/024/029 |
 
 External ports are deliberately outside this matrix. Their repositories define
@@ -3314,7 +3408,7 @@ contract without an engine/tool change.
 | GAP-013 | Noisemaker MCP config tracks an unpinned GitHub package reference | `.mcp.json` | tool schemas/thresholds can drift independently of this document snapshot |
 | GAP-014 | A positive explicit `time` with warmup frames can pause animation before the awaited frame count and hang the tool | Shade `src/tools/browser/render.ts` pauses before its frame-count warmup promise; observed run reproduced the hang | a valid-looking render request can fail to terminate |
 | GAP-015 | Similar metrics are computed by separate helpers with different sample grids/blank heuristics | Shade `src/tools/browser/render.ts`, `dsl.ts`, and `parity.ts`; Noisemaker `vendor/shade-mcp/harness/pixel-reader.js` | metric names cannot be assumed numerically interchangeable across verbs |
-| GAP-016 | No preflight reports whether an effect is authorable/renderable on each backend before compilation | `shaders/src/renderer/canvas.js` - shader discovery; backend `compileProgram()` methods | impossible parity cases are found only by source/compile failure |
+| GAP-016 | No preflight reports whether an effect is authorable/renderable on each backend or how device limits will change its texture formats | `shaders/src/renderer/canvas.js` - shader discovery; `shaders/src/runtime/pipeline.js` - capability access and `applyMrtFormatBudget()`; backend `compileProgram()` methods | impossible cases and device-specific precision changes are discovered only during pipeline initialization/compilation, so parity cannot be predicted from the definition alone |
 | GAP-017 | Shade's definition parser is regex-based and lossy | Shade `src/formats/definition-js.ts` - `parseDefinitionJs()` | list/analysis tools cannot expose the complete Noisemaker definition schema |
 | GAP-018 | MCP selector inputs described as globs are compared literally | Shade `src/tools/resolve-effects.ts` - `resolveEffectIds()` | wildcard-looking selectors silently do not expand |
 | GAP-019 | `testNoPassthrough` varies time/color rather than injecting and comparing an input texture | Shade `src/tools/browser/passthrough.ts` - `testNoPassthrough()` | its name overstates what is measured; true input passthrough is not tested |
@@ -3327,7 +3421,8 @@ contract without an engine/tool change.
 | GAP-027 | Subchain arguments have no enforced key set, separator rule, duplicate-key diagnostic, or discarded-key report | `shaders/src/lang/parser.js` - `parseSubchainCall()` accepts arbitrary identifier/string pairs, makes commas optional, overwrites duplicates in `kwargs`, and projects only `name`/`id` into the AST | a typo or unknown subchain key can parse successfully and disappear; retry logic receives no machine-readable failure |
 | GAP-028 | Frame export has no terminal result or cancellation counter for accepted frames discarded by reconfigure or close | `shaders/src/runtime/frame-export.js` - `configure()`, `close()`, `_destroySlots()`, `_release()` | accepted work can lose its callback without incrementing `completed`, `failed`, or `dropped`, so a host cannot reconcile or selectively retry canceled frames |
 | GAP-029 | Effect-index invalidation does not supersede an in-flight rebuild | Shade `src/knowledge/shared-instances.ts` leaves `building` intact in `invalidateSharedEffectIndex()` and shares it with the next reader | a list/search immediately after a library change or `generateManifest` can retain a pre-change index for the next five-second TTL; retry after that TTL when freshness matters |
+| GAP-030 | MRT budget adaptation does not invalidate same-size backend textures whose format no longer matches the graph | `shaders/src/runtime/pipeline.js` - `applyMrtFormatBudget()` mutates `graph.textures`, while `createSurfaces()` and `recreateTextures()` reuse global and regular textures by dimensions (plus depth for 3D) without comparing format | after resize or hot recompilation the graph can report `rgba16f` while the backend still allocates `rgba32f`; byte-budget validation must inspect backend records and an unsupported FBO can still be created |
 
 The matrix has 9 surfaces x 4 capabilities = 36 filled cells. Cells that rely
-on behavior absent from code link to the 28 gaps above rather than substituting
+on behavior absent from code link to the 29 gaps above rather than substituting
 an invented contract.
