@@ -210,7 +210,8 @@ def mask_values(
 
 
 def uv_random(uv_noise: np.ndarray, uv_x: int, uv_y: int) -> float:
-    return float((uv_noise[uv_y][uv_x] + rng.random()) % 1.0)
+    value = np.asarray(uv_noise[uv_y][uv_x]).reshape(-1)[0]
+    return float((value + rng.random()) % 1.0)
 
 
 def square_masks() -> list[ValueMask]:

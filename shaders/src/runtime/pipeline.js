@@ -332,7 +332,7 @@ export class Pipeline {
     /**
      * Get device capabilities from the backend.
      * Useful for UI to show/hide options or adjust defaults.
-     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxStateSize: number}}
+     * @returns {{isMobile: boolean, floatBlend: boolean, floatLinear: boolean, colorBufferFloat: boolean, maxDrawBuffers: number, maxTextureSize: number, maxColorBytesPerSample: number, maxStateSize: number}}
      */
     getCapabilities() {
         return this.backend?.capabilities || {
@@ -342,6 +342,7 @@ export class Pipeline {
             colorBufferFloat: true,
             maxDrawBuffers: 8,
             maxTextureSize: 4096,
+            maxColorBytesPerSample: 64,
             maxStateSize: 2048
         }
     }
@@ -590,7 +591,131 @@ export class Pipeline {
         return null
     }
 
+    /**
+     * Check if a uniform name belongs to the volumeSize family
+     * (unscoped, chain-scoped, or node-scoped).
+     * @param {string} name - Uniform name
+     * @returns {boolean}
+     */
+    isVolumeSizeUniform(name) {
+        return name === 'volumeSize' ||
+               name.startsWith('volumeSize_chain_') ||
+               name.startsWith('volumeSize_node_')
+    }
+
+    /**
+     * Clamp a volumeSize value so the volume atlas (volumeSize × volumeSize²)
+     * fits the device's maximum texture size, snapping down power-of-two so
+     * the clamped size matches the effects' own size choices. Mobile WebKit
+     * caps WebGL2 MAX_TEXTURE_SIZE at 8192, where volumeSize 128 demands a
+     * 128×16384 atlas: the allocation fails, the volume samples as zeros,
+     * and 3D renders degrade to a flat gray "solid cube". No-op when the
+     * backend reports no maxTextureSize (headless stubs) or the atlas fits.
+     * @param {number} value - Requested volume size
+     * @returns {number} A volume size whose atlas fits the device
+     */
+    clampVolumeSize(value) {
+        const maxTextureSize = this.backend?.capabilities?.maxTextureSize
+        if (typeof value !== 'number' || !maxTextureSize || value * value <= maxTextureSize) {
+            return value
+        }
+        let clamped = 16
+        while ((clamped * 2) * (clamped * 2) <= maxTextureSize && clamped * 2 < value) {
+            clamped *= 2
+        }
+        if (!this._warnedVolumeClamps) this._warnedVolumeClamps = new Set()
+        const warnKey = `${value}->${clamped}`
+        if (!this._warnedVolumeClamps.has(warnKey)) {
+            this._warnedVolumeClamps.add(warnKey)
+            console.warn(`[Pipeline] Capping volumeSize from ${value} to ${clamped}: the ${value}x${value * value} volume atlas exceeds this device's max texture size (${maxTextureSize})`)
+        }
+        return clamped
+    }
+
+    /**
+     * Clamp every volumeSize-family uniform baked into the graph's passes
+     * (expander output) to the device limit. Runs from createSurfaces() so
+     * cold init, resize, and hot recompile all pass through it before any
+     * atlas is sized. Automation configs are left alone.
+     */
+    clampGraphVolumeSizes() {
+        if (!this.graph || !this.graph.passes) return
+        for (const pass of this.graph.passes) {
+            if (!pass.uniforms) continue
+            for (const key of Object.keys(pass.uniforms)) {
+                if (!this.isVolumeSizeUniform(key)) continue
+                const value = pass.uniforms[key]
+                if (typeof value !== 'number') continue
+                const clamped = this.clampVolumeSize(value)
+                if (clamped !== value) {
+                    pass.uniforms[key] = clamped
+                }
+            }
+        }
+    }
+
+    /**
+     * Byte cost per sample of a color attachment format, for the MRT
+     * attachment budget. Unlisted formats (including defaulted rgba16f
+     * surfaces) cost 8.
+     * @param {string|undefined} format - Texture format name
+     * @returns {number} Bytes per sample
+     */
+    mrtFormatBytes(format) {
+        switch (format) {
+            case 'rgba32f':
+            case 'rgba32float':
+                return 16
+            case 'rgba8':
+            case 'rgba8unorm':
+                return 4
+            default:
+                return 8
+        }
+    }
+
+    /**
+     * Demote trailing rgba32f attachments of over-budget MRT passes to
+     * rgba16f so the framebuffer stays within the device's color-attachment
+     * byte budget. Apple GPUs enforce Metal's 32-bytes-per-sample rule on
+     * WebGL2 framebuffers (FRAMEBUFFER_UNSUPPORTED past it, measured on
+     * iOS 26.5), where pointsEmit's xyz+vel+rgba MRT (16+16+4 = 36 bytes)
+     * fails every frame. Demoting from the last attachment backward keeps
+     * the highest-precision-need attachments (agent positions) intact.
+     * No-op when the backend reports no maxColorBytesPerSample or every
+     * group already fits.
+     */
+    applyMrtFormatBudget() {
+        const budget = this.backend?.capabilities?.maxColorBytesPerSample
+        if (!budget || !this.graph || !this.graph.passes || !this.graph.textures) return
+        for (const pass of this.graph.passes) {
+            if (!pass.outputs) continue
+            const texIds = Object.values(pass.outputs)
+            if (texIds.length <= 1) continue
+            const entries = texIds.map((texId) => ({ texId, spec: this.graph.textures.get(texId) }))
+            let total = entries.reduce((sum, entry) => sum + this.mrtFormatBytes(entry.spec?.format), 0)
+            if (total <= budget) continue
+            for (let i = entries.length - 1; i >= 0 && total > budget; i--) {
+                const spec = entries[i].spec
+                if (!spec) continue
+                if (spec.format === 'rgba32f' || spec.format === 'rgba32float') {
+                    console.warn(`[Pipeline] Demoting MRT attachment ${entries[i].texId} from ${spec.format} to rgba16f: pass ${pass.id} needs ${total} bytes/sample, device allows ${budget}`)
+                    spec.format = 'rgba16f'
+                    total -= 8
+                }
+            }
+        }
+    }
+
     createSurfaces() {
+        // Volume atlas sizing reads volumeSize out of pass uniforms — clamp
+        // them to the device limit before any dimension is resolved.
+        this.clampGraphVolumeSizes()
+
+        // MRT attachment formats must fit the device's color byte budget
+        // before any texture spec is read for allocation.
+        this.applyMrtFormatBudget()
+
         const surfaceNames = new Set(['o0', 'o1', 'o2', 'o3', 'o4', 'o5', 'o6', 'o7'])
 
         // Global geometry buffers (geo0-geo7) - 2D textures with normals + depth
@@ -1072,6 +1197,12 @@ export class Pipeline {
             }
         }
 
+        // Clamp volumeSize so the 3D volume atlas (volumeSize × volumeSize²)
+        // fits the device's max texture size — see clampVolumeSize().
+        if (this.isVolumeSizeUniform(name) && typeof value === 'number') {
+            value = this.clampVolumeSize(value)
+        }
+
         const oldValue = this.globalUniforms[name]
         this.globalUniforms[name] = value
 
@@ -1167,7 +1298,19 @@ export class Pipeline {
      */
     broadcastChainScopedParam(sourcePass, uniformName, scopedName) {
         if (!this.graph || !this.graph.passes || !sourcePass.uniforms) return
-        const value = sourcePass.uniforms[uniformName]
+        let value = sourcePass.uniforms[uniformName]
+        if (uniformName === 'volumeSize' && typeof value === 'number') {
+            const clamped = this.clampVolumeSize(value)
+            if (clamped !== value) {
+                value = clamped
+                // The UI paths write the raw value to the source pass before
+                // broadcasting; keep the source aligned with what the chain gets.
+                sourcePass.uniforms[uniformName] = clamped
+                if (scopedName in sourcePass.uniforms) {
+                    sourcePass.uniforms[scopedName] = clamped
+                }
+            }
+        }
         for (const otherPass of this.graph.passes) {
             if (otherPass === sourcePass || !otherPass.uniforms) continue
             if (!(scopedName in otherPass.uniforms)) continue

@@ -49,7 +49,9 @@ function rand2D(x, y, seed = 0, time = 0, speed = 1) {
 }
 
 function periodicValue(t, v) {
-  return (Math.sin((t - v) * TAU) + 1) * 0.5
+  const delta = Math.fround(Math.fround(t) - Math.fround(v))
+  const angle = Math.fround(delta * Math.fround(TAU))
+  return Math.fround((Math.fround(Math.sin(angle)) + 1) * 0.5)
 }
 
 function offsetTensor(tensor, shape, x = 0, y = 0) {

@@ -5,7 +5,7 @@ const PI : f32 = 3.141592653589793;
 
 @group(0) @binding(0) var inputTex : texture_2d<f32>;  // sorted
 @group(0) @binding(1) var input_sampler : sampler;
-@group(0) @binding(2) var original_texture : texture_2d<f32>;  // original
+@group(0) @binding(2) var originalTex : texture_2d<f32>;  // original
 @group(0) @binding(3) var original_sampler : sampler;
 @group(0) @binding(4) var<uniform> resolution : vec2<f32>;
 @group(0) @binding(5) var<uniform> angled : f32;
@@ -36,7 +36,7 @@ struct VertexOutput {
 fn main(input : VertexOutput) -> @location(0) vec4<f32> {
     let texSize : vec2<f32> = vec2<f32>(textureDimensions(inputTex));
     let center : vec2<f32> = texSize * 0.5;
-    let pixelCoord : vec2<f32> = input.uv * resolution - center;
+    let pixelCoord : vec2<f32> = input.position.xy - center;
     
     let angle : f32 = angled;
     let rad : f32 = angle * PI / 180.0;
@@ -50,7 +50,7 @@ fn main(input : VertexOutput) -> @location(0) vec4<f32> {
     
     srcCoord = srcCoord + center;
     
-    let originalColor : vec4<f32> = textureSample(original_texture, original_sampler, input.uv);
+    let originalColor : vec4<f32> = textureSample(originalTex, original_sampler, input.position.xy / resolution);
     
     let wrappedUV : vec2<f32> = applyWrap(srcCoord, texSize);
     let sortedColor : vec4<f32> = textureSample(inputTex, input_sampler, wrappedUV);

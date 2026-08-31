@@ -926,10 +926,18 @@ assert.strictEqual(gmOut.length, 16)
 
 // vhs regression
 setSeed(1)
-const vhsTensor = Tensor.fromArray(null, glData, [2, 2, 3])
+const rgbEffectData = new Float32Array([
+  0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.1, 0.2, 0.3,
+])
+const vhsTensor = Tensor.fromArray(null, rgbEffectData, [2, 2, 3])
 const vhsOut = await readTensorData(vhs(vhsTensor, [2, 2, 3], 0.25, 1))
 const vhsExpected = loadFixture("vhs.json")
 arraysClose(Array.from(vhsOut), vhsExpected)
+
+setSeed(1)
+const vhsHalfOut = await readTensorData(vhs(vhsTensor, [2, 2, 3], 0.5, 1))
+const vhsHalfExpected = loadFixture("vhsHalf.json")
+arraysClose(Array.from(vhsHalfOut), vhsHalfExpected)
 
 // scanlineError regression
 const sleData = new Float32Array([0.1, 0.2, 0.3, 0.4])
@@ -942,7 +950,7 @@ arraysClose(Array.from(sleOut), sleExpected)
 
 // crt regression
 setSeed(1)
-const crtTensor = Tensor.fromArray(null, glData, [2, 2, 3])
+const crtTensor = Tensor.fromArray(null, rgbEffectData, [2, 2, 3])
 setSeed(1)
 const crtOut = await readTensorData(crt(crtTensor, [2, 2, 3], 0.25, 1))
 const crtExpected = loadFixture("crt.json")
@@ -1007,7 +1015,7 @@ const grimeTensor = Tensor.fromArray(null, new Float32Array(64), [8, 8, 1])
 setSeed(1)
 const grOut = await readTensorData(grime(grimeTensor, [8, 8, 1], 0, 1))
 const grExpected = loadFixture("grime.json")
-arraysClose(Array.from(grOut), grExpected, 3e-3)
+arraysClose(Array.from(grOut), grExpected)
 
 // spookyTicker regression
 setSeed(1)
@@ -1119,7 +1127,7 @@ arraysClose(Array.from(ldRes), Array.from(ldManual))
 
 // degauss per-channel lensWarp consistency
 setSeed(2)
-const dgTensor = Tensor.fromArray(null, glData, [2, 2, 3])
+const dgTensor = Tensor.fromArray(null, rgbEffectData, [2, 2, 3])
 const dgOut = await readTensorData(degauss(dgTensor, [2, 2, 3], 0, 1, 1))
 setSeed(2)
 const channelShape = [2, 2, 1]

@@ -31,6 +31,19 @@ function evalNode(node, ctx) {
     }
     case 'ArrayExpr': {
       const arr = node.elements.map((el) => evalNode(el, ctx))
+      const enumNames = node.elements.map((el) => {
+        if (el.type !== 'MemberExpr' || el.object.type !== 'Identifier') return null
+        const name = el.object.name
+        return ctx.enums?.[name] && typeof ctx.enums[name] === 'object' ? name : null
+      })
+      const enumName = enumNames[0]
+      if (
+        enumName &&
+        enumNames.every((name) => name === enumName) &&
+        !Object.prototype.hasOwnProperty.call(arr, '__enum')
+      ) {
+        Object.defineProperty(arr, '__enum', { value: enumName })
+      }
       const literalElements = node.elements.every((el) =>
         ['NumberLiteral', 'StringLiteral', 'BooleanLiteral', 'NullLiteral'].includes(el.type),
       )
@@ -235,4 +248,3 @@ function evalCall(node, ctx) {
 export function evaluate(ast, ctx = defaultContext) {
   return evalNode(ast.body, ctx)
 }
-

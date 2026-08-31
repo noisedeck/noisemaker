@@ -21,6 +21,13 @@ for (const [name, obj] of Object.entries(constants)) {
   }
 }
 
+function inferEnumName(values) {
+  const matches = ENUM_LOOKUPS.filter((lookup) =>
+    values.every((item) => lookup.values.has(item)),
+  )
+  return matches.length === 1 ? matches[0].name : null
+}
+
 export function coin_flip() {
   return randomInt(0, 1) === 1
 }
@@ -47,15 +54,7 @@ export function random_member(...collections) {
       if (c.__literal && !Object.prototype.hasOwnProperty.call(arr, '__literal')) {
         Object.defineProperty(arr, '__literal', { value: c.__literal })
       }
-      let enumName = arr.__enum || null
-      if (!enumName && !arr.__literal) {
-        for (const lookup of ENUM_LOOKUPS) {
-          if (arr.every((item) => lookup.values.has(item))) {
-            enumName = lookup.name
-            break
-          }
-        }
-      }
+      const enumName = arr.__enum || (arr.__literal ? null : inferEnumName(arr))
       if (enumName && !Object.prototype.hasOwnProperty.call(arr, '__enum')) {
         Object.defineProperty(arr, '__enum', { value: enumName })
       }
@@ -93,15 +92,7 @@ export function random_member(...collections) {
       if (c.__literal && !Object.prototype.hasOwnProperty.call(arr, '__literal')) {
         Object.defineProperty(arr, '__literal', { value: c.__literal })
       }
-      let enumName = arr.__enum || null
-      if (!enumName && !arr.__literal) {
-        for (const lookup of ENUM_LOOKUPS) {
-          if (arr.every((item) => lookup.values.has(item))) {
-            enumName = lookup.name
-            break
-          }
-        }
-      }
+      const enumName = arr.__enum || (arr.__literal ? null : inferEnumName(arr))
       if (enumName && !Object.prototype.hasOwnProperty.call(arr, '__enum')) {
         Object.defineProperty(arr, '__enum', { value: enumName })
       }
@@ -475,4 +466,3 @@ export function PRESETS(names) {
 }
 
 export default PRESETS
-

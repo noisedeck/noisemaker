@@ -3,7 +3,7 @@ import { tokenize } from '../js/noisemaker/dsl/tokenizer.js'
 import { parse } from '../js/noisemaker/dsl/parser.js'
 import { evaluate } from '../js/noisemaker/dsl/evaluator.js'
 import { setSeed } from '../js/noisemaker/util.js'
-import { ValueDistribution } from '../js/noisemaker/constants.js'
+import { InterpolationType, ValueDistribution } from '../js/noisemaker/constants.js'
 
 function resolve(value) {
   if (typeof value === 'function') {
@@ -69,6 +69,31 @@ let enumPick = resolve(
   ),
 )
 assert.ok([ValueDistribution.ones, ValueDistribution.mids, ValueDistribution.zeros].includes(enumPick))
+
+// Enum arrays must retain their type so random_member sorts by member name,
+// matching Python Enum semantics rather than ambiguous numeric enum values.
+const enumSelections = []
+for (let seed = 0; seed < 5; seed++) {
+  setSeed(seed)
+  enumSelections.push(
+    resolve(
+      evaluate(
+        parse(
+          tokenize(
+            'random_member([InterpolationType.linear, InterpolationType.cosine])',
+          ),
+        ),
+      ),
+    ),
+  )
+}
+assert.deepStrictEqual(enumSelections, [
+  InterpolationType.cosine,
+  InterpolationType.linear,
+  InterpolationType.linear,
+  InterpolationType.linear,
+  InterpolationType.linear,
+])
 
 // Null literal
 let nullVal = resolve(evaluate(parse(tokenize('null'))))

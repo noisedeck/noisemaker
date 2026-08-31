@@ -31,6 +31,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      with:
+        fetch-depth: 0
 
     - name: Set up Node.js
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -40,6 +42,12 @@ jobs:
 
     - name: Install dependencies
       run: npm install --include=dev
+
+    - name: Verify shader parity attestations (CPU only)
+      env:
+        SHADER_PARITY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        SHADER_PARITY_ALL: ${{ startsWith(github.ref, 'refs/tags/') }}
+      run: npm run test:shaders:parity-attestations
 
     - name: Run DSL language tests
       run: npm run test:shaders:lang
