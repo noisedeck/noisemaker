@@ -20,7 +20,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## I18n strings
 
-- **Checkpoint:** noisemaker `19c15cc0` / noisedeck `eb3c3de6` (2026-08-29)
+- **Checkpoint:** noisemaker `c38316a1` / noisedeck `114d64f7` (2026-08-31)
 - **Scope:** two translation surfaces:
   - Noisemaker effect catalogs
     `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
@@ -57,6 +57,13 @@ work, verify it, then update the checkpoint and append a log line.
      non-empty string values plus every placeholder, plural leaf, and markup tag
      from the English catalog.
 - **Log:**
+  - 2026-08-31 — caught up through noisemaker `c38316a1` / noisedeck
+    `114d64f7`: Noisemaker's generated English catalog and all six translated
+    effect catalogs remained complete. Noisedeck's translations for unloaded
+    user effects, storage save failures, and paid-feature load failures were
+    present in all six locales; revalidated exact key parity, non-empty values,
+    placeholders, markup, and async locale selection. No catalog edits were
+    required in this pass.
   - 2026-08-29 — caught up through noisemaker `19c15cc0` / noisedeck
     `eb3c3de6`: Noisemaker's generated English catalog and all six translated
     effect catalogs were already complete; added 312 Noisedeck translations
