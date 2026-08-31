@@ -17,9 +17,9 @@ and WebGPU backends and must not be cited as evidence for an external port.
 
 Source snapshots used for this contract:
 
-- Noisemaker: `c767e4819eda5032c75896498e8d8bc37337e977`.
-- Shade MCP: `ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`.
-- Shade MCP protocol: server name `shade-mcp`, server version `0.2.1`, protocol
+- Noisemaker: `a4701daf8d102fb1ff86f9f7d9a7e4e59517aa5b`.
+- Shade MCP: `ba407982a78766f28fd4238d0a7f2e5f69bd8f7e`.
+- Shade MCP protocol: server name `shade-mcp`, server version `0.2.2`, protocol
   `2025-06-18`, with 18 tools returned by `tools/list`.
 - The repository config runs `npx -y github:noisedeck/shade-mcp`; it does not pin
   that commit. Re-resolve and re-capture tool contracts before relying on this
@@ -33,7 +33,7 @@ Primary source roots:
 - backend behavior: `shaders/src/runtime/backends/webgl2.js` and `webgpu.js`.
 - repository validation policy: `shaders/tests/test-harness.js`.
 - Shade MCP source for the pinned snapshot:
-  `https://github.com/noisefactorllc/shade-mcp/tree/ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff/src`.
+  `https://github.com/noisefactorllc/shade-mcp/tree/ba407982a78766f28fd4238d0a7f2e5f69bd8f7e/src`.
 
 ## Freshness and maintenance
 
@@ -2117,6 +2117,10 @@ followed by nonnumeric text is accepted.
 `SHADE_AI_MODEL` overrides the provider model. Without an override, Anthropic
 uses `claude-opus-5` and OpenAI uses `gpt-5.2`. SIGINT and SIGTERM close live
 browser sessions and the shared viewer server before process exit.
+The advertised MCP server version is injected from `package.json` at build
+time. The post-build standalone-drop check initializes a copy containing only
+the built files and requires its advertised version to match the package, so a
+vendored build does not need a parent `package.json` at runtime.
 
 The browser harness binds its temporary HTTP server to `127.0.0.1`. Viewer and
 effect requests are confined to their configured roots after both lexical and
@@ -2129,7 +2133,8 @@ echo `Access-Control-Allow-Origin` only for an opaque `Origin: null` or an
 optional port. Other origins receive no allow-origin header.
 
 Sources: `.mcp.json`; `.codex/config.toml`; Shade MCP `package.json`;
-`src/index.ts` - registration and shutdown; `src/config.ts`;
+`src/index.ts` - registration and shutdown; `src/version.ts`;
+`tsup.config.ts`; `scripts/check-dist-selfcontained.mjs`; `src/config.ts`;
 `src/ai/provider.ts`; `src/harness/browser-session.ts`;
 `src/harness/live-sessions.ts`; `src/harness/server-manager.ts`;
 `src/tools/browser/parity.ts` - warmup timeout.
@@ -2757,12 +2762,13 @@ Sources: Shade MCP `src/tools/resolve-effects.ts`; all tool registration files;
 
 This instance is the repository's `synth/testPattern` effect. The three source
 blocks below are complete, not excerpts, and were re-audited at Noisemaker
-commit `c767e4819eda5032c75896498e8d8bc37337e977`. The preserved MCP evidence was
-captured against Noisemaker commit
-`f6b22ab3698b81c5cc67cc2907fea827c57ac5ce` and Shade MCP commit
-`ac4c6ba14a8e8eb09b1e6f130ef0773cf0e750ff`; the audited device-limit changes
-do not alter this single-output 2D effect and do not resolve GAP-024, so the
-historical browser payloads are not relabeled as a fresh end-to-end capture.
+commit `a4701daf8d102fb1ff86f9f7d9a7e4e59517aa5b`. The MCP evidence below was
+freshly captured against that Noisemaker commit and Shade MCP commit
+`ba407982a78766f28fd4238d0a7f2e5f69bd8f7e`. Noisemaker's watched source roots
+did not change after the prior audit. Shade MCP's production SDK dependency
+bumps and version-packaging changes leave the cited handlers and browser
+harness byte-identical; they do not alter this single-output 2D effect or
+resolve GAP-024.
 MCP request JSON is shown in wire order. Each response is the JSON value decoded
 from the server's `content[0].text` field.
 
@@ -3306,7 +3312,7 @@ Responses, in the same order:
 {"effect_id":"synth/testPattern","status":"ok","tested_uniforms":["gridSize:pass"],"details":"Uniforms affect output"}
 {"effect_id":"synth/testPattern","status":"skipped","isFilterEffect":false,"similarity":null,"details":"Not a filter effect"}
 {"effect_id":"synth/testPattern","status":"ok","maxDiff":0,"meanDiff":0,"mismatchCount":0,"mismatchPercent":0,"resolution":[1024,1024],"glslSolid":false,"wgslSolid":false,"glslVariance":[16256,16256,16256],"wgslVariance":[16256,16256,16256],"yFlipDetected":false,"yFlipCleanFlip":false,"yFlipMismatchPercent":70.9,"yFlipMeanDiff":180.79,"yFlipRatio":1,"issues":[],"details":"Pixel parity OK (maxDiff=0, meanDiff=0.00)"}
-{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":54.6,"meets_target":true,"stats":{"frame_count":54,"avg_frame_time_ms":18.31,"jitter_ms":15.55,"min_frame_time_ms":5.3,"max_frame_time_ms":129.3}}
+{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":60.33,"meets_target":true,"stats":{"frame_count":60,"avg_frame_time_ms":16.58,"jitter_ms":2.67,"min_frame_time_ms":3.2,"max_frame_time_ms":29.8}}
 ```
 
 Falsifiable interpretation:
@@ -3339,7 +3345,7 @@ Falsifiable interpretation:
   This call does not establish that either buffer came from the worked effect or
   its named backend. See GAP-024.
 - Performance report: threshold pass because
-  `achieved_fps = 54.6 >= target_fps = 30` and the returned `meets_target`
+  `achieved_fps = 60.33 >= target_fps = 30` and the returned `meets_target`
   agrees. The `backend` field is the configured session value; effect and
   actual-backend freshness remain indeterminate under GAP-024.
 
@@ -3357,8 +3363,8 @@ The requested frame resolution was `[256,256]`, but the captured canvas was
 
 Sources: Shade MCP tool implementations and harness helpers cited in the tool
 contract surface; the literal transcript above was produced by that server
-against the historical capture pair Noisemaker `f6b22ab3` and Shade MCP
-`ac4c6ba1` named at the start of this section.
+against the pinned pair Noisemaker `a4701daf` and Shade MCP `ba407982` named at
+the start of this section.
 
 ## Surfaces x capabilities traceability matrix
 

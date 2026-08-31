@@ -163,7 +163,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `c767e481` / shade-mcp `ac4c6ba1`, 2026-08-29
+- **Checkpoint:** noisemaker `a4701daf` / shade-mcp `ba407982`, 2026-08-31
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
@@ -182,7 +182,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline c767e481..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline a4701daf..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -195,6 +195,21 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-08-31 — caught up through noisemaker `a4701daf` / shade-mcp
+    `ba407982`: verified that Noisemaker's watched source roots are unchanged
+    from the prior checkpoint, re-resolved the unpinned GitHub package to the
+    exact Shade MCP commit, and recaptured the
+    `shade-mcp`/`0.2.2`/`2025-06-18` handshake and all 18 tool signatures from
+    the configured runtime. The tool names, input schemas, absent output
+    schemas, and forbidden task support are unchanged. Audited the Shade MCP
+    dependency/release changes and documented its build-time version injection
+    plus standalone-drop handshake gate; its tests, typecheck, build, external
+    dependency gate, and bare-drop check all passed. Rechecked every MCP-side
+    gap; none closed. Recaptured the full eight-call worked transcript in the
+    same `0.2.2` session; the seven deterministic responses were byte-for-byte
+    unchanged, the FPS sample still passed its threshold, and the results
+    continue to expose GAP-024 rather than proving end-to-end backend identity.
+    The source-level worked program also reproduced its exact two-pass graph.
   - 2026-08-29 — caught up through noisemaker `c767e481` / shade-mcp
     `ac4c6ba1`: re-audited the two watched device-limit commits and documented
     the expanded capability object, numeric volume-atlas clamping across graph,
