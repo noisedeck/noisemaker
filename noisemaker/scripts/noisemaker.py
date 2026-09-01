@@ -19,6 +19,10 @@ from noisemaker.presets import PRESETS, Preset, set_presets_path
 
 MAX_SEED_VALUE = 2**32 - 1
 
+# How many input dirs magic-mashup layers into a single collage.
+MASHUP_MIN_INPUTS = 4
+MASHUP_MAX_INPUTS = 6
+
 # Version string - keep in sync with pyproject.toml
 __version__ = "0.8.0"
 
@@ -557,12 +561,15 @@ def magic_mashup(ctx, input_dir, width, height, seed, effect_preset, filename, s
 
     effect = EFFECT_PRESETS.get(effect_preset) if effect_preset else None
 
-    dirnames = [d for d in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, d))]
-    if not dirnames:
-        click.echo(f"No subdirectories found in input dir {input_dir}")
+    dirnames = _usable_mashup_dirs(input_dir, frame_count)
+    if len(dirnames) < MASHUP_MIN_INPUTS:
+        click.echo(
+            f"Need at least {MASHUP_MIN_INPUTS} input dirs holding {frame_count}+ frames "
+            f"in {input_dir}, found {len(dirnames)}"
+        )
         sys.exit(1)
 
-    collage_count = min(random.randint(4, 6), len(dirnames))
+    collage_count = min(random.randint(MASHUP_MIN_INPUTS, MASHUP_MAX_INPUTS), len(dirnames))
     selected_dirs = random.sample(dirnames, collage_count)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -760,6 +767,29 @@ def mashup(ctx, input_dir, filename, control_filename, time, speed, seed):
 
     util.save(tensor, filename)
     print("mashup")
+
+
+def _usable_mashup_dirs(input_dir, frame_count):
+    """Input dirs holding at least ``frame_count`` PNGs, sorted.
+
+    magic_mashup addresses every input dir positionally (``files[i]`` for frame
+    ``i``), so a dir with fewer frames than the mashup renders would quietly
+    drop out of the collage partway through the loop rather than fail. Filter
+    those out up front so a mashup only ever layers full-length inputs.
+    """
+
+    usable = []
+
+    for dirname in sorted(os.listdir(input_dir)):
+        full_path = os.path.join(input_dir, dirname)
+
+        if not os.path.isdir(full_path):
+            continue
+
+        if len([f for f in os.listdir(full_path) if f.endswith(".png")]) >= frame_count:
+            usable.append(dirname)
+
+    return usable
 
 
 def _use_reasonable_speed(preset, frame_count):
