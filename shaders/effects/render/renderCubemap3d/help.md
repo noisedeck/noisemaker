@@ -11,9 +11,11 @@ For the raw, true-color sample with no lighting or gamma, use `renderCubemapSurf
 
 | Parameter | Type | Default | Range | Description |
 |-----------|------|---------|-------|-------------|
+| volumeSize | int | v64 | v16/v32/v64/v128 | Voxel grid resolution, inherited from the upstream volume effect (no UI control) |
 | filtering | int | isosurface | isosurface/voxel | Render the volume as a smooth isosurface or blocky voxels |
 | threshold | float | 0.5 | 0-1 | Surface threshold |
 | invert | boolean | false | - | Invert the inside/outside test |
+| cubeBasis | mat3 | identity | - | Cube face orientation basis (no UI control) |
 | bgColor | color | 0.02,0.02,0.02 | - | Background color |
 | bgAlpha | float | 1 | 0-1 | Background alpha |
 

@@ -29,7 +29,7 @@
     "test:shaders:render": "npm run test:shaders:render:webgl2 && npm run test:shaders:render:webgpu",
     "test:shaders:render:webgl2": "node shaders/tests/test-harness.js --effects synth/noise --backend webgl2 && node shaders/tests/test_simple_aberration_glsl_y_orientation.mjs && node shaders/tests/test_async_overlay_recompile.mjs && node shaders/tests/test_external_texture_upload.mjs",
     "test:shaders:render:webgpu": "node shaders/tests/test-harness.js --effects synth/noise --backend webgpu && node shaders/tests/test_external_texture_upload.mjs",
-    "test:shaders:structure": "node shaders/tests/test-harness.js --structure-only --backend webgl2",
+    "test:shaders:structure": "node shaders/tests/test-harness.js --structure-only --backend webgl2 && node shaders/tests/test_effect_help_params.mjs",
     "image-regress": "python scripts/image_regression.py",
     "manifest": "node shaders/scripts/generate-shader-manifest.mjs",
     "strings": "node shaders/scripts/generate-effect-strings.mjs",

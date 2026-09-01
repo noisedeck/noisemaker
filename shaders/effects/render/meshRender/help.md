@@ -34,12 +34,21 @@ meshLoader().meshRender(scale: 1.5, offsetY: -0.5).write(o0)
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | lightDirection | vec3 | 0.5,0.7,0.5 | Light direction |
+| diffuseColor | color | [1.0, 1.0, 1.0] | Diffuse color |
+| diffuseIntensity | float | 0.7 | Diffuse intensity (0.0-2.0) |
+| specularColor | color | [1.0, 1.0, 1.0] | Specular color |
+| specularIntensity | float | 0.3 | Specular intensity (0.0-2.0) |
+| shininess | float | 32.0 | Specular exponent (1.0-256.0) |
+| ambientColor | color | [0.1, 0.1, 0.1] | Ambient color |
+| rimIntensity | float | 0.15 | Rim light intensity (0.0-1.0) |
+| rimPower | float | 3.0 | Rim light falloff exponent (0.5-8.0) |
 
 ### Appearance
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | meshColor | color | [0.8, 0.8, 0.8] | Mesh surface color |
 | bgColor | color | [0.1, 0.1, 0.15] | Background color |
+| bgAlpha | float | 1.0 | Background opacity (0.0-1.0) |
 | wireframe | int | solid | Render mode: solid or wireframe |
 
 ## Draw Mode

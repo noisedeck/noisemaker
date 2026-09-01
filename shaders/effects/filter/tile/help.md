@@ -12,11 +12,11 @@ Selects a region of the input and folds it using mirror or rotational symmetry. 
 |-----------|------|---------|-------|-------------|
 | symmetry | int | mirrorXY | mirrorXY/rotate2/rotate4/rotate6 | Symmetry group |
 | scale | float | 1.0 | 0.1-4.0 | Scale of source sampling region |
-| offset x | float | 0 | -1 to 1 | Pan source region horizontally |
-| offset y | float | 0 | -1 to 1 | Pan source region vertically |
+| offsetX | float | 0 | -1 to 1 | Pan source region horizontally |
+| offsetY | float | 0 | -1 to 1 | Pan source region vertically |
 | angle | float | 0 | 0-360 | Rotate the entire tiled output |
 | repeat | float | 2 | 1-10 | Number of tile repetitions to display |
-| 1:1 aspect | boolean | true | on/off | Correct tiles to square aspect ratio |
+| aspectLens | boolean | true | on/off | Correct tiles to square aspect ratio |
 
 ## Notes
 

@@ -7,7 +7,7 @@ Colorize input texture with a color overlay
 | Parameter | Type | Default | Range | Description |
 |-----------|------|---------|-------|-------------|
 | color | color | 1,1,1 | - | Tint color |
-| amount | float | 0.5 | 0-1 | Tint amount |
+| alpha | float | 0.5 | 0-1 | Tint amount |
 | mode | int | overlay | overlay/multiply/recolor | Blend mode |
 
 ## Notes

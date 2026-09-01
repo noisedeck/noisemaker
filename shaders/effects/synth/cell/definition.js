@@ -6,7 +6,7 @@ export default new Effect({
   func: "cell",
   tags: ["noise", "geometric"],
 
-  description: "Cellular/Voronoi noise with distance metrics",
+  description: "Cellular/Voronoi noise with selectable cell shapes",
   uniformLayout: {
     resolution: { slot: 0, components: 'xy' },
     time: { slot: 0, components: 'z' },

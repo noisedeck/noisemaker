@@ -14,7 +14,6 @@ Julia set explorer with deep zoom, distance estimation, and curated c-value gall
 | cRadius | float | 0.7885 | 0.01–1.5 | Circle path radius |
 | centerX | float | 0 | -3–3 | Center x |
 | centerY | float | 0 | -3–3 | Center y |
-| zoom | float | 1 | 0.1–100 | Zoom level |
 | rotation | float | 0 | -180–180 | Rotation (degrees) |
 | outputMode | int | orbitTrap | distance/normalMap/orbitTrap/smoothIteration/stripeAverage | Output algorithm |
 | iterations | int | 300 | 50–1000 | Max iterations |
