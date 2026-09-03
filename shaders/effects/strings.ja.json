@@ -2807,7 +2807,7 @@
   "synth/bitwise.seed": "シード",
   "synth/bitwise.speed": "スピード",
   "synth/cell": "セル",
-  "synth/cell#desc": "距離メトリックを用いたセル/ボロノイノイズ",
+  "synth/cell#desc": "セル形状を選択できるセル/ボロノイノイズ",
   "synth/cell.cellScale": "セルスケール",
   "synth/cell.cellSmooth": "セルスムーズ",
   "synth/cell.scale": "ノイズスケール",

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=83.0.0", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -26,7 +26,7 @@ classifiers = [
 
 dependencies = [
     "absl-py>=2.5.0,<2.6",
-    "click>=8.4.2,<9",
+    "click>=8.5.0,<9",
     "colorthief>=0.2.1,<0.3",
     "h5py>=3.11.0,<3.15.0",
     "loguru>=0.7.3,<0.8",
@@ -41,7 +41,7 @@ dependencies = [
 dev = [
     "pytest>=9.1.1,<10",
     "black>=26.5.1",
-    "ruff>=0.16.4",
+    "ruff>=0.16.5",
     "mypy>=2.3.1",
     "types-requests>=2.33.0.20260712",
     "pre-commit>=4.6.2",

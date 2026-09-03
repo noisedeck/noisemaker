@@ -2807,7 +2807,7 @@
   "synth/bitwise.seed": "startwert",
   "synth/bitwise.speed": "geschwindigkeit",
   "synth/cell": "Zelle",
-  "synth/cell#desc": "Zell-/Voronoi-Rauschen mit Distanzmetriken",
+  "synth/cell#desc": "Zell-/Voronoi-Rauschen mit wählbaren Zellformen",
   "synth/cell.cellScale": "zellskala",
   "synth/cell.cellSmooth": "zellglättung",
   "synth/cell.scale": "rauschskala",

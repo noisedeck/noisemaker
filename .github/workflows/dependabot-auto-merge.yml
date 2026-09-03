@@ -1,8 +1,27 @@
 name: Dependabot auto-merge
 
-# Fires AFTER any CI workflow completes. Auto-merges Dependabot PRs if:
+# Auto-merges Dependabot PRs if:
 #   1. All PR-triggered CI runs for the head SHA passed.
 #   2. The bump is not a major version change.
+#
+# Runs on two paths:
+#   - workflow_run, the fast path, firing as each CI workflow completes.
+#   - a daily schedule, the safety net, re-evaluating every open Dependabot PR.
+#
+# The safety net exists because the fast path has three ways to drop a PR on
+# the floor, all observed in production:
+#   1. `workflow_run` matches workflows by literal name, so a repo whose last
+#      check to finish is not in the list below evaluates early, sees that
+#      check still pending, exits -- and nothing ever re-fires. shade-mcp#23
+#      sat green and non-major for a full day this way (its `quality` workflow
+#      was absent from the list), 2026-08-31.
+#   2. `commits/{sha}/pulls` can return an empty association when the run
+#      fires before GitHub links the commit to its PR. portable#16 logged
+#      "No PR for 001a4e2b" and was never looked at again, 2026-08-17.
+#   3. Two PRs racing to merge: the loser is rejected with "Base branch was
+#      modified" and nothing re-triggers it (noisemaker#271, 2026-07-27).
+# Keep the workflow list current for latency, but correctness now rests on
+# the sweep, not on the list being complete.
 #
 # Policy: patch AND minor bumps ship automatically after the dependabot
 # cooldown (7d default / 14d for majors). Only actual major version bumps
@@ -21,13 +40,24 @@ name: Dependabot auto-merge
 
 on:
   workflow_run:
+    # Fast path only -- see the header. Names must match each workflow's
+    # `name:` exactly; a missing entry costs latency, not correctness.
     workflows:
       - ci
       - JavaScript
       - Python
       - Test
       - Build
+      - quality                      # shade-mcp
+      - Shaders                      # noisemaker
+      - Claude Code Review           # noisedeck
+      - API check                    # handfish
+      - Test dashboard-traffic awk   # scaffold
     types: [completed]
+  schedule:
+    # Safety net: catch anything the fast path dropped.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -36,7 +66,7 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.event == 'pull_request'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request'
     steps:
       - name: Mint EHSRE app token
         id: app-token
@@ -52,206 +82,252 @@ jobs:
           permission-pull-requests: write
           permission-actions: read
 
-      - name: Evaluate PR
+      - name: Evaluate and merge
         id: eval
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -e
-          # HEAD_SHA is the triggering CI run's head — for a pull_request run
-          # that is the PR's head commit, so this normally returns exactly one
-          # PR. Prefer the PR whose head actually matches before falling back
-          # to the first, so an ambiguous association can never silently
-          # evaluate (and merge) a different PR than the one CI ran against.
-          PR_LIST=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls")
-          PR_DATA=$(echo "$PR_LIST" | jq --arg s "$HEAD_SHA" '[.[] | select(.head.sha == $s)] | .[0] // empty')
-          if [ -z "$PR_DATA" ]; then
-            PR_DATA=$(echo "$PR_LIST" | jq '.[0] // empty')
-          fi
-          if [ -z "$PR_DATA" ]; then echo "No PR for $HEAD_SHA"; exit 0; fi
 
-          PR_COUNT=$(echo "$PR_LIST" | jq 'length')
-          if [ "$PR_COUNT" -gt 1 ]; then
-            echo "note: $PR_COUNT PRs associated with $HEAD_SHA; selected #$(echo "$PR_DATA" | jq -r '.number')"
-          fi
-
-          PR_NUM=$(echo "$PR_DATA" | jq -r '.number')
-          PR_USER=$(echo "$PR_DATA" | jq -r '.user.login')
-          if [ "$PR_USER" != "dependabot[bot]" ]; then
-            echo "PR #$PR_NUM by $PR_USER — not Dependabot, skipping"
-            exit 0
-          fi
-
-          # Verify every CI run for this SHA passed. The EHSRE app has no
-          # `checks` permission, so read Actions workflow runs (covered by
-          # `actions`) instead of check-runs. Consider only PR-triggered CI
-          # runs, which excludes this workflow_run-triggered auto-merge run.
-          RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs')
-          PENDING=$(echo "$RUNS" | jq '[.[] | select(.event=="pull_request" and .status != "completed")] | length')
-          FAILED=$(echo "$RUNS" | jq '[.[] | select(.event=="pull_request" and (.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out"))] | length')
-
-          if [ "$PENDING" -gt 0 ]; then
-            echo "$PENDING check(s) pending — wait for next workflow_run"
-            exit 0
-          fi
-          if [ "$FAILED" -gt 0 ]; then
-            echo "$FAILED check(s) failed — NOT auto-merging PR #$PR_NUM"
-            exit 0
-          fi
-
-          # ------------------------------------------------------------------
-          # Classify the bump. Policy: patch AND minor bumps ship automatically;
-          # only major version bumps need a human to review.
-          #
-          # Anything this cannot classify with confidence is left open rather
-          # than merged. A stuck PR costs a week; a wrong merge costs an outage
-          # (express 4→5, stripe 14→15, typescript 6→7).
-          # ------------------------------------------------------------------
-          TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
-          BODY=$(echo "$PR_DATA"  | jq -r '.body  // ""')
-          REASON=""
-          SKIP_REASON=""
-
-          # Major version number of one side of a "from … to …" pair.
-          #
-          # Dependabot writes a two-sided pip range with its bounds in the
-          # opposite order on each side:
-          #     "from <9,>=8.4.1 to >=8.4.2,<9"
-          # so reading the first number on each side compares the upper bound
-          # (9) against the lower one (8) and invents a phantom "9 → 8" major.
-          # That is why patch-level pip PRs used to sit open forever. Prefer
-          # the ">=" lower bound; fall back to the first version token so
-          # "==1.2.*", "~=1.2.3", "1.2.3" and "0.19" still classify.
-          major_of() {
-            local side="$1" maj
-            maj=$(printf '%s' "$side" | grep -oE '>=[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
-            if [ -z "$maj" ]; then
-              maj=$(printf '%s' "$side" | grep -oE '[0-9]+' | head -1 || true)
+          # ---- Candidate selection -------------------------------------
+          # Fast path evaluates only the PR whose CI just finished. The daily
+          # sweep evaluates every open Dependabot PR, which is what makes a
+          # dropped fast-path event recoverable instead of permanent.
+          if [ "$EVENT" = "workflow_run" ]; then
+            # RUN_SHA is the triggering CI run's head — for a pull_request run
+            # that is the PR's head commit, so this normally returns exactly one
+            # PR. Prefer the PR whose head actually matches before falling back
+            # to the first, so an ambiguous association can never silently
+            # evaluate (and merge) a different PR than the one CI ran against.
+            PR_LIST=$(gh api "repos/$REPO/commits/$RUN_SHA/pulls")
+            CANDIDATES=$(echo "$PR_LIST" | jq -r --arg s "$RUN_SHA" '[.[] | select(.head.sha == $s)] | .[0].number // empty')
+            if [ -z "$CANDIDATES" ]; then
+              CANDIDATES=$(echo "$PR_LIST" | jq -r '.[0].number // empty')
             fi
-            printf '%s' "$maj"
-          }
 
-          # "<from-major> <to-major>" for every bump listed in a grouped PR
-          # body. Anchored on Dependabot's own "Updates `pkg` from A to B"
-          # line so changelog prose ("migrated from 2 to 3 phases") cannot be
-          # misread as a version bump.
-          body_pairs() {
-            printf '%s' "$BODY" \
-              | grep -oE 'Updates `[^`]+` from [0-9][0-9.]* to [0-9][0-9.]*' \
-              | sed -E 's/.* from ([0-9]+)[^ ]* to ([0-9]+).*/\1 \2/' || true
-          }
+            # The commit->PR association is populated asynchronously and can
+            # still be empty when this fires (portable#16, 2026-08-17). The
+            # head branch is carried on the event itself, so resolve through
+            # it instead — still pinned to RUN_SHA so a branch that moved
+            # since CI ran is not merged on stale evidence.
+            if [ -z "$CANDIDATES" ] && [ -n "$RUN_BRANCH" ]; then
+              CANDIDATES=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+                | jq -r --arg b "$RUN_BRANCH" --arg s "$RUN_SHA" \
+                    '[.[] | select(.head.ref == $b and .head.sha == $s)] | .[0].number // empty')
+              [ -n "$CANDIDATES" ] && echo "note: resolved PR #$CANDIDATES via head branch $RUN_BRANCH"
+            fi
 
-          case "$TITLE" in
-            # 1. Single-package PR — the title names both versions, which is
-            #    the most precise evidence available, so it wins over the group
-            #    name. A major filed into a "-patches" group is still a major.
-            *" from "*" to "*)
-              FROM_SIDE=${TITLE#* from }; FROM_SIDE=${FROM_SIDE%% to *}
-              TO_SIDE=${TITLE#* to }
-              FROM_MAJ=$(major_of "$FROM_SIDE")
-              TO_MAJ=$(major_of "$TO_SIDE")
+            if [ -z "$CANDIDATES" ]; then
+              echo "No PR for $RUN_SHA — the daily sweep will pick it up if one exists"
+              exit 0
+            fi
+          else
+            CANDIDATES=$(gh api "repos/$REPO/pulls?state=open&per_page=100" \
+              --jq '.[] | select(.user.login == "dependabot[bot]") | .number')
+            if [ -z "$CANDIDATES" ]; then
+              echo "sweep: no open Dependabot PRs"
+              exit 0
+            fi
+            echo "sweep: evaluating $(echo $CANDIDATES | wc -w) open Dependabot PR(s)"
+          fi
 
-              if [ -z "$FROM_MAJ" ] || [ -z "$TO_MAJ" ]; then
+          evaluate_pr() {
+            PR_NUM="$1"
+            PR_DATA=$(gh api "repos/$REPO/pulls/$PR_NUM")
+            HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+            PR_USER=$(echo "$PR_DATA" | jq -r '.user.login')
+            PR_STATE=$(echo "$PR_DATA" | jq -r '.state')
+
+            if [ "$PR_STATE" != "open" ]; then
+              echo "PR #$PR_NUM is $PR_STATE — skipping"
+              return 0
+            fi
+            if [ "$PR_USER" != "dependabot[bot]" ]; then
+              echo "PR #$PR_NUM by $PR_USER — not Dependabot, skipping"
+              return 0
+            fi
+
+            # Verify every CI run for this SHA passed. The EHSRE app has no
+            # `checks` permission, so read Actions workflow runs (covered by
+            # `actions`) instead of check-runs. Consider only PR-triggered CI
+            # runs, which excludes this workflow_run-triggered auto-merge run.
+            RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs')
+            PENDING=$(echo "$RUNS" | jq '[.[] | select(.event=="pull_request" and .status != "completed")] | length')
+            FAILED=$(echo "$RUNS" | jq '[.[] | select(.event=="pull_request" and (.conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out"))] | length')
+
+            if [ "$PENDING" -gt 0 ]; then
+              echo "$PENDING check(s) pending — will retry on the next CI completion or the daily sweep"
+              return 0
+            fi
+            if [ "$FAILED" -gt 0 ]; then
+              echo "$FAILED check(s) failed — NOT auto-merging PR #$PR_NUM"
+              return 0
+            fi
+
+            # ------------------------------------------------------------------
+            # Classify the bump. Policy: patch AND minor bumps ship automatically;
+            # only major version bumps need a human to review.
+            #
+            # Anything this cannot classify with confidence is left open rather
+            # than merged. A stuck PR costs a week; a wrong merge costs an outage
+            # (express 4→5, stripe 14→15, typescript 6→7).
+            # ------------------------------------------------------------------
+            TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
+            BODY=$(echo "$PR_DATA"  | jq -r '.body  // ""')
+            REASON=""
+            SKIP_REASON=""
+
+            # Major version number of one side of a "from … to …" pair.
+            #
+            # Dependabot writes a two-sided pip range with its bounds in the
+            # opposite order on each side:
+            #     "from <9,>=8.4.1 to >=8.4.2,<9"
+            # so reading the first number on each side compares the upper bound
+            # (9) against the lower one (8) and invents a phantom "9 → 8" major.
+            # That is why patch-level pip PRs used to sit open forever. Prefer
+            # the ">=" lower bound; fall back to the first version token so
+            # "==1.2.*", "~=1.2.3", "1.2.3" and "0.19" still classify.
+            major_of() {
+              local side="$1" maj
+              maj=$(printf '%s' "$side" | grep -oE '>=[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+              if [ -z "$maj" ]; then
+                maj=$(printf '%s' "$side" | grep -oE '[0-9]+' | head -1 || true)
+              fi
+              printf '%s' "$maj"
+            }
+
+            # "<from-major> <to-major>" for every bump listed in a grouped PR
+            # body. Anchored on Dependabot's own "Updates `pkg` from A to B"
+            # line so changelog prose ("migrated from 2 to 3 phases") cannot be
+            # misread as a version bump.
+            body_pairs() {
+              printf '%s' "$BODY" \
+                | grep -oE 'Updates `[^`]+` from [0-9][0-9.]* to [0-9][0-9.]*' \
+                | sed -E 's/.* from ([0-9]+)[^ ]* to ([0-9]+).*/\1 \2/' || true
+            }
+
+            case "$TITLE" in
+              # 1. Single-package PR — the title names both versions, which is
+              #    the most precise evidence available, so it wins over the group
+              #    name. A major filed into a "-patches" group is still a major.
+              *" from "*" to "*)
+                FROM_SIDE=${TITLE#* from }; FROM_SIDE=${FROM_SIDE%% to *}
+                TO_SIDE=${TITLE#* to }
+                FROM_MAJ=$(major_of "$FROM_SIDE")
+                TO_MAJ=$(major_of "$TO_SIDE")
+
+                if [ -z "$FROM_MAJ" ] || [ -z "$TO_MAJ" ]; then
+                  echo "Cannot classify PR title — leaving open for review: $TITLE"
+                  return 0
+                elif [ "$FROM_MAJ" = "$TO_MAJ" ]; then
+                  REASON="single non-major (major stays at $FROM_MAJ)"
+                else
+                  SKIP_REASON="single major bump ($FROM_MAJ → $TO_MAJ)"
+                fi
+                ;;
+
+              # 2. Grouped PR — the title only names the group, so read every
+              #    bump out of the body. Checked for ALL groups including
+              #    "-patches": the group name is a Dependabot routing hint, not
+              #    a guarantee, and a major hiding in any group must not merge.
+              *"-patches group"*|*"-minor group"*|*"-minor-major group"*|*"-major group"*)
+                PAIRS=$(body_pairs)
+                if [ -z "$PAIRS" ]; then
+                  echo "Grouped PR body has no parseable version pairs — leaving open for review: $TITLE"
+                  return 0
+                fi
+                if [ -n "$(printf '%s\n' "$PAIRS" | awk '$1 != $2 {print "MAJOR"; exit}')" ]; then
+                  SKIP_REASON="grouped PR contains a major version bump"
+                else
+                  REASON="grouped non-major bumps ($(printf '%s\n' "$PAIRS" | wc -l | tr -d ' ') updates)"
+                fi
+                ;;
+
+              *)
                 echo "Cannot classify PR title — leaving open for review: $TITLE"
-                exit 0
-              elif [ "$FROM_MAJ" = "$TO_MAJ" ]; then
-                REASON="single non-major (major stays at $FROM_MAJ)"
-              else
-                SKIP_REASON="single major bump ($FROM_MAJ → $TO_MAJ)"
-              fi
-              ;;
-
-            # 2. Grouped PR — the title only names the group, so read every
-            #    bump out of the body. Checked for ALL groups including
-            #    "-patches": the group name is a Dependabot routing hint, not
-            #    a guarantee, and a major hiding in any group must not merge.
-            *"-patches group"*|*"-minor group"*|*"-minor-major group"*|*"-major group"*)
-              PAIRS=$(body_pairs)
-              if [ -z "$PAIRS" ]; then
-                echo "Grouped PR body has no parseable version pairs — leaving open for review: $TITLE"
-                exit 0
-              fi
-              if [ -n "$(printf '%s\n' "$PAIRS" | awk '$1 != $2 {print "MAJOR"; exit}')" ]; then
-                SKIP_REASON="grouped PR contains a major version bump"
-              else
-                REASON="grouped non-major bumps ($(printf '%s\n' "$PAIRS" | wc -l | tr -d ' ') updates)"
-              fi
-              ;;
-
-            *)
-              echo "Cannot classify PR title — leaving open for review: $TITLE"
-              exit 0
-              ;;
-          esac
-
-          case "$REASON" in
-            "")
-              echo "PR #$PR_NUM: $SKIP_REASON — NOT auto-merging"
-              gh pr comment "$PR_NUM" -R "$REPO" \
-                --body "Auto-merge skipped: $SKIP_REASON. Patch and minor bumps auto-merge after CI passes; major bumps need a human to review and merge." || true
-              ;;
-            *)
-              echo "Non-major ($REASON) and CI green — merging PR #$PR_NUM"
-              echo "pr_num=$PR_NUM" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
-      - name: Approve
-        if: steps.eval.outputs.pr_num != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-        run: gh pr review --approve "${{ steps.eval.outputs.pr_num }}" -R "${{ github.repository }}" || true
-
-      - name: Merge
-        if: steps.eval.outputs.pr_num != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUM: ${{ steps.eval.outputs.pr_num }}
-        run: |
-          # Two PRs that become mergeable together race here: whichever merges
-          # first moves the base, and the other is rejected with "Base branch
-          # was modified". That PR is still green and still correct — it just
-          # lost the race — and nothing re-triggers this workflow for it, so
-          # without a retry it sits until its next CI run (up to a week).
-          # Observed on noisemaker#271, 2026-07-27.
-          #
-          # Retry only that race (and GitHub's "mergeability still computing"
-          # state). A conflict, a missing approval, or a closed PR is a real
-          # answer, not a race — fail fast on those instead of hammering.
-          for attempt in 1 2 3 4 5; do
-            if OUT=$(gh pr merge --squash --delete-branch "$PR_NUM" -R "$REPO" 2>&1); then
-              echo "merged PR #$PR_NUM on attempt $attempt"
-              exit 0
-            fi
-            echo "attempt $attempt failed: $OUT"
-
-            case "$OUT" in
-              *"Base branch was modified"*|*"try the merge again"*|*"not mergeable"*|*"Merge already in progress"*) ;;
-              *)
-                echo "non-retryable merge failure — leaving PR #$PR_NUM open"
-                exit 1
+                return 0
                 ;;
             esac
 
-            STATE=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '"\(.state) \(.mergeable_state)"' 2>/dev/null || echo "unknown unknown")
-            case "$STATE" in
-              "open clean"|"open unstable"|"open has_hooks"|"open unknown"|"open behind")
-                echo "PR #$PR_NUM still mergeable ($STATE) — retrying"
-                sleep $((attempt * 10))
-                ;;
-              "closed "*)
-                echo "PR #$PR_NUM already closed/merged by another run — nothing to do"
-                exit 0
-                ;;
-              *)
-                echo "PR #$PR_NUM no longer mergeable ($STATE) — leaving it for review"
-                exit 1
+            case "$REASON" in
+              "")
+                echo "PR #$PR_NUM: $SKIP_REASON — NOT auto-merging"
+                # Say it once. The sweep revisits this PR daily, so commenting
+                # unconditionally would pile a fresh skip notice onto every open
+                # major bump every morning.
+                if gh pr view "$PR_NUM" -R "$REPO" --json comments \
+                     --jq '.comments[].body' | grep -qF "Auto-merge skipped: $SKIP_REASON"; then
+                  echo "already commented — not repeating"
+                else
+                  gh pr comment "$PR_NUM" -R "$REPO" \
+                    --body "Auto-merge skipped: $SKIP_REASON. Patch and minor bumps auto-merge after CI passes; major bumps need a human to review and merge." || true
+                fi
+                # Returning here is load-bearing: the merge loop follows, and falling
+                # into it would merge the very majors this arm just rejected.
+                return 0
                 ;;
             esac
+
+            echo "Non-major ($REASON) and CI green — merging PR #$PR_NUM"
+
+            # Required where branch protection demands a review. Tolerate a non-zero
+            # exit: re-runs and sweep revisits hit an already-approved PR, and that
+            # must not abort the merge.
+            gh pr review --approve "$PR_NUM" -R "$REPO" || true
+
+            # Two PRs that become mergeable together race here: whichever merges
+            # first moves the base, and the other is rejected with "Base branch
+            # was modified". That PR is still green and still correct — it just
+            # lost the race — and nothing re-triggers this workflow for it, so
+            # without a retry it sits until its next CI run (up to a week).
+            # Observed on noisemaker#271, 2026-07-27.
+            #
+            # Retry only that race (and GitHub's "mergeability still computing"
+            # state). A conflict, a missing approval, or a closed PR is a real
+            # answer, not a race — fail fast on those instead of hammering.
+            for attempt in 1 2 3 4 5; do
+              if OUT=$(gh pr merge --squash --delete-branch "$PR_NUM" -R "$REPO" 2>&1); then
+                echo "merged PR #$PR_NUM on attempt $attempt"
+                return 0
+              fi
+              echo "attempt $attempt failed: $OUT"
+
+              case "$OUT" in
+                *"Base branch was modified"*|*"try the merge again"*|*"not mergeable"*|*"Merge already in progress"*) ;;
+                *)
+                  echo "non-retryable merge failure — leaving PR #$PR_NUM open"
+                  return 1
+                  ;;
+              esac
+
+              STATE=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq '"\(.state) \(.mergeable_state)"' 2>/dev/null || echo "unknown unknown")
+              case "$STATE" in
+                "open clean"|"open unstable"|"open has_hooks"|"open unknown"|"open behind")
+                  echo "PR #$PR_NUM still mergeable ($STATE) — retrying"
+                  sleep $((attempt * 10))
+                  ;;
+                "closed "*)
+                  echo "PR #$PR_NUM already closed/merged by another run — nothing to do"
+                  return 0
+                  ;;
+                *)
+                  echo "PR #$PR_NUM no longer mergeable ($STATE) — leaving it for review"
+                  return 1
+                  ;;
+              esac
+            done
+
+            echo "could not merge PR #$PR_NUM after 5 attempts — leaving it open"
+            return 1
+          }
+
+          for PR_NUM in $CANDIDATES; do
+            echo "::group::PR #$PR_NUM"
+            # One PR failing to merge must not abandon the rest of the sweep.
+            evaluate_pr "$PR_NUM" || echo "PR #$PR_NUM: left open (evaluation returned non-zero)"
+            echo "::endgroup::"
           done
-
-          echo "could not merge PR #$PR_NUM after 5 attempts — leaving it open"
-          exit 1

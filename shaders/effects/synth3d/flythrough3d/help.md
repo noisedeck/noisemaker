@@ -26,49 +26,40 @@ Generates a moving volume-of-interest (VOI) that samples fractal space around a 
 | `iterations` | int | 12 | 4-24 | Fractal iteration depth |
 | `bailout` | float | 4.0 | 1-16 | Escape radius |
 
-### Density
-
-| Parameter | Type | Default | Range | Description |
-|-----------|------|---------|-------|-------------|
-| `shellWidth` | float | 0.05 | 0.001-0.2 | Surface shell thickness |
-| `interiorHaze` | float | 0.3 | 0-1 | Interior volumetric contribution |
-
 ### Camera
 
 | Parameter | Type | Default | Range | Description |
 |-----------|------|---------|-------|-------------|
 | `speed` | float | 0.2 | 0-1 | Flight speed along path |
 | `voiSize` | float | 0.5 | 0.1-2 | Half-extent of view volume |
-| `lookAhead` | float | 0.3 | 0-1 | How far ahead camera looks |
-| `safetyRadius` | float | 0.05 | 0.01-0.2 | Minimum distance from surfaces |
 
-### Color
+### Volume
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `colorMode` | choice | orbitTrap | mono, orbitTrap, iteration, hybrid |
-| `colorShift` | float | 0 | Palette hue rotation |
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `volumeSize` | int | x64 | x16/x32/x64/x128 | Voxel grid resolution |
+| `seed` | int | 0 | 0-100 | Flight path seed (no UI control) |
 
 ## Examples
 
 Basic flythrough:
 ```
-flythrough3d().render3d().out(o0)
+flythrough3d().render3d().write(o0)
 ```
 
 Fast Mandelbulb flight:
 ```
-flythrough3d(type: mandelbulb, speed: 0.5, power: 8).render3d().out(o0)
+flythrough3d(type: mandelbulb, speed: 0.5, power: 8).render3d().write(o0)
 ```
 
 Deep Mandelbox interior:
 ```
-flythrough3d(type: mandelbox, voiSize: 0.3).render3d().out(o0)
+flythrough3d(type: mandelbox, voiSize: 0.3).render3d().write(o0)
 ```
 
 Voxel-style rendering:
 ```
-flythrough3d().render3d(filtering: voxel, threshold: 0.4).out(o0)
+flythrough3d().render3d(filtering: voxel, threshold: 0.4).write(o0)
 ```
 
 ## Architecture
@@ -83,6 +74,4 @@ flythrough3d().render3d(filtering: voxel, threshold: 0.4).out(o0)
 
 - **Mandelbox** with negative scale creates navigable cavern-like interiors
 - **Lower voiSize** = more detail but smaller view distance
-- **Higher interiorHaze** = more volumetric/nebula feel
-- **Lower shellWidth** = sharper surface definition
 - Change **seed** for different flight paths through the same fractal

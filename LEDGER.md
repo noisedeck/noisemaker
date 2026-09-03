@@ -20,25 +20,57 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## I18n strings
 
-- **Checkpoint:** noisemaker `1ee891a2` (2026-08-18)
-- **Scope:** the translation catalogs
-  `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
-  `strings.en.json` is generated from effect definitions (`npm run strings`)
-  and drift-tested by `npm run test:shaders:i18n`, so it never lags and is
-  not part of this pass. Missing locale keys fall back to English at
-  runtime, so gaps are invisible without the diff below.
-- **Gap detection:** every key present in `strings.en.json` and absent from
-  a locale file needs a translation. From `shaders/effects/`:
+- **Checkpoint:** noisemaker `c38316a1` / noisedeck `114d64f7` (2026-08-31)
+- **Scope:** two translation surfaces:
+  - Noisemaker effect catalogs
+    `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
+    `strings.en.json` is generated from effect definitions (`npm run strings`)
+    and drift-tested by `npm run test:shaders:i18n`.
+  - Noisedeck UI catalogs under
+    `app/js/i18n/locales/{de,es,fr,it,ja,pt}/`. The matching `en/` slices are
+    the hand-authored source of truth.
+  Missing locale keys fall back to English at runtime, so gaps on both
+  surfaces are invisible without the checks below.
+- **Gap detection:**
+  1. Noisemaker — every key present in `strings.en.json` and absent from a
+     locale file needs a translation. From `shaders/effects/`:
 
-  ```
-  node -e 'const fs=require("fs");const en=Object.keys(JSON.parse(fs.readFileSync("strings.en.json","utf8")));for(const l of["de","es","fr","it","ja","pt"]){const t=new Set(Object.keys(JSON.parse(fs.readFileSync("strings."+l+".json","utf8"))));const m=en.filter(k=>!t.has(k));if(m.length)console.log(l+":",m.join(", "))}'
-  ```
+     ```
+     node -e 'const fs=require("fs");const en=Object.keys(JSON.parse(fs.readFileSync("strings.en.json","utf8")));for(const l of["de","es","fr","it","ja","pt"]){const t=new Set(Object.keys(JSON.parse(fs.readFileSync("strings."+l+".json","utf8"))));const m=en.filter(k=>!t.has(k));if(m.length)console.log(l+":",m.join(", "))}'
+     ```
 
-  Keys stay in the same (sorted) order as the English catalog. Match each
-  locale's existing conventions — parameter labels lowercase, effect names
-  capitalized, description tone per locale — and reuse the file's existing
-  translation for a term before inventing a new one.
+     Keys stay in the same (sorted) order as the English catalog. Match each
+     locale's existing conventions — parameter labels lowercase, effect names
+     capitalized, description tone per locale — and reuse the file's existing
+     translation for a term before inventing a new one. Run
+     `npm run test:shaders:i18n` to enforce exact key order and non-empty values
+     across all six translated catalogs, in addition to generated-English drift
+     and runtime fallback behavior.
+  2. Noisedeck — from its repository root, run the catalog-parity test. Its
+     diff names every missing or extra leaf key by locale:
+
+     ```
+     node --test --test-timeout=60000 tests/i18n.node-test.js
+     ```
+
+     Add keys to the matching area slice in English order. The test enforces
+     non-empty string values plus every placeholder, plural leaf, and markup tag
+     from the English catalog.
 - **Log:**
+  - 2026-08-31 — caught up through noisemaker `c38316a1` / noisedeck
+    `114d64f7`: Noisemaker's generated English catalog and all six translated
+    effect catalogs remained complete. Noisedeck's translations for unloaded
+    user effects, storage save failures, and paid-feature load failures were
+    present in all six locales; revalidated exact key parity, non-empty values,
+    placeholders, markup, and async locale selection. No catalog edits were
+    required in this pass.
+  - 2026-08-29 — caught up through noisemaker `19c15cc0` / noisedeck
+    `eb3c3de6`: Noisemaker's generated English catalog and all six translated
+    effect catalogs were already complete; added 312 Noisedeck translations
+    (52 new UI leaves in each of six locales) for shader-pipeline export,
+    collaboration, completion, save-failure, and unloaded-user-effect copy.
+    Added durable Noisemaker key-order/non-empty-value checks and Noisedeck
+    key-order, non-empty-value, placeholder, and markup integrity checks.
   - 2026-08-19 — caught up through `1ee891a2`: audited the i18n
     catch-up range; the English catalog was unchanged and all six locale
     catalogs remain complete, so no additional translations were needed in
@@ -131,14 +163,14 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `f6b22ab3` / shade-mcp `ac4c6ba1`, 2026-08-14
+- **Checkpoint:** noisemaker `a4701daf` / shade-mcp `ba407982`, 2026-08-31
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
   parameters/globals, passes/graph, textures, compatibility/mutation,
   rendered output, cross-backend parity, Shade MCP tool contracts), a fully
   worked validated effect, the surface × capability traceability matrix, and
-  the 28-entry gap register (GAP-001..024 and GAP-026..029). The file pins its
+  the 29-entry gap register (GAP-001..024 and GAP-026..030). The file pins its
   own audited SHAs in the "Source snapshots used for this contract" block at
   its head; that block and this checkpoint are the same two SHAs and must be
   advanced together. There is no generator — every update is a hand edit
@@ -150,7 +182,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline f6b22ab3..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline a4701daf..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -163,6 +195,32 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-08-31 — caught up through noisemaker `a4701daf` / shade-mcp
+    `ba407982`: verified that Noisemaker's watched source roots are unchanged
+    from the prior checkpoint, re-resolved the unpinned GitHub package to the
+    exact Shade MCP commit, and recaptured the
+    `shade-mcp`/`0.2.2`/`2025-06-18` handshake and all 18 tool signatures from
+    the configured runtime. The tool names, input schemas, absent output
+    schemas, and forbidden task support are unchanged. Audited the Shade MCP
+    dependency/release changes and documented its build-time version injection
+    plus standalone-drop handshake gate; its tests, typecheck, build, external
+    dependency gate, and bare-drop check all passed. Rechecked every MCP-side
+    gap; none closed. Recaptured the full eight-call worked transcript in the
+    same `0.2.2` session; the seven deterministic responses were byte-for-byte
+    unchanged, the FPS sample still passed its threshold, and the results
+    continue to expose GAP-024 rather than proving end-to-end backend identity.
+    The source-level worked program also reproduced its exact two-pass graph.
+  - 2026-08-29 — caught up through noisemaker `c767e481` / shade-mcp
+    `ac4c6ba1`: re-audited the two watched device-limit commits and documented
+    the expanded capability object, numeric volume-atlas clamping across graph,
+    host, and UI paths, WebGL MRT budget probing/error cleanup, and ordered
+    full-to-half-float MRT adaptation across WebGL2/WebGPU. Rechecked the
+    changed-source evidence for GAP-001/004/005/006/007/016/026; none closed.
+    Opened GAP-030 because MRT adaptation mutates graph formats without
+    invalidating same-size reused backend textures. Reproduced the worked source
+    graph and device-limit regression gates. Shade MCP did not move in this
+    Tearoff range, so its handshake, 18 tool schemas, historical browser
+    transcript, and MCP-side gaps remain pinned unchanged.
   - 2026-08-14 — caught up through noisemaker `f6b22ab3` / shade-mcp
     `ac4c6ba1`: verified that no Noisemaker watched source root changed,
     re-resolved the unpinned MCP package, and recaptured the

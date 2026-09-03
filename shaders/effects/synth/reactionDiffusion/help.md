@@ -15,6 +15,7 @@ Implements the Gray-Scott model of reaction-diffusion, producing organic, self-o
 | smoothing | int | linear | constant/linear/hermite/catmullRom3x3/catmullRom4x4/bSpline3x3/bSpline4x4 | Smoothing |
 | speed | float | 100 | 10-145 | Speed |
 | resetState | boolean | false | - | State |
+| seed | int | 1 | 1-100 | Random seed |
 | sourceF | int | slider | slider/sliderInput/brightness/darkness/red/green/blue | Feed source |
 | feed | float | 70 | 10-110 | Feed value |
 | sourceK | int | slider | slider/sliderInput/brightness/darkness/red/green/blue | Kill source |

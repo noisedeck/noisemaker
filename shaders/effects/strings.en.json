@@ -2807,7 +2807,7 @@
   "synth/bitwise.seed": "seed",
   "synth/bitwise.speed": "speed",
   "synth/cell": "Cell",
-  "synth/cell#desc": "Cellular/Voronoi noise with distance metrics",
+  "synth/cell#desc": "Cellular/Voronoi noise with selectable cell shapes",
   "synth/cell.cellScale": "cell scale",
   "synth/cell.cellSmooth": "cell smooth",
   "synth/cell.scale": "noise scale",

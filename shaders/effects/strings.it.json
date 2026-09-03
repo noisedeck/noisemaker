@@ -2807,7 +2807,7 @@
   "synth/bitwise.seed": "seme",
   "synth/bitwise.speed": "velocità",
   "synth/cell": "Cellula",
-  "synth/cell#desc": "rumore cellulare/voronoi con metriche di distanza",
+  "synth/cell#desc": "rumore cellulare/voronoi con forme di cella selezionabili",
   "synth/cell.cellScale": "scala cella",
   "synth/cell.cellSmooth": "morbidezza cella",
   "synth/cell.scale": "scala rumore",

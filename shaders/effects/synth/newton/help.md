@@ -14,6 +14,7 @@ Newton fractal explorer with deep zoom, variable polynomial degree, relaxation c
 | tolerance | float | 0.001 | 0.0001–0.01 | Convergence tolerance |
 | centerX | float | 0 | -3–3 | Center x (manual mode) |
 | centerY | float | 0 | -3–3 | Center y (manual mode) |
+| rotation | float | 0 | -180-180 | Rotation (degrees) |
 | zoomSpeed | float | 0 | 0–5 | Auto-zoom speed |
 | zoomDepth | float | 0 | 0–14 | Zoom depth (powers of 10) |
 | degreeSpeed | float | 0 | 0–1 | Degree animation speed (manual mode) |

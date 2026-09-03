@@ -24,6 +24,7 @@ Uses a three-step process:
 | reflection | float | 0 | 0-100 | Reflection |
 | refraction | float | 0 | 0-100 | Refraction |
 | aberration | float | 0 | 0-100 | Aberration |
+| heightMap | surface | inputTex | - | Surface sampled for height, defaulting to the input |
 
 ## Notes
 

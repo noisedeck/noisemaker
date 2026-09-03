@@ -12,6 +12,7 @@ Each particle is rendered as a quad with a procedural SDF shape or external text
 |-----------|------|---------|-------|-------------|
 | shapeMode | int | circle | texture/circle/ring/square/diamond/triangle/star/soft | Particle shape |
 | tex | surface | none | - | Sprite texture (only used when shape is "texture") |
+| blendMode | int | additive | additive/alpha | Blend mode |
 | depositOpacity | float | 20 | 1-100 | Deposit opacity — scales particle contribution to reduce additive blowout |
 | pointSize | float | 8 | 1-64 | Point size |
 | sizeVariation | float | 0 | 0-100 | Size variation |

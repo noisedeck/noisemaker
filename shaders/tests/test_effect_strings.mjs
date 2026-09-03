@@ -20,7 +20,9 @@ import { buildCatalog } from '../scripts/generate-effect-strings.mjs'
 import { CanvasRenderer } from '../src/renderer/canvas.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const EN_PATH = join(__dirname, '..', 'effects', 'strings.en.json')
+const EFFECTS_DIR = join(__dirname, '..', 'effects')
+const EN_PATH = join(EFFECTS_DIR, 'strings.en.json')
+const TRANSLATED_LOCALES = ['de', 'es', 'fr', 'it', 'ja', 'pt']
 
 let failed = false
 async function test(name, fn) {
@@ -44,6 +46,24 @@ await test('committed strings.en.json is in sync with the generator', async () =
     const committed = readFileSync(EN_PATH, 'utf8')
     const fresh = JSON.stringify(await buildCatalog(), null, 2) + '\n'
     if (fresh !== committed) throw new Error('strings.en.json is out of date — run `npm run strings`')
+})
+
+await test('translated catalogs match English key order and contain no empty values', async () => {
+    const englishKeys = Object.keys(JSON.parse(readFileSync(EN_PATH, 'utf8')))
+    for (const locale of TRANSLATED_LOCALES) {
+        const catalog = JSON.parse(readFileSync(join(EFFECTS_DIR, `strings.${locale}.json`), 'utf8'))
+        const localeKeys = Object.keys(catalog)
+        const mismatch = localeKeys.findIndex((key, index) => key !== englishKeys[index])
+        if (localeKeys.length !== englishKeys.length || mismatch !== -1) {
+            const index = mismatch === -1 ? Math.min(localeKeys.length, englishKeys.length) : mismatch
+            throw new Error(`${locale} key order differs at index ${index}: expected ${JSON.stringify(englishKeys[index])}, got ${JSON.stringify(localeKeys[index])}`)
+        }
+        for (const [key, value] of Object.entries(catalog)) {
+            if (typeof value !== 'string' || value.trim() === '') {
+                throw new Error(`${locale}:${key} must be a non-empty string`)
+            }
+        }
+    }
 })
 
 await test('no locale set: effect strings are unchanged English', async () => {

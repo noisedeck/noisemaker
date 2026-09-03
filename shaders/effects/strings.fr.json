@@ -2807,7 +2807,7 @@
   "synth/bitwise.seed": "graine",
   "synth/bitwise.speed": "vitesse",
   "synth/cell": "Cellule",
-  "synth/cell#desc": "Bruit cellulaire/Voronoï avec métriques de distance",
+  "synth/cell#desc": "Bruit cellulaire/Voronoï avec formes de cellule sélectionnables",
   "synth/cell.cellScale": "échelle de cellule",
   "synth/cell.cellSmooth": "lissage de cellule",
   "synth/cell.scale": "échelle de bruit",

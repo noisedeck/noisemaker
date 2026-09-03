@@ -24,6 +24,6 @@ pressure gradient so the velocity is divergence-free. Renders the dye channel in
 | velocityDecay | float | 99 | 80-100 | Velocity drag per frame (×0.01) |
 | inputForce | float | 0 | 0-100 | Mix input luminance gradient into velocity |
 | inputDye | float | 0 | 0-100 | Mix input brightness into dye |
-| weight | float | 0 | 0-100 | General input weight |
+| seed | int | 1 | 1-100 | Random seed |
 | inputIntensity | float | 0 | 0-100 | Output blend with input texture |
 | resetState | boolean | false | - | Re-stir the fluid |

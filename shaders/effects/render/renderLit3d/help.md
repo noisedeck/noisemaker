@@ -49,19 +49,19 @@ This effect extends `render3d` with full lighting controls, allowing you to fine
 
 ```
 // Basic lit 3D noise
-noise3d().renderLit3d().out(o0)
+noise3d().renderLit3d().write(o0)
 
 // Spherical bounding for organic look
-cell3d().renderLit3d(shape: sphere, shininess: 128).out(o0)
+cell3d().renderLit3d(shape: sphere, shininess: 128).write(o0)
 
 // Terrain-style plane rendering
-fractal3d().renderLit3d(shape: plane, threshold: 0.3).out(o0)
+fractal3d().renderLit3d(shape: plane, threshold: 0.3).write(o0)
 
 // Dramatic rim lighting
-fractal3d().renderLit3d(rimIntensity: 0.5, rimPower: 2.0, ambientColor: [0.05, 0.05, 0.1]).out(o0)
+fractal3d().renderLit3d(rimIntensity: 0.5, rimPower: 2.0, ambientColor: [0.05, 0.05, 0.1]).write(o0)
 
 // Colored lighting
-shape3d().renderLit3d(diffuseColor: [1.0, 0.8, 0.6], specularColor: [1.0, 0.9, 0.8]).out(o0)
+shape3d().renderLit3d(diffuseColor: [1.0, 0.8, 0.6], specularColor: [1.0, 0.9, 0.8]).write(o0)
 ```
 
 The volumeSize parameter is automatically inherited from the upstream 3D effect.
