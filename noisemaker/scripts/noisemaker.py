@@ -12,6 +12,7 @@ import noisemaker.ai as ai
 import noisemaker.cli as cli
 import noisemaker.effects as effects
 import noisemaker.generators as generators
+import noisemaker.strobe as strobe
 import noisemaker.util as util
 import noisemaker.value as value
 from noisemaker.composer import EFFECT_PRESETS, GENERATOR_PRESETS, reload_presets
@@ -412,6 +413,8 @@ def animate(
     generator = GENERATOR_PRESETS[preset_name]
     effect = EFFECT_PRESETS.get(effect_preset) if effect_preset else None
 
+    luminance_grids = []
+
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(frame_count):
             frame_path = os.path.join(tmp, f"{i:04d}.png")
@@ -457,6 +460,9 @@ def animate(
                     util.logger.error(f"Effect render failed: {e}\nSeed: {seed}\nArgs: {effect.__dict__}")
                     raise
 
+            # Sampled before the watermark, for the stroboscopic check below.
+            luminance_grids.append(_sample_luminance(frame_path))
+
             if save_frames:
                 shutil.copy(frame_path, save_frames)
 
@@ -465,6 +471,11 @@ def animate(
 
             if preview_filename and i == 0:
                 shutil.copy(frame_path, preview_filename)
+
+        # WCAG 2.3.1 general flash threshold. Printed after the frame loop so
+        # it lands below the preset and alt-text lines that callers read by
+        # position, and cannot shift them.
+        print(strobe.verdict_line(luminance_grids, frame_count, target_duration))
 
         if filename.endswith(".mp4"):
             if target_duration is not None:
@@ -572,6 +583,8 @@ def magic_mashup(ctx, input_dir, width, height, seed, effect_preset, filename, s
     collage_count = min(random.randint(MASHUP_MIN_INPUTS, MASHUP_MAX_INPUTS), len(dirnames))
     selected_dirs = random.sample(dirnames, collage_count)
 
+    luminance_grids = []
+
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(frame_count):
             frame_path = os.path.join(tmp, f"{i:04d}.png")
@@ -619,6 +632,9 @@ def magic_mashup(ctx, input_dir, width, height, seed, effect_preset, filename, s
             else:
                 util.save(tensor, frame_path)
 
+            # Sampled before the watermark, for the stroboscopic check below.
+            luminance_grids.append(_sample_luminance(frame_path))
+
             if save_frames:
                 shutil.copy(frame_path, save_frames)
 
@@ -627,6 +643,11 @@ def magic_mashup(ctx, input_dir, width, height, seed, effect_preset, filename, s
 
             if preview_filename and i == 0:
                 shutil.copy(frame_path, preview_filename)
+
+        # WCAG 2.3.1 general flash threshold. Printed after the frame loop so
+        # it lands below the preset and alt-text lines that callers read by
+        # position, and cannot shift them.
+        print(strobe.verdict_line(luminance_grids, frame_count, target_duration))
 
         if filename.endswith(".mp4"):
             if target_duration is not None:
@@ -790,6 +811,16 @@ def _usable_mashup_dirs(input_dir, frame_count):
             usable.append(dirname)
 
     return usable
+
+
+def _sample_luminance(frame_path):
+    """Block luminance of a finished frame, for the stroboscopic check."""
+
+    return strobe.luminance_grid(
+        tf.image.convert_image_dtype(
+            util.load(frame_path, channels=3), dtype=tf.float32
+        ).numpy()
+    )
 
 
 def _use_reasonable_speed(preset, frame_count):
