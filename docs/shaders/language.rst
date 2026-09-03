@@ -170,7 +170,15 @@ Given ``blur(amount, angle, quality)``, all three of these bind ``amount: 0.9``,
   blur(angle: 0.5, 0.9, 4)
 
 In the second call, ``4`` would have reached ``angle`` by position; because
-``angle:`` is already claimed, it shifts to ``quality``.
+``angle:`` is already claimed, it shifts to ``quality``. A positional left
+over once every slot is filled raises ``Too many positional arguments for
+blur(): 'blur' takes 3``.
+
+``//`` comments may appear inside an argument list, an array literal or an
+object literal, between arguments. They are skipped by the parser, so a
+program re-emitted from its parsed form (as the demo does when a parameter is
+changed) comes back without them; comments on their own lines between
+statements survive that round trip.
 
 Numeric arguments support inline arithmetic (``+``, ``-``, ``*``, ``/``) and constants like ``Math.PI``. Color arguments accept unquoted ``#RGB`` or ``#RRGGBB`` hex codes.
 
@@ -325,15 +333,16 @@ output composes with the 2D effect library.
 
   scene(
     ambient: 0.15,
-    camera(fov: 60, pos: [0, 3, -8], target: [0, 0, 0]),
-    light(type: "directional", dir: [1, -1, 1], intensity: 2),
+    camera(fov: 60, pos: [0, 3, 8], target: [0, 0, 0]),
+    light(type: "directional", dir: [-1, -1, -1], intensity: 2),
     mesh("sphere", radius: 1.5, pos: [0, 1, 0])
       .material(solid(color: [0.9, 0.9, 0.95]).pbr(metallic: 0.1, roughness: 0.6))
   ).write(o0)
 
 The scene vocabulary is ``scene``, ``camera``, ``light``, ``environment``,
-``mesh``, ``group``, ``material``, ``solid``, ``surface``, ``pbr``, ``emit`` and
-``reflector``.
+``mesh``, ``volume``, ``group``, ``material``, ``solid``, ``surface``, ``pbr``
+and ``emit``. ``reflector()`` is a chain link on a node inside the scene, not
+a vocabulary word of its own.
 
 Every call is first resolved against the registered effects in the active search
 order. ``solid`` is both a scene material source and the ``synth/solid``
@@ -343,7 +352,7 @@ the 2D effect.
 Only ``scene`` falls through to the scene layer when no effect matches, and it
 must start its chain — ``noise().scene(...)`` would discard the incoming surface
 and instead raises ``scene() is a generator and must start a chain``. The other
-ten names are scene *children*; they live inside a ``scene()`` call and never
+eleven names are scene *children*; they live inside a ``scene()`` call and never
 reach the chain. Used as a chain element with no effect behind them they raise
 ``Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside
 scene().``
@@ -639,15 +648,15 @@ Usage Examples
 .. code-block:: none
 
    search synth
-   noise(scale: osc(type: sine, min: 2, max: 8)).write(o0)
+   noise(scale: osc(type: sine, min: 0.2, max: 0.8)).write(o0)
 
 **Using variables for reusable oscillators:**
 
 .. code-block:: none
 
    search synth
-   let scaleOsc = osc(type: sine, min: 2, max: 8)
-   let rotOsc = osc(type: saw, min: 0, max: 360)
+   let scaleOsc = osc(type: sine, min: 0.2, max: 0.8)
+   let rotOsc = osc(type: saw)
    noise(scale: scaleOsc, rotation: rotOsc).write(o0)
 
 **Speed control for synchronized loops:**
@@ -656,7 +665,7 @@ Usage Examples
 
    search synth
    // speed: 2 means the oscillator completes 2 cycles per animation loop
-   noise(scale: osc(type: tri, min: 1, max: 10, speed: 2)).write(o0)
+   noise(scale: osc(type: tri, min: 0.1, max: 1, speed: 2)).write(o0)
 
 **Phase offset for staggered animations:**
 
@@ -673,31 +682,31 @@ Usage Examples
 .. code-block:: none
 
    search synth
-   noise(scale: osc(type: noise, min: 2, max: 8, seed: 42)).write(o0)
+   noise(scale: osc(type: noise, min: 0.2, max: 0.8, seed: 42)).write(o0)
 
 Runtime Behavior
 ^^^^^^^^^^^^^^^^
 
 Oscillators are evaluated per-frame based on the current animation time. The pipeline normalizes time to a 0..1 range over the animation duration (default 10 seconds), then applies the speed multiplier and offset before computing the waveform value.
 
-The resulting value is mapped from the internal 0..1 range to the specified min..max range, making oscillators suitable for any numeric parameter regardless of its expected range.
+The waveform yields a value in ``0..1``. ``min`` and ``max`` (each in ``0..1``, default the whole range) narrow it to a sub-range, and the result is then mapped onto the consuming parameter's own declared range — so ``osc(min: 0.2, max: 0.8)`` on ``scale`` sweeps the middle 60% of whatever ``scale`` allows, and no oscillator needs to know a parameter's units. A ``min`` or ``max`` outside ``0..1`` is clamped to it (an effect uniform warns; a :ref:`scene <shader-scene>` rejects it).
 
 Live Input
 ----------
 
-Use ``midi()`` and ``audio()`` to drive parameters from external signals. Both map incoming data to a numeric range and can be mixed with oscillators or constants.
+Use ``midi()`` and ``audio()`` to drive parameters from external signals. Both yield a value in ``0..1``, narrowed by ``min``/``max`` exactly as ``osc()`` is and mapped onto the parameter's range the same way, and can be mixed with oscillators or constants.
 
 ``midi(channel, mode?, min?, max?, sensitivity?)``
 
 * ``channel`` (required): MIDI channel 1-16
 * ``mode``: midiMode value (default ``velocity``)
-* ``min`` / ``max``: Output range (default 0..1)
+* ``min`` / ``max``: Sub-range of the parameter's range, each in 0..1 (default 0..1)
 * ``sensitivity``: Decay rate for trigger modes (default 1)
 
 ``audio(band, min?, max?)``
 
 * ``band`` (required): ``low | mid | high | vol``
-* ``min`` / ``max``: Output range (default 0..1)
+* ``min`` / ``max``: Sub-range of the parameter's range, each in 0..1 (default 0..1)
 
 Example:
 
@@ -705,8 +714,8 @@ Example:
 
    search synth
    noise(
-     scale: midi(channel: 1, min: 1, max: 10),
-     speed: audio(band: low, min: 0.5, max: 2)
+     scale: midi(channel: 1, min: 0.1, max: 1),
+     speed: audio(band: low, min: 0.25, max: 1)
    ).write(o0)
 
 For detailed behavior and host integration, see :doc:`midi-audio`.
@@ -801,6 +810,7 @@ These surfaces are managed by the ``pointsEmit`` and ``pointsRender`` wrappers. 
 * Each mesh surface consists of a positions texture (vertex XYZ + W) and a normals texture (normal XYZ + UV).
 * **Loading:** Use ``meshLoader()`` in the pipeline and load mesh files via the API — ``canvas.loadOBJFromURL()`` / ``canvas.loadOBJFromString()`` for OBJ, ``canvas.loadGLTFFromURL()`` / ``canvas.loadGLTFFromString()`` for glTF and GLB. Each takes the target surface as its second argument, defaulting to ``mesh0``.
 * **Rendering:** Use ``meshRender()`` to render mesh geometry with lighting and transforms. It takes no surface argument: the effect is bound to ``mesh0``, so load into that surface to render it.
+* **Bundled assets:** the OBJ files under ``share/meshes/`` were regenerated in 1.5 from the scene graph's own primitive builders. ``cube.obj`` and ``icosphere.obj`` now render right side out (they were wound inside-out before), ``sphere.obj`` and ``capsule.obj`` are mirrored in X, ``torus.obj`` lies in the XZ plane, and every asset now carries texture coordinates — a ``meshRender()`` program that used a texture-mapped material sees a real mapping where it saw a single texel.
 
 Feedback Loops
 ^^^^^^^^^^^^^^

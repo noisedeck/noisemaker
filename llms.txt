@@ -18,6 +18,8 @@ Use this file as the short public map. For a fuller agent-oriented overview, rea
 - [Pipeline spec](https://docs.noisemaker.app/shaders/pipeline/): DSL to render graph, resource allocation, and GPU dispatch.
 - [Language spec](https://docs.noisemaker.app/shaders/language/): Polymorphic DSL syntax and semantics.
 - [Effect definition spec](https://docs.noisemaker.app/shaders/effects/): Effect definitions, namespaces, tags, globals, textures, and passes.
+- [Scene graph spec (preview)](https://docs.noisemaker.app/shaders/scene/): `scene()` programs: camera, lights, meshes, volumes, materials, animation, host control, hosting requirements.
+- [Deferred renderer spec (preview)](https://docs.noisemaker.app/shaders/deferred-rendering/): How scenes are drawn: G-buffer, lighting model, SSAO, reflections, probe, tonemap, backend parity.
 - [Release process](https://docs.noisemaker.app/releases/): CDN pinning, immutable patch releases, and release channels.
 
 ## Agent Tooling

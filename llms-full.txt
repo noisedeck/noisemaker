@@ -490,15 +490,24 @@ Resolution and position rules:
   `mesh`, `volume`, and `group`. Permitted links on a node are `.material()` and
   `.reflector()`; transforms are keyword arguments on the node itself, so
   `mesh("sphere").pos([0, 0, -4])` is an unknown-link error and not a placement.
-- Scene settings are the `SceneSettingKey` whitelist in Introspect. Node
-  keywords are whitelisted per node kind; an unrecognized key is an error rather
-  than a silent drop, unlike subchain metadata.
+- Scene settings are the `SceneSettingKey` whitelist in Introspect, validated
+  as finite non-negative numbers or vec3 colours that never accept a descriptor.
+  Node keywords are whitelisted per node kind; an unrecognized key is an error
+  rather than a silent drop, unlike subchain metadata.
 - Transform components and a light's `intensity` accept `osc()`, `midi()`, and
-  `audio()` in place of a number, with the same arguments, enums, and `[0, 1]`
-  sub-range they carry on an effect uniform. They are hoisted out of the tree at
-  compile time and advanced against the same clock and the same `MidiState` /
-  `AudioState` the pipeline resolves effect uniforms from. `volume()`'s
-  `threshold` does not accept them.
+  `audio()` in place of a number, with the same arguments and enums they carry
+  on an effect uniform and the same `[0, 1]` `min`/`max` sub-range — except
+  that a scene rejects a `min`/`max` outside `[0, 1]` where an effect uniform
+  clamps it. The destination differs from an effect uniform: a `rot` component
+  maps the value onto `0..360` degrees, while `pos`, `scale` and `intensity`
+  receive the raw `0..1`. `osc()` is read as a descriptor only with a `type:`
+  keyword or a qualified `oscKind.` first positional (`osc(saw)` is the
+  `synth/osc` generator); `midi()` and `audio()` take any of the three enum
+  spellings. Descriptors are hoisted out of the tree at compile time and
+  advanced against the same clock and the same `MidiState` / `AudioState` the
+  pipeline resolves effect uniforms from. Camera keywords, a light's `pos`,
+  `dir` and `color`, `volume()`'s `threshold` and every `scene()` setting do
+  not accept them.
 
 `volume()` is the one node whose argument list mixes forms. Exactly one argument
 is positional and must be a `VolRef` (or an identifier bound to one by `let`)
@@ -598,10 +607,17 @@ does and cannot be read out of a diagnostics array:
 | `scene()` not at a chain head | validator, `S001` | `scene() is a generator and must start a chain` |
 | chain without a terminal write | validator, `S001` | `Chain must have explicit write() or write3d() target` |
 | two `scene()` calls in one program | scene compiler, throw | `Only one scene() per program is supported` |
-| unknown `scene()` keyword | scene compiler, throw | `Unknown keyword '<key>' for scene()` |
-| unknown direct child | scene compiler, throw | `Unknown scene child '<name>' (allowed: camera, light, environment, mesh, volume, group)` |
+| unknown `scene()` keyword | scene compiler, throw | `Unknown keyword '<key>' for scene() (expected: ...)` — every unknown-keyword error appends the accepted set |
+| unknown direct child, or a bare value as a child | scene compiler, throw | `Unknown scene child '<name>' (allowed: camera, light, environment, mesh, volume, group)`; for a non-call positional, `Unknown scene child '0.15'; scene() takes node chains as positional arguments (...) and settings as keyword arguments` |
+| camera/light/environment inside `group()` | scene compiler, throw | `Unknown group() child 'light()'; group() accepts only mesh(), volume(), group() children; light() belongs at scene() level` |
 | unknown link on a node | scene compiler, throw | `Unknown link '<name>()' on <kind>(); a scene node accepts only .material() and .reflector()` |
-| unknown node keyword | scene compiler, throw | `Unknown keyword '<key>' for volume()` (and the same form for `mesh("<type>")` and `group()`) |
+| unknown node keyword | scene compiler, throw | `Unknown keyword '<key>' for volume() (expected: id, pos, rot, scale, threshold, mode)` (and the same form for `mesh("<type>")`, `group()`, `camera()`, `light()`, `environment()` and the material terms) |
+| unknown light or mesh type | scene compiler, throw | `Unknown light type '<value>' (expected: directional, point, spot)`, `Unknown mesh type '<value>' (expected: sphere, box, plane, cylinder, torus)` |
+| descriptor where a plain number is required | scene compiler, throw | `camera() pos does not accept osc(), midi() or audio(); descriptors animate a node's pos, rot and scale, and a light's intensity` |
+| descriptor `min`/`max` outside 0..1 | scene compiler, throw | `osc() min must be between 0 and 1: min and max are a normalized sub-range of the channel's own range, not values in it` |
+| `scene()` setting of the wrong shape | scene compiler, throw | `<setting> must be a finite number`, `<setting> must be non-negative`, `ssaoRadius must be greater than zero`, `<setting> must contain exactly 3 values`, `<setting> values must be non-negative`; a descriptor: `scene() <setting> does not accept osc(), midi() or audio(); ...` |
+| bad `intensity` | scene compiler, throw | light: `intensity must be a finite number or osc(), midi() or audio()`; environment: `intensity must be a finite number`, `environment() intensity does not accept osc(), midi() or audio(); ...`; both: `intensity must be non-negative` |
+| two `environment()` calls in one scene | scene compiler, throw | `Only one environment() per scene is supported` (anchored to the second) |
 | bad `volume()` positional | scene compiler, throw | `volume() expects a volume reference (vol0..vol7)` |
 | second `volume()` positional | scene compiler, throw | `volume() takes one positional argument, the volume reference` |
 | bad `volume()` marching mode | scene compiler, throw | `Unknown volume mode '<value>' (expected: smooth, voxel)` |

@@ -25,11 +25,33 @@
             font-size: 12px; border-radius: 4px; display: none;
             white-space: pre-wrap; max-height: 40vh; overflow: auto;
         }
+        #controls {
+            position: fixed; top: 8px; right: 8px;
+            background: rgba(0,0,0,0.7); padding: 6px 10px;
+            font-size: 12px; line-height: 1.5; border-radius: 4px;
+            display: flex; gap: 10px; align-items: center;
+        }
+        #controls select {
+            background: #222; color: #ccc; border: 1px solid #555;
+            font-family: monospace; font-size: 12px; padding: 2px 4px;
+        }
+        #controls a { color: #9cf; }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
     <div id="info">loading...</div>
+    <div id="controls">
+        <label>scene <select id="scene-select">
+            <option value="hello-engine.dsl">hello-engine.dsl</option>
+            <option value="materials-lab.dsl">materials-lab.dsl</option>
+        </select></label>
+        <label>backend <select id="backend-select">
+            <option value="webgl2">webgl2</option>
+            <option value="webgpu">webgpu</option>
+        </select></label>
+        <a href="https://docs.noisemaker.app/shaders/scene/" target="_blank" rel="noopener">scene docs</a>
+    </div>
     <div id="error"></div>
 
     <script type="module">
@@ -79,6 +101,25 @@
         const params = new URLSearchParams(window.location.search)
         const sceneFile = params.get('scene') || 'hello-engine.dsl'
         const preferWebGPU = params.get('backend') === 'webgpu'
+
+        // The pickers navigate rather than recompile: a backend is chosen when
+        // the renderer is created, and the URL is what the visual test and a
+        // shared link carry.
+        const sceneSelect = document.getElementById('scene-select')
+        const backendSelect = document.getElementById('backend-select')
+        if (![...sceneSelect.options].some(o => o.value === sceneFile)) {
+            sceneSelect.add(new Option(sceneFile, sceneFile))
+        }
+        sceneSelect.value = sceneFile
+        backendSelect.value = preferWebGPU ? 'webgpu' : 'webgl2'
+        function navigate() {
+            const next = new URLSearchParams()
+            next.set('scene', sceneSelect.value)
+            next.set('backend', backendSelect.value)
+            window.location.search = next.toString()
+        }
+        sceneSelect.addEventListener('change', navigate)
+        backendSelect.addEventListener('change', navigate)
 
         async function main() {
             info.textContent = 'creating renderer...'
@@ -137,6 +178,9 @@
             info.textContent = 'starting render loop...'
             renderer.start()
             info.textContent = 'running'
+            // Expose the renderer so the scene tree can be driven from the
+            // console: renderer.sceneTree.getById('main').rotation = [0, 45, 0]
+            window.renderer = renderer
         }
 
         main().catch(err => showError('Init error:\n' + (err.stack || err.message || err)))

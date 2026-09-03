@@ -12,30 +12,19 @@ Every pass is written twice — once in GLSL and once in WGSL.
 
 .. note::
 
-   **The two backends are not bit-identical, but the gap is now float noise.**
+   **The two backends are not bit-identical, but the gap is float noise.**
    A cross-backend comparison of ``scene_lit_color`` on a fixed scene measures
    a maximum channel delta of 4 across 0.0004% of channels — 16 channels out of
    4.19 million. The G-buffer itself (albedo/metallic, normal/roughness,
-   position/emission) is bit-identical between the backends.
-
-   The earlier figure of 35 across 14.5% of channels was two orientation bugs
-   in the WGSL path, both since fixed. On WebGPU the mesh vertex stage negates
-   clip-space Y so the G-buffer lands in GL row order, which means any buffer
-   produced by a *fullscreen* pass is stored flipped relative to it. The WGSL
-   lighting shader sampled ``u_ssao`` with the G-buffer's own uv and so applied
-   occlusion upside down, and the WGSL SSAO shader fed ``@builtin(position)``
-   (top-left origin) to its noise function where GLSL feeds ``gl_FragCoord``
-   (bottom-left origin), mirroring the per-pixel rotation.
-
-   What remains is a single SSAO sample crossing the hard
-   ``gbufDist < sampleDist - 0.02`` occlusion test on 13 pixels: the two shader
-   compilers reassociate the reprojection arithmetic differently, and that hard
-   threshold quantises the result by one twelfth of the kernel. It is not
-   reducible without softening the occlusion test itself.
-   ``test_visual_playwright.js`` gates the delta against a tight ceiling so it
-   cannot silently widen. It drives a real browser against a real GPU, so it is
-   not part of the headless ``npm run test:shaders`` suites; run it with
-   ``npm run test:shaders:visual`` on a machine with a display and a GPU.
+   position/emission) is bit-identical between the backends. What remains is
+   a single SSAO sample crossing the hard ``gbufDist < sampleDist - 0.02``
+   occlusion test on 13 pixels: the two shader compilers reassociate the
+   reprojection arithmetic differently, and that hard threshold quantises the
+   result by one twelfth of the kernel. ``test_visual_playwright.js`` gates the
+   delta against a tight ceiling so it cannot silently widen. It drives a real
+   browser against a real GPU, so it is not part of the headless
+   ``npm run test:shaders`` suites; run it with ``npm run test:shaders:visual``
+   on a machine with a display and a GPU.
 
 .. note::
 
@@ -142,6 +131,12 @@ Four render targets, filled by the mesh fragment shader in a single MRT pass.
 Albedo is ``solid()``'s colour, multiplied by the ``surface()`` texture sampled
 at ``fract(uv * uvScale + uvOffset)`` when one is bound.
 
+The four targets cost 28 bytes per sample. A device whose colour-attachment
+budget is smaller (the WebGL2 backend probes it; WebGPU reports its limit)
+cannot host the renderer, and ``initialize()`` throws an error naming the
+pass, the bytes needed and the device limit rather than leaving an
+unsupported framebuffer behind.
+
 RT3 holds *window-space* depth, not linear or view-space depth, and every
 downstream pass uses ``depth <= 0`` as the "nothing here" sentinel. Depth
 *testing* uses a separate attachment that is never sampled; RT3 is the readable
@@ -153,7 +148,8 @@ a scene has a reflector; ``PROBE_GBUF_*`` mirrors it again at probe resolution
 and is allocated lazily; and the work textures ``scene_lit_color``,
 ``scene_ssao``, ``scene_planar_lit`` and ``scene_reflect_color`` carry
 intermediate results. A fifth, ``scene_albedo_fallback``, exists only so every
-declared binding has something bound — its contents are never sampled.
+declared binding has something bound: it stands in for the SSAO input when
+SSAO is off, where the lighting pass reads it at a weight of zero.
 
 Lighting
 --------
@@ -179,7 +175,12 @@ One fullscreen Cook-Torrance pass over the G-buffer.
 
 ``F0 = mix(0.04, albedo, metallic)``. Specular is ``D·G·F`` over
 ``4·(N·V)(N·L)``, and the diffuse lobe is Lambertian scaled by
-``(1 − F)(1 − metallic)``. Emission is added at the end, unlit.
+``(1 − F)(1 − metallic)``. Emission — ``albedo × strength`` — is added at the
+end, unlit.
+
+There is no shadow pass. Nothing blocks a light on its way to a surface, so a
+mesh casts no shadow on the floor beneath it; the only occlusion between
+objects is the ambient-only SSAO term below.
 
 Light types
 ^^^^^^^^^^^
@@ -226,8 +227,9 @@ are skipped.
 terms** — direct lighting and emission are untouched. The planar and probe
 lighting passes disable it.
 
-Neither ``ssao`` nor ``ssaoRadius`` is range-validated, so values above ``1``
-extrapolate past full occlusion.
+``ssao`` and ``ssaoRadius`` must be finite and non-negative (``ssaoRadius``
+greater than zero) but have no upper bound, so an ``ssao`` above ``1``
+extrapolates past full occlusion.
 
 Reflections
 -----------
@@ -267,8 +269,10 @@ side, the normal is flipped so it always faces the viewer.
 The camera is then mirrored across the plane: position and target reflected as
 points, up reflected as a direction, with field of view and clip distances
 copied unchanged. The mirrored G-buffer pass excludes the reflector itself,
-clips everything behind the plane, and disables face culling because mirroring
-reverses winding.
+clips everything behind the plane, and disables face culling so that
+single-sided geometry survives the mirrored view (the mirrored look-at keeps
+triangle winding intact; culling would have removed the far side of open
+shapes, not the near side).
 
 Reflection probe
 ----------------
@@ -298,7 +302,10 @@ Environment
 -----------
 
 ``environment(oN)`` binds a pipeline surface as an equirectangular environment
-map, sampled by direction with ``atan2``/``acos``.
+map, sampled by direction with ``atan2``/``acos``. The top row of the 2D
+program is straight up and the bottom row straight down, on both backends —
+a ``gradient()`` whose first colour renders at the top of the frame puts that
+colour in the sky.
 
 Two filtered lookups are built at runtime rather than prefiltered: diffuse takes
 five weighted taps, specular takes 24 golden-angle disc taps with radius growing
@@ -319,25 +326,29 @@ The final pass multiplies by ``exposure``, applies simple Reinhard
 ``c / (c + 1)``, then a fixed ``1/2.2`` gamma. Alpha is forced to ``1``, so the
 scene surface is always opaque.
 
-``exposure`` is a pre-tonemap linear multiplier and is not range-validated.
+``exposure`` is a pre-tonemap linear multiplier; it must be finite and
+non-negative and has no upper bound.
 
 Tiling
 ------
 
 Scene tiling is sub-frustum projection: the camera's projection is sliced to
-the tile's rectangle and everything downstream follows the matrices, so no
-scene shader takes a tile uniform. ``ssaoRadius`` is world-space and needs no
-render-scale treatment. SSAO can seam within its kernel's projected reach and
-re-dithers per tile; local SSR is not tileable (a planar reflector is); the
-probe captures all six full faces per tile.
+the tile's rectangle and everything downstream follows the matrices. The one
+tile-aware shader input is SSAO's ``u_tileOffset``, which keeps its dither
+phase continuous across tile edges. ``ssaoRadius`` is world-space and needs no
+render-scale treatment. SSAO can still seam within its kernel's projected
+reach, because occluders outside the tile are not in its G-buffer; local SSR
+is not tileable (a planar reflector is); the probe captures all six full faces
+per tile.
 
 Backend parity
 --------------
 
 Each shader is two independently hand-written sources selected by backend
-identity, not one source cross-compiled. Only the SSAO kernel and the light
-count are genuinely shared, templated into both. Everything else must be kept in
-step by hand, which is what the cross-backend parity gate exists to bound.
+identity, not one source cross-compiled. Only the SSAO kernel, the light count
+and the volume marcher's step constants are genuinely shared, templated into
+both. Everything else must be kept in step by hand, which is what the
+cross-backend parity gate exists to bound.
 
 The WGSL side carries documented compensations for the API differences: clip
 space is fixed up in the vertex stage because WebGPU's Y is down and Z spans
@@ -351,20 +362,23 @@ own buffer. The default shared-buffer path cannot express a struct that differs
 between stages or one containing an array of structs — the lights array needs
 it. WebGL2 ignores the flag.
 
-Known divergences
-^^^^^^^^^^^^^^^^^
+Behaviours shared by construction
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Two gaps are worth knowing about:
+Two backend differences that earlier drafts of this page listed as open have
+been closed and are gated by ``test_scene_renderer.js``:
 
-- **Face culling differs on the G-buffer fill.** WebGL2 enables back-face
-  culling for triangle passes unless told otherwise, while the WebGPU MRT
-  pipeline sets no cull mode. The main G-buffer is therefore single-sided on
-  WebGL2 and double-sided on WebGPU. Scenes built from closed primitives do not
-  notice; open geometry can.
-- **The G-buffer clear fallback may not be valid on WebGPU.** The passes used
-  when a scene contains no renderable meshes declare four draw buffers but use a
-  present program whose WGSL fragment stage returns a single location. This is
-  benign on WebGL2, and no test covers it. Unverified.
+- **Face culling is per pass on both backends.** The mesh G-buffer fill culls
+  back faces and the volume fill culls front faces, on WebGL2 and WebGPU
+  alike; WebGPU maps the pass's cull mode onto a clockwise front face, because
+  its vertex stage negates clip-space Y.
+- **The no-geometry path clears the G-buffer per target.** A scene with no
+  renderable mesh or volume clears each of the four targets directly rather
+  than drawing a fullscreen program into an MRT attachment set, so nothing
+  depends on a fragment stage matching four draw buffers.
+
+No divergence in rendered output is currently recorded beyond the SSAO float
+noise described at the top of this page.
 
 Sources
 -------
@@ -373,4 +387,7 @@ Sources
 planar setup; ``shaders/src/rendering/gbuffer.js`` — mesh, lighting, SSAO and
 SSR shader sources for both languages;
 ``shaders/src/rendering/mesh-renderer.js`` — draw submission;
-``shaders/src/rendering/post-shaders.js`` — present and tonemap.
+``shaders/src/rendering/volume-renderer.js`` and
+``shaders/src/rendering/volume-shaders.js`` — the volume raymarch that fills
+the same G-buffer; ``shaders/src/rendering/post-shaders.js`` — present and
+tonemap.

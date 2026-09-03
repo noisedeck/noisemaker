@@ -4,11 +4,11 @@ Scene Graph (Preview)
 =====================
 
 ``scene()`` adds a third dimension to the Polymorphic DSL. A scene program
-describes a camera, lights, and a hierarchy of meshes with PBR materials. The
-:ref:`deferred renderer <shader-deferred-rendering>` turns that description into
-pixels and writes the result into an ordinary pipeline surface, so 3D output
-composes with the existing 2D filter library rather than needing its own
-post-processing stack.
+describes a camera, lights, and a hierarchy of meshes and volumes with PBR
+materials. The :ref:`deferred renderer <shader-deferred-rendering>` turns that
+description into pixels and writes the result into an ordinary pipeline
+surface, so 3D output composes with the existing 2D filter library rather than
+needing its own post-processing stack.
 
 .. note::
 
@@ -16,9 +16,16 @@ post-processing stack.
    ``scene()`` language surface described on this page, and the engine behind
    it, ship as a preview in Noisemaker 1.5. Node names, keywords, defaults,
    argument shapes, and rendered output may all change without a deprecation
-   period. The scene vocabulary is scheduled to be finalized in Noisemaker 2.0;
-   until then, do not depend on a scene program continuing to parse or render
-   identically across releases.
+   period. The scene vocabulary is scheduled to be finalized in Noisemaker 2.0.
+
+   In practice, preview means: there is no flag to turn it on; scene nodes are
+   not effects and need no ``loadEffect()``; the one extra hosting step is
+   described under `Hosting`_; and a scene program you write today may need
+   editing when you move to 2.0. Everything on this page is what the 1.5
+   engine does.
+
+Quick start
+-----------
 
 .. code-block:: none
 
@@ -28,8 +35,8 @@ post-processing stack.
      ambient: 0.15,
      background: [0.05, 0.05, 0.1],
 
-     camera(fov: 60, pos: [0, 3, -8], target: [0, 0, 0]),
-     light(type: "directional", dir: [1, -1, 1], intensity: 2),
+     camera(fov: 60, pos: [0, 3, 8], target: [0, 0, 0]),
+     light(type: "directional", dir: [-1, -1, -1], intensity: 2),
 
      mesh("sphere", radius: 1.5, pos: [0, 1, 0])
        .material(solid(color: [0.9, 0.9, 0.95]).pbr(metallic: 0.1, roughness: 0.6))
@@ -39,8 +46,39 @@ post-processing stack.
 
    render(o1)
 
+Three ways to run it:
+
+- **The shader demo.** Open the demo, press *Edit DSL program*, paste the
+  program, press *run*. The status line reads ``compiled successfully`` or
+  ``compilation failed:`` followed by the reason. Scene nodes have no sliders
+  in the demo — the sidebar shows only the 2D effects after the scene, and
+  the scene itself is edited as text.
+- **The scene viewer.** ``demo/shaders/scenes/viewer.html`` loads a scene file
+  named by ``?scene=`` from the same directory — ``viewer.html?scene=hello-engine.dsl``
+  — and takes ``&backend=webgpu`` to switch backends. Two programs ship beside
+  it: ``hello-engine.dsl`` (this page's example with a second light and two
+  more meshes) and ``materials-lab.dsl`` (every material and lighting feature
+  in one frame). The viewer plays files; it has no editor.
+- **Your own page.** See `Hosting`_.
+
+What you should see: a pale sphere lit from the upper right on a dark blue
+background, with a soft bloom. If the frame is a flat grey silhouette, the
+scene compiled but has no lights — see `Lights`_. If it is empty, nothing is
+in front of the camera — see `Coordinate system and units`_.
+
+The ``search`` line names no namespace for ``scene()`` itself; it is there for
+the 2D effects chained after the scene (``bloom`` and ``vignette`` live in
+``filter``). A scene program with no 2D effects still needs the directive, as
+every program does, but it can name any namespace.
+
 A scene behaves like any other generator: it must terminate in ``.write(oN)``,
 and everything downstream of that write is ordinary effect chaining.
+
+``//`` comments may appear anywhere in a scene, including between the
+arguments of ``scene()``. Comments inside an argument list are dropped when a
+program is re-emitted from its parsed form, which the demo does whenever a
+parameter is changed from the sidebar; comments on their own lines between
+statements are preserved.
 
 .. note::
 
@@ -50,13 +88,67 @@ and everything downstream of that write is ordinary effect chaining.
    terminate in ordinary surfaces, so they can be composited together, and
    `Volumes`_ brings a ``vol`` surface into the scene graph as a node.
 
+Coordinate system and units
+---------------------------
+
+The scene is a right-handed space with ``+Y`` up. A scene that declares no
+``camera()`` gets one at ``[0, 0, 5]`` looking at the origin, and from there
+``+X`` runs to the right of the frame, ``+Y`` runs up, and ``+Z`` comes out of
+the screen toward the viewer. Objects at negative ``Z`` are farther away.
+
+The shipped demo scenes keep their camera on that same ``+Z`` side, so in
+``hello-engine.dsl`` the box at ``x: 3`` is on the right and the torus at
+``x: -3`` on the left. A camera placed at negative ``Z`` looking back toward
+the origin sees the world from the other side, with ``+X`` on the viewer's
+**left**; that is not wrong, but remember which side you chose when placing
+things.
+
+Distances are unitless world units. Every primitive is centred on its node, so
+this is how big each one is at ``scale: [1, 1, 1]``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 16 84
+
+   * - Primitive
+     - Extent at scale 1
+   * - ``sphere``
+     - ``radius: 1`` spans two units across.
+   * - ``box``
+     - ``size: [1, 1, 1]`` spans one unit per axis (width, height, depth).
+   * - ``plane``
+     - Lies flat in the XZ plane facing ``+Y`` — a floor by default —
+       ``width`` along X and ``height`` along Z. It is single-sided: seen from
+       below it is invisible. Tilt it with ``rot`` to make a wall; stood up
+       with ``rot: [90, 0, 0]`` it faces ``-Z``, and a ``surface()`` texture
+       on it appears upside down relative to the 2D frame.
+   * - ``cylinder``
+     - Axis along Y, ``height`` split evenly above and below the node, capped.
+   * - ``torus``
+     - Ring lies flat in the XZ plane, tube axis Y. ``radius`` is the ring
+       radius and ``tube`` the tube radius, so the outer edge is at
+       ``radius + tube``.
+   * - ``volume()``
+     - The local ``[-1, 1]`` cube: **two** units per axis, twice a unit box.
+       See `Volumes`_.
+
+Angles are degrees everywhere: ``fov``, ``rot``, a spot light's ``angle``.
+``rot: [x, y, z]`` turns the node about the world X axis first, then Y, then
+Z, following the right-hand rule: ``rot: [0, 90, 0]`` swings the node's ``+X``
+side around to ``-Z``, and ``rot: [90, 0, 0]`` swings ``+Y`` to ``+Z``. A node's
+``scale`` is applied first, then ``rot``, then ``pos``.
+
+A light's ``dir`` is the direction the light **travels**: ``[0, -1, 0]`` is a
+light shining straight down from above. A spot light's ``dir`` is the axis of
+its cone, pointing away from the light.
+
 Structure
 ---------
 
 .. code-block:: none
 
    SceneCall      ::= 'scene' '(' SceneArg ( ',' SceneArg )* ')'
-   SceneArg       ::= Setting | CameraCall | LightCall | EnvironmentCall | NodeChain
+   SceneArg       ::= Kwarg | CameraCall | LightCall | EnvironmentCall | NodeChain
    NodeChain      ::= ( MeshCall | VolumeCall | GroupCall ) ( '.' NodeLink )*
    VolumeCall     ::= 'volume' '(' ArgList ')'
    NodeLink       ::= MaterialCall | 'reflector' '(' ')'
@@ -68,13 +160,21 @@ Only one ``scene()`` is permitted per program. Scene children are positional
 arguments; settings are keyword arguments, and the two may be interleaved.
 
 Permitted direct children are ``camera``, ``light``, ``environment``, ``mesh``,
-``volume`` and ``group``. Anything else raises ``Unknown scene child '<name>'``.
+``volume`` and ``group``. Anything else — another call, or a bare value such
+as ``scene(0.15, ...)`` — raises ``Unknown scene child '<name>'``.
 
 ``mesh()``, ``volume()`` and ``group()`` accept exactly the two chain links in
 ``NodeLink`` — ``.material()`` and ``.reflector()``. Any other link raises
 ``Unknown link '<name>()' on <kind>()``; transforms are keyword arguments on the
 node itself, so ``mesh("sphere").pos([0, 0, -4])`` is that error and not a
 placement.
+
+Every scene error names the line and column of the offending argument, in the
+form ``<message> at line N col M``, and an "unknown" error lists what would
+have been accepted — ``Unknown mesh type 'cone' (expected: sphere, box, plane,
+cylinder, torus)``. In the demo it appears in the status line
+as ``compilation failed: <message>``; in host code it is the rejection of
+``renderer.compile()``.
 
 Name resolution
 ^^^^^^^^^^^^^^^
@@ -87,25 +187,27 @@ under ``search synth`` still compiles to the 2D effect.
 Only ``scene`` falls through to the scene layer when no effect matches. The
 other eleven names — ``camera``, ``light``, ``environment``, ``mesh``,
 ``volume``, ``group``, ``material``, ``solid``, ``surface``, ``pbr`` and
-``emit`` — are children
-*inside* a ``scene()`` call and never reach the chain. Written as a chain
-element with no effect behind them they raise
+``emit`` — are children *inside* a ``scene()`` call and never reach the chain.
+Written as a chain element with no effect behind them they raise
 ``Unknown effect: '<name>'. Scene nodes like <name>() are only valid inside
-scene().`` Passing them through instead turned a typo into a no-op that compiled
-clean and rendered nothing.
+scene().``
 
 ``scene()`` is a generator: it must start its chain. ``noise().scene(...)`` has
 no meaning — the incoming surface would simply be discarded — and raises
 ``scene() is a generator and must start a chain``.
 
-Everything inside the parentheses of ``scene()`` is preserved as argument AST and
-is never validated against the effect registry, which is why terms like
+Everything inside the parentheses of ``scene()`` is preserved as argument AST
+and is never validated against the effect registry, which is why terms like
 ``reflector()`` need no registration.
 
 Settings
 --------
 
 Keyword arguments on ``scene()`` configure the renderer. All are optional.
+The scalar settings must be finite non-negative numbers (``ssaoRadius``
+greater than zero), the colour settings finite non-negative ``[r, g, b]``
+triples, and none accepts an automation descriptor — a descriptor raises
+``scene() <setting> does not accept osc(), midi() or audio()``.
 
 .. list-table::
    :header-rows: 1
@@ -155,12 +257,13 @@ does too: a scene that declares no camera gets ``fov: 60``, ``near: 0.1``,
 ``far: 1000``, ``pos: [0, 0, 5]`` and ``target: [0, 0, 0]``. Declaring
 ``camera()`` with no keywords is the same thing written out.
 
-Unknown keywords are errors. ``near`` and ``far`` must both be greater than
-zero, and ``far`` must be greater than ``near``.
+Unknown keywords are errors. ``fov`` must lie between ``0`` and ``179``
+degrees, ``near`` and ``far`` must both be greater than zero, and ``far`` must
+be greater than ``near``.
 
 .. code-block:: none
 
-   camera(fov: 52, pos: [0, 3.2, -8.5], target: [0, 0.6, 0])
+   camera(fov: 52, pos: [0, 3.2, 8.5], target: [0, 0.6, 0])
 
 .. list-table::
    :header-rows: 1
@@ -185,6 +288,13 @@ zero, and ``far`` must be greater than ``near``.
      - ``[0, 0, 0]``
      - Look-at point.
 
+The camera's up vector is always ``+Y``. Camera keywords take numbers only —
+the DSL has no way to orbit or dolly the camera over time, and a descriptor in
+``pos`` or ``target`` is rejected with a message that says so. To move the
+camera, drive it from host code (see `Controlling a scene from host code`_),
+or move the world instead: put your meshes in a ``group()`` and animate its
+``rot``.
+
 Lights
 ------
 
@@ -194,9 +304,9 @@ defaults to ``"directional"``; an unrecognised value raises
 
 .. code-block:: none
 
-   light(type: "directional", dir: [0.6, -1, 0.4], color: [1, 0.96, 0.88], intensity: 1.6)
-   light(type: "point", pos: [0, 4, -6], intensity: 0.25, falloff: 0)
-   light(type: "spot", pos: [-3, 6, -2], dir: [0.35, -1, 0.25], angle: 24, penumbra: 0.35)
+   light(type: "directional", dir: [-0.6, -1, -0.4], color: [1, 0.96, 0.88], intensity: 1.6)
+   light(type: "point", pos: [0, 4, 6], intensity: 0.25, falloff: 0)
+   light(type: "spot", pos: [3, 6, 2], dir: [-0.35, -1, -0.25], angle: 24, penumbra: 0.35)
 
 .. list-table::
    :header-rows: 1
@@ -213,7 +323,8 @@ defaults to ``"directional"``; an unrecognised value raises
    * - ``intensity``
      - ``1``
      - all
-     - Scalar brightness.
+     - Scalar brightness: a finite non-negative number, or a descriptor (see
+       `Animation`_).
    * - ``dir``
      - ``[0, -1, 0]``
      - directional, spot
@@ -235,13 +346,27 @@ defaults to ``"directional"``; an unrecognised value raises
      - spot
      - Softness of the cone edge.
 
-Any number of lights may be declared.
+A keyword outside a type's column is an error: ``pos`` on a directional light
+raises ``Unknown keyword 'pos' for light()``.
+
+Any number of lights may be declared. A scene with no ``light()`` is lit by
+the ambient hemisphere alone (``ambient``, ``sky``, ``ground``) — it compiles
+and renders, but as a flat silhouette with no shading. Lights take no ``id``;
+from host code they are reached by index in declaration order.
+
+Point and spot intensities are divided by distance squared (see
+:ref:`shader-deferred-rendering`), so a spot several units away needs an
+``intensity`` in the tens where a directional light needs about ``1``–``3``.
+
+There are no cast shadows in this preview: a mesh does not darken the floor
+beneath it, and one object does not shade another. Contact darkening comes
+from screen-space ambient occlusion on the ambient terms only.
 
 Environment
 -----------
 
-``environment()`` promotes a pipeline surface to an environment map, letting a
-2D DSL program act as sky and reflection fallback.
+``environment()`` promotes a pipeline surface to an environment map that lights
+the scene and shows up in reflections.
 
 .. code-block:: none
 
@@ -254,7 +379,57 @@ Environment
 
 The positional argument must be a surface reference (``o0``–``o7``); anything
 else raises ``environment() expects a surface reference``. ``intensity``
-defaults to ``1``.
+defaults to ``1`` and must be a finite non-negative number. Declare at most
+one: a second raises ``Only one environment() per scene is supported``.
+
+The top row of the 2D program is the sky and the bottom row the ground, on
+both backends: a ``gradient()`` whose first colour renders at the top of the
+frame puts that colour overhead.
+
+The environment is **never drawn**: pixels with no geometry still take the flat
+``background`` colour. To see a sky behind your meshes, composite one in 2D
+after the scene — for example by mixing the scene surface over the same
+gradient.
+
+Groups and transforms
+---------------------
+
+``group()`` nests nodes. Its positional arguments are child ``mesh()``,
+``volume()`` or ``group()`` chains, and its transform applies to the whole
+subtree. Its only keywords are the four transform keywords below; anything
+else raises ``Unknown keyword '<name>' for group()``. A ``camera()``,
+``light()`` or ``environment()`` inside a group is an error: those are
+scene-level only, and parenting does not move them.
+
+.. code-block:: none
+
+   group(id: "spinner", rot: [0, 45, 0],
+     mesh("sphere", radius: 1.3, pos: [0, 0.7, 0]),
+     mesh("box", size: [1.1, 1.1, 1.1], pos: [-3, -0.05, 0])
+   )
+
+``mesh()``, ``volume()`` and ``group()`` accept the same transform keywords:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 86
+
+   * - Keyword
+     - Meaning
+   * - ``id``
+     - Optional name, used to find the node from host code. Nodes without one
+       get ``mesh_<type>`` or ``volume_<surface>``, and two ``mesh("sphere")``
+       nodes share ``mesh_sphere`` — name anything you intend to look up.
+   * - ``pos``
+     - Translation, exactly 3 components.
+   * - ``rot``
+     - Rotation in degrees, exactly 3 components.
+   * - ``scale``
+     - Scale, exactly 3 components.
+
+A vector with the wrong arity raises ``<name> must contain exactly 3 values``.
+Transforms compose down the hierarchy; a child's ``pos`` is measured in its
+parent's space, so a group offsets and orients everything inside it.
 
 Meshes
 ------
@@ -267,8 +442,8 @@ Keywords split into two groups. ``id``, ``pos``, ``rot`` and ``scale`` describe
 placement; the rest are shape parameters, and each primitive accepts only the
 ones listed below. A keyword outside both groups raises
 ``Unknown keyword '<name>' for mesh("<type>")`` rather than being dropped in
-silence, and ``mesh()`` takes exactly one positional argument — a second one
-raises ``mesh() takes one positional argument, the mesh type``.
+silence, and ``mesh()`` takes exactly one positional argument — none, or a
+second one, raises ``mesh() takes one positional argument, the mesh type``.
 
 Shape parameter values are checked before they reach the geometry builders:
 ``radius``, ``tube``, ``width`` and ``height`` must be greater than zero,
@@ -296,6 +471,13 @@ must be a vec3 of finite numbers.
 
    mesh("torus", radius: 1, tube: 0.32, pos: [3, -0.28, 0])
 
+``mesh()`` builds primitives only. Loaded models — OBJ, glTF and GLB — belong
+to the separate ``mesh0``–``mesh7`` surface system, loaded with
+``loadOBJFromURL()`` / ``loadGLTFFromURL()`` and drawn by ``meshRender()`` (see
+:ref:`shader-language`); they cannot be placed in a ``scene()`` in this
+preview. The ``mesh0`` reference is not a scene value: ``mesh(mesh0)`` is an
+error.
+
 Volumes
 -------
 
@@ -313,14 +495,18 @@ note at the top.
    noise3d().write3d(vol0, geo0)
 
    scene(
-     camera(fov: 60, pos: [0, 2, -6]),
-     light(type: "directional", dir: [1, -1, 1]),
+     camera(fov: 60, pos: [0, 2, 6]),
+     light(type: "directional", dir: [-1, -1, -1]),
      volume(vol0, threshold: 0.5, pos: [0, 1, 0], scale: [2, 2, 2])
        .material(solid(color: [0.9, 0.4, 0.2]).pbr(roughness: 0.7)),
      mesh("plane", width: 10, height: 10)
    ).write(o0)
 
    render(o0)
+
+``write3d()`` still takes its ``geo`` target, but ``volume()`` reads only the
+``vol`` atlas: density is the atlas's red channel, and its RGB is the colour a
+volume shows when it has no material.
 
 ``volume()`` takes an ordinary argument list; the shape of it is enforced by
 the scene compiler rather than by the grammar. Exactly one argument is
@@ -362,7 +548,7 @@ positional raises
        ``Unknown volume mode '<name>' (expected: smooth, voxel)``.
    * - ``id``
      - —
-     - Optional name, useful for locating a node from host code.
+     - Optional name, used to find the node from host code.
    * - ``pos``
      - ``[0, 0, 0]``
      - Translation, exactly 3 components.
@@ -381,10 +567,10 @@ they do on ``mesh()``: they compose down a ``group()`` hierarchy and accept
 descriptors are rejected there alike.
 
 Marching modes
-~~~~~~~~~~~~~~
+^^^^^^^^^^^^^^
 
 ``mode`` picks the algorithm that turns the density atlas into a surface. Both
-fill the same G-buffer and are lit, shadowed by depth, reflected and
+fill the same G-buffer and are lit, depth-occluded, reflected and
 occlusion-tested identically; they differ only in where the surface is and
 which way it faces.
 
@@ -439,7 +625,8 @@ Three behaviours worth knowing:
   spans one. Halve the scale to match a unit box.
 - **Resolution.** The ``vol0``–``vol7`` atlases are fixed at 64 cubed. A
   ``volume()`` node samples a 64-cube regardless of the ``volumeSize`` the
-  producing effect was configured with.
+  producing effect was configured with; a producing chain that declares a
+  different numeric ``volumeSize`` is rejected at compile time.
 - **Reflections.** Volumes are lit by scene lights, occlude meshes through the
   shared depth buffer, and appear in planar reflections and in the reflection
   probe on the same terms a mesh does. The reflector's clip plane governs the
@@ -447,74 +634,6 @@ Three behaviours worth knowing:
   reflection rather than clipped at the bounding box. A volume in the probe
   costs one extra march per probe face: six on the frame that primes the cube,
   then one per frame as the probe amortizes.
-
-Tiled export
-------------
-
-``setTileRegion`` tiles a scene by restricting the camera to the tile's
-sub-frustum, not by shifting a fragment coordinate; offsets are bottom-left,
-matching the 2D path. Geometry, volume marching, deferred lighting and the
-tonemap are tile-exact — a stitched render matches the untiled one to a single
-least-significant bit. Two passes are not: SSAO can seam within its kernel's
-projected reach (occluders outside the tile are not in its G-buffer; its dither
-phase is tile-corrected, so the seam band is the whole residual), and local
-screen-space reflections cannot be tiled at all
-— rays leaving the tile find nothing. For tiled exports prefer a planar
-``reflector()``, whose mirrored camera inherits the same sub-frustum and is
-tile-exact, or set ``reflections: 0``. The reflection probe is never tiled: it
-is a world-space cubemap and captures all six full faces regardless of the
-region.
-
-Cubemap export
---------------
-
-A ``scene()`` program exports a cubemap through the same ``renderCubemap()``
-API as a cubemap-renderer program: the scene renders six times through
-cube-face cameras — fov 90, square, at the scene camera's position, the full
-pass stack including the tonemap per face — and the faces come back in GL
-order (+X, -X, +Y, -Y, +Z, -Z) in the same orientation contract the 2D path
-returns. All six faces are one instant: scene animation state advances once
-per export, not per face. Faces are never tiled, and a configured reflection
-probe is captured once for the first face and frozen for the rest — it is a
-world-space cubemap and does not change between export faces; the live
-amortization state is restored afterwards.
-
-Groups and transforms
----------------------
-
-``group()`` nests nodes. Its positional arguments are child ``mesh()``,
-``volume()`` or ``group()`` chains, and its transform applies to the whole
-subtree. Its only
-keywords are the four transform keywords below; anything else raises
-``Unknown keyword '<name>' for group()``.
-
-.. code-block:: none
-
-   group(id: "spinner", rot: [0, 45, 0],
-     mesh("sphere", radius: 1.3, pos: [0, 0.7, 0]),
-     mesh("box", size: [1.1, 1.1, 1.1], pos: [-3, -0.05, 0])
-   )
-
-``mesh()``, ``volume()`` and ``group()`` accept the same transform keywords:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 14 86
-
-   * - Keyword
-     - Meaning
-   * - ``id``
-     - Optional name, useful for locating a node from host code.
-   * - ``pos``
-     - Translation, exactly 3 components.
-   * - ``rot``
-     - Rotation in degrees, exactly 3 components.
-   * - ``scale``
-     - Scale, exactly 3 components.
-
-A vector with the wrong arity raises ``<name> must contain exactly 3 values``.
-Transforms compose down the hierarchy; world matrices are recomputed only for
-nodes marked dirty.
 
 Materials
 ---------
@@ -540,16 +659,24 @@ Materials
      - ``color`` (``[1, 1, 1]``)
      - Flat base colour. Components must be non-negative.
    * - ``surface``
-     - ``tint``, ``uvScale`` (``[1, 1]``), ``uvOffset`` (``[0, 0]``)
+     - ``tint`` (``[1, 1, 1]``), ``uvScale`` (``[1, 1]``), ``uvOffset``
+       (``[0, 0]``)
      - Uses a pipeline surface (``o0``–``o7``) as the albedo map, so a live 2D
-       program becomes a texture. The positional argument is the surface.
+       program becomes a texture. The positional argument is the surface;
+       ``tint`` multiplies the sampled colour.
    * - ``pbr``
      - ``metallic`` (``0``), ``roughness`` (``1``)
-     - Cook-Torrance parameters. Both clamp to ``0..1``.
+     - Cook-Torrance parameters. Both must lie within ``0..1``; a value outside
+       is an error, not a clamp.
    * - ``emit``
      - ``strength`` (``1``)
      - Emissive output, non-negative. Pairs naturally with a downstream
        ``bloom()``.
+
+Colours are ``[r, g, b]`` triples of linear values in ``0..1``; a hex colour
+literal is not accepted here. A node with no ``.material()`` — and none to
+inherit — renders as matte white: ``solid(color: [1, 1, 1])`` with
+``metallic: 0`` and ``roughness: 1``.
 
 Supplying two sources, omitting the source entirely, or using an unknown term
 raises a scene error. A node accepts only one ``material()``.
@@ -586,23 +713,48 @@ descriptors <shader-language>` an effect uniform does, in place of numbers:
 .. code-block:: none
 
    group(id: "spinner", rot: [0, osc(type: oscKind.saw), 0], ... )
-   mesh("sphere", scale: [audio(audioBand.low), 1, 1])
+   mesh("sphere", pos: [0, osc(type: oscKind.sine), 0])
    light(type: "point", intensity: midi(channel: 1, mode: midiMode.velocity))
 
-Each call means exactly what it means in an effect uniform — same arguments,
-same enums, same defaults, same normalized ``[0, 1]`` sub-range from ``min``
-and ``max``. Descriptors are hoisted out of the tree at compile time and
-advanced in place each frame: ``osc()`` against the same normalized loop time
-that drives effect automation, so scene motion and effect automation stay
+What accepts a descriptor: the components of ``pos``, ``rot`` and ``scale`` on
+``mesh()``, ``volume()`` and ``group()``, and a light's ``intensity``. What
+does not: camera keywords, a light's ``pos``, ``dir`` and ``color``, material
+values, ``threshold`` and every ``scene()`` setting. Those take plain numbers,
+and a descriptor there is an error naming the line.
+
+Each call means what it means in an effect uniform — same arguments, same
+enums, same defaults. Descriptors are hoisted out of the tree at compile time
+and advanced in place each frame: ``osc()`` against the same normalized loop
+time that drives effect automation, so scene motion and effect automation stay
 locked to one clock, and ``midi()``/``audio()`` against the same live
-``MidiState`` and ``AudioState`` the pipeline resolves effect uniforms from. A
-scene and the effects around it therefore respond to one performance, not two.
+``MidiState`` and ``AudioState`` the pipeline resolves effect uniforms from.
+
+**Ranges.** A descriptor produces a value in ``0..1``, and its ``min`` and
+``max`` (each in ``0..1``, defaulting to the whole range) narrow that. Where
+the value lands depends on the channel:
+
+- ``rot`` maps ``0..1`` onto ``0..360`` degrees, so
+  ``rot: [0, osc(type: oscKind.saw), 0]`` is one full turn per loop and
+  ``osc(type: oscKind.saw, min: 0.25, max: 0.5)`` sweeps 90–180 degrees.
+- ``pos``, ``scale`` and a light's ``intensity`` receive the ``0..1`` value as
+  it is. To place that motion elsewhere, nest: a child with
+  ``pos: [0, osc(type: oscKind.sine), 0]`` inside ``group(pos: [0, 1, 0])``
+  bobs between ``y = 1`` and ``y = 2``. A descriptor on ``scale`` runs from
+  zero to one, so a mesh scaled by ``audio()`` collapses on silence; other
+  ranges need host code.
+
+A ``min`` or ``max`` outside ``0..1`` — ``osc(min: 0, max: 360)`` written by
+someone reading "degrees" — is a compile error in a scene, naming the line.
+(An effect uniform silently clamps the same mistake.)
 
 The enum argument of each call — ``osc()``'s ``type``, ``midi()``'s ``mode``,
-``audio()``'s ``band`` — accepts three spellings that mean the same thing in a
-scene and in an effect uniform: the qualified member (``audioBand.high``), the
-bare member name (``high``), and the member's value written out (``2``). One
-difference remains, and it is in the failure: a scene rejects an enum argument
+``audio()``'s ``band`` — accepts the qualified member (``audioBand.high``), the
+bare member name (``high``), or the member's value written out (``2``), with
+one exception: ``osc()`` shares its name with the ``synth/osc`` generator, and
+the parser reads it as a descriptor only when it carries a ``type:`` keyword or
+a qualified ``oscKind.`` member as its first positional. Write
+``osc(type: saw)`` or ``osc(oscKind.saw)``; a bare ``osc(saw)`` is the
+generator, and inside a scene it is rejected. A scene rejects an enum argument
 it cannot resolve, naming the line, where an effect uniform falls back to the
 descriptor's default.
 
@@ -631,26 +783,156 @@ programs feed back into the scene through ``surface()`` and ``environment()``.
 
    render(o1)
 
-Hosting requirements
---------------------
+The scene draws before the 2D pipeline each frame, so ``surface(oN)`` and
+``environment(oN)`` read the surface's previous-frame content — a one-frame
+lag that is invisible for anything but a hard cut.
 
-The scene modules depend on ``gl-matrix``, imported as a bare module specifier.
-They are loaded lazily — only when a program containing ``scene()`` compiles —
-so pages that render ordinary 2D effect chains never need it. A page that hosts
-scenes must make the specifier resolvable, typically with an import map:
+Controlling a scene from host code
+----------------------------------
+
+After ``await renderer.compile(program)`` a scene program exposes its live
+tree, and writes to it take effect on the next frame with no recompile:
+
+.. code-block:: javascript
+
+   renderer.isScene            // true for a scene() program
+   renderer.sceneTree          // the live tree, or null for a 2D program
+   renderer.sceneRenderer      // the deferred renderer, or null
+   renderer.clock              // { elapsed, delta, frame }, seconds; null for 2D
+
+   const tree = renderer.sceneTree
+   const rig = tree.getById('spinner')   // any mesh, volume or group with an id
+   rig.rotation = [0, 45, 0]             // assign a new array, or ...
+   rig.position[1] += 0.1                // ... write a component in place
+   rig.rotateY(1)                        // translate(x, y, z), rotateX/Y/Z(deg)
+   rig.lookAt([0, 0, 0])                 // aims the node's local +Z at a point
+
+   tree.camera.position = [6, 3, 6]      // position, target, fov, near, far
+   tree.camera.target = [0, 1, 0]
+   tree.lights[0].intensity = 4          // declaration order; color, direction,
+                                         // position, falloff, angle, penumbra
+   tree.settings.ambient = 0.3           // every scene() setting, by name
+   tree.materials.mat_0.baseColor = [1, 0.2, 0.2]   // materials, in declaration
+                                         // order: baseColor, pbr.metallic,
+                                         // pbr.roughness, emission
+
+``tree.getById()`` searches the node hierarchy: meshes, volumes and groups.
+The camera and the lights are not in it — reach them through ``tree.camera``
+and ``tree.lights``. ``tree.getMeshNodes()`` and ``tree.getVolumeNodes()``
+return every node of a kind.
+
+Two rules:
+
+- A component driven by ``osc()``, ``midi()`` or ``audio()`` is rewritten by its
+  descriptor every frame; host writes to that component are overwritten on
+  the next frame. Unbound components of the same vector are left alone. To
+  own a channel from host code, do not bind it in the DSL.
+- Shape parameters (``radius``, ``segments``, ``size`` and the rest) and the
+  set of nodes, lights and materials are compiled into the render passes;
+  changing those means recompiling the program.
+
+A scene render is asynchronous. ``renderer.render(t)`` for a single frame must
+be awaited for a scene program (for a 2D program the frame is drawn before it
+returns). Errors thrown while drawing a scene reach the ``onError`` callback,
+not the returned promise.
+
+Tiled export
+------------
+
+``setTileRegion`` tiles a scene by restricting the camera to the tile's
+sub-frustum, not by shifting a fragment coordinate; offsets are bottom-left,
+matching the 2D path. Geometry, volume marching, deferred lighting and the
+tonemap are tile-exact — a stitched render matches the untiled one to a single
+least-significant bit. Two passes are not: SSAO can seam within its kernel's
+projected reach (occluders outside the tile are not in its G-buffer; its dither
+phase is tile-corrected, so the seam band is the whole residual), and local
+screen-space reflections cannot be tiled at all
+— rays leaving the tile find nothing. For tiled exports prefer a planar
+``reflector()``, whose mirrored camera inherits the same sub-frustum and is
+tile-exact, or set ``reflections: 0``. The reflection probe is never tiled: it
+is a world-space cubemap and captures all six full faces regardless of the
+region.
+
+Cubemap export
+--------------
+
+A ``scene()`` program exports a cubemap through the same ``renderCubemap()``
+API as a cubemap-renderer program (see :doc:`cubemaps`): the scene
+renders six times through cube-face cameras — fov 90, square, at the scene
+camera's position, the full pass stack including the tonemap per face — and
+the faces come back in GL order (+X, -X, +Y, -Y, +Z, -Z) in the same
+orientation contract the 2D path returns. All six faces are one instant: scene
+animation state advances once per export, not per face. Faces are never tiled,
+and a configured reflection probe is captured once for the first face and
+frozen for the rest — it is a world-space cubemap and does not change between
+export faces; the live amortization state is restored afterwards. A second
+export started before the first settles is rejected.
+
+Hosting
+-------
+
+A scene program is hosted like any other program — see
+:ref:`shader-integration` — with two things to know.
+
+**Effects.** The 2D effects after the scene load lazily by name, so they must
+be loaded before ``compile()``; the scene nodes themselves need nothing. With
+the bundled core, ``extractEffectNamesFromDsl`` builds the list from the
+program text:
+
+.. code-block:: javascript
+
+   const renderer = new CanvasRenderer({ canvas, width: 800, height: 600,
+                                         basePath: SHADER_CDN, useBundles: true,
+                                         bundlePath: `${SHADER_CDN}/effects`,
+                                         onError: (err) => console.error(err) })
+   await renderer.loadManifest()
+   const ids = extractEffectNamesFromDsl(program, renderer.manifest).map(e => e.effectId)
+   await renderer.loadEffects(ids)          // e.g. ['filter/bloom', 'filter/vignette']
+   await renderer.compile(program)
+   renderer.start()
+
+A compile failure rejects with a plain object carrying ``diagnostics`` (each
+with ``code``, ``message``, ``severity`` and ``location``), or with a
+``SyntaxError`` whose message ends ``at line N col M`` for a scene error; the
+canvas stays blank until a later compile succeeds.
+
+**gl-matrix.** The scene modules depend on ``gl-matrix``, imported as a bare
+module specifier. The distributed ``noisemaker-shaders-core`` bundles carry it,
+so a page that loads the bundle needs nothing more. A page that imports the
+engine from source must make the specifier resolvable, typically with an
+import map whose path leads to the package from the page's own location:
 
 .. code-block:: html
 
    <script type="importmap">
    {
      "imports": {
-       "gl-matrix": "../../node_modules/gl-matrix/esm/index.js"
+       "gl-matrix": "/node_modules/gl-matrix/esm/index.js"
      }
    }
    </script>
 
-Without it, a 2D program still renders normally and the failure only appears
+The scene modules are loaded only when a program containing ``scene()``
+compiles, so without the map a 2D program still renders normally and the
+failure — ``Failed to resolve module specifier "gl-matrix"`` — appears only
 when a scene program is compiled.
+
+Limits in this preview
+----------------------
+
+- One ``scene()`` per program, one ``reflector()`` per scene, one
+  ``environment()``.
+- Primitives only; no loaded models inside ``scene()``.
+- No cast shadows.
+- The camera cannot be animated from the DSL; a light's position and direction
+  cannot either.
+- Descriptors on ``pos``, ``scale`` and ``intensity`` produce ``0..1``.
+- ``volume()`` samples a fixed 64-cube atlas.
+- A program re-emitted from its parsed form (as the demo does on a parameter
+  change) comes back with the whole ``scene()`` on one line and its interior
+  comments removed.
+- The two backends agree to within float noise; what remains is listed under
+  :ref:`shader-deferred-rendering`.
 
 Sources
 -------
@@ -659,4 +941,5 @@ Sources
 ``shaders/src/scene/`` — tree, nodes (including ``volume-node.js``), camera,
 lights, transform math, clock and animation bindings;
 ``shaders/src/geometry/primitives.js`` — primitive builders;
-``shaders/src/lang/validator.js`` — ``SCENE_FUNCTIONS`` passthrough.
+``shaders/src/lang/validator.js`` — ``SCENE_FUNCTIONS`` passthrough;
+``shaders/src/renderer/canvas.js`` — the host API above.
