@@ -7,6 +7,39 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '../..')
@@ -293,6 +326,7 @@ async function main() {
             process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan',
         ],
     })
+    activeBrowser = browser
     try {
         const webgl = await assertBackend(browser, baseUrl, false, 'WebGL2')
         const webgpu = await assertBackend(browser, baseUrl, true, 'WebGPU')

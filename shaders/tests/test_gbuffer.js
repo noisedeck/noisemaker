@@ -275,4 +275,21 @@ import { presentShader, tonemapPresentShader } from '../src/rendering/post-shade
   assert.ok(wgsl.includes('2.2') || wgsl.includes('0.4545'), 'has gamma correction')
 }
 
+// The equirect environment lookup must map straight up to the TOP row of the
+// 2D program on both backends. Pipeline surfaces hold row 0 at the bottom on
+// both, so that is v = 1 - acos(d.y) / pi in both languages; the two sources
+// carried opposite conventions once, which mirrored the sky between backends.
+{
+  const config = new GBufferConfig(800, 600)
+  const glsl = config.getDeferredLightingShader('glsl', 1)
+  const wgsl = config.getDeferredLightingShader('wgsl', 1)
+  const expected = '1.0 - acos(clamp(d.y, -1.0, 1.0)) / 3.14159265'
+  const glslEquirect = glsl.match(/vec2 equirectUV\(vec3 d\) \{\n([^\n]*)\n\}/)
+  const wgslEquirect = wgsl.match(/fn equirectUV\(d: vec3f\) -> vec2f \{\n([^\n]*)\n\}/)
+  assert.ok(glslEquirect, 'GLSL lighting shader defines equirectUV')
+  assert.ok(wgslEquirect, 'WGSL lighting shader defines equirectUV')
+  assert.ok(glslEquirect[1].includes(expected), `GLSL equirect v maps up to the top row: ${glslEquirect[1]}`)
+  assert.ok(wgslEquirect[1].includes(expected), `WGSL equirect v maps up to the top row: ${wgslEquirect[1]}`)
+}
+
 console.log('G-buffer tests passed')

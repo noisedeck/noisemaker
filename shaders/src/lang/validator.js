@@ -363,6 +363,13 @@ export function validate(ast) {
             }
             return { ...node, properties }
         }
+        // The three animation descriptors carry their arguments as named
+        // fields rather than in `args`, so a generic walk misses them and the
+        // binding never resolves. Rebuilding only Oscillator left the other two
+        // behind: the 2D path's resolveMidiParam/resolveAudioParam see an Ident,
+        // return undefined and fall back to the parameter's DEFAULT, so
+        // `let ch = 5; midi(channel: ch)` silently played channel 1; inside a
+        // scene() the same node reaches the scene compiler and throws.
         if (node.type === 'Oscillator') {
             return {
                 ...node,
@@ -372,6 +379,24 @@ export function validate(ast) {
                 speed: substitute(node.speed),
                 offset: substitute(node.offset),
                 seed: substitute(node.seed)
+            }
+        }
+        if (node.type === 'Midi') {
+            return {
+                ...node,
+                channel: substitute(node.channel),
+                mode: substitute(node.mode),
+                min: substitute(node.min),
+                max: substitute(node.max),
+                sensitivity: substitute(node.sensitivity)
+            }
+        }
+        if (node.type === 'Audio') {
+            return {
+                ...node,
+                band: substitute(node.band),
+                min: substitute(node.min),
+                max: substitute(node.max)
             }
         }
         return node
@@ -807,6 +832,26 @@ export function validate(ast) {
                 for (let i = 0; i < specArgs.length; i++) {
                     const def = specArgs[i]
                     const fromKeyword = kw && kw[def.name] !== undefined
+                    // A single positional hex colour claims a whole r/g/b
+                    // triple, and a keyword overrides its own member of it.
+                    // Detected at the 'r' slot whether or not a keyword has
+                    // filled that slot: gating the detection on `!fromKeyword`
+                    // stood the splat down for `tint(#804020, r: 0.25)`, so the
+                    // Color fell into the 'g' float slot, defaulted g AND b and
+                    // reported a bogus S002 about 'g'.
+                    if (def.type !== 'color' && def.name === 'r' &&
+                        specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b') {
+                        const positional = substitute(call.args[posCursor])
+                        if (positional && positional.type === 'Color') {
+                            posCursor++
+                            const [r, g, b] = positional.value
+                            splatValues = {
+                                [def.name]: r,
+                                [specArgs[i + 1].name]: g,
+                                [specArgs[i + 2].name]: b
+                            }
+                        }
+                    }
                     // A splatted colour supplies this slot: take the component
                     // rather than consuming a positional for it.
                     if (!fromKeyword && splatValues && splatValues[def.name] !== undefined) {
@@ -822,18 +867,6 @@ export function validate(ast) {
                     }
                     node = substitute(node)
                     const argKey = def.name
-                    // A single positional hex colour splats across an r/g/b
-                    // triple, filling exactly the members no keyword claimed.
-                    // Standing the splat down wholesale — the old behaviour —
-                    // dropped the Color into the float path, so
-                    // `tint(#804020, g: 0.25)` clamped r to 1, left b at its
-                    // default and reported a bogus S002 about 'r'.
-                    if (!fromKeyword && node && node.type === 'Color' && def.type !== 'color' && def.name === 'r' && specArgs[i + 1]?.name === 'g' && specArgs[i + 2]?.name === 'b') {
-                        const [r, g, b] = node.value
-                        args[argKey] = r
-                        splatValues = { [specArgs[i + 1].name]: g, [specArgs[i + 2].name]: b }
-                        continue
-                    }
                     if (kw && kw[def.name] !== undefined) seen.add(def.name)
                     // Array literal — additive input form. Only fires when
                     // the source contains a literal `[…]`. Existing programs

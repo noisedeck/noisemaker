@@ -14,6 +14,20 @@ export class SceneNode {
     this._dirty = true
     this._localMatrix = mat4.create()
     this._worldMatrix = mat4.create()
+
+    // The components the cached local matrix was actually composed from.
+    // `position` and friends hand out the live array, so a host writing
+    // `node.position[0] = 2` or `node.position[1] += dt` never reaches the
+    // setter and never marks anything dirty: the cache stayed composed from
+    // the old values while reading the property back showed the new ones, and
+    // the frame did not move. getWorldMatrix() compares these nine numbers.
+    this._composed = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    // How a child notices an ancestor moved when no _markDirty ran. Each node
+    // bumps its own version whenever it recomposes its world matrix, and
+    // records the parent version it last composed against.
+    this._worldVersion = 0
+    this._parentVersion = -1
   }
 
   get position() {
@@ -105,18 +119,45 @@ export class SceneNode {
     this._markDirty()
   }
 
-  getWorldMatrix() {
-    if (this._dirty) {
-      this._localMatrix = composeTransform(this._position, this._rotation, this._scale)
+  /**
+   * Whether any transform component differs from what the cached local matrix
+   * was composed from. Nine comparisons; a NaN component reads as changed,
+   * which recomposes a matrix that was already NaN and costs nothing else.
+   */
+  _componentsChanged() {
+    const c = this._composed
+    const p = this._position
+    const r = this._rotation
+    const s = this._scale
+    return c[0] !== p[0] || c[1] !== p[1] || c[2] !== p[2] ||
+           c[3] !== r[0] || c[4] !== r[1] || c[5] !== r[2] ||
+           c[6] !== s[0] || c[7] !== s[1] || c[8] !== s[2]
+  }
 
-      if (this.parent) {
-        const parentWorld = this.parent.getWorldMatrix()
+  getWorldMatrix() {
+    // The parent is resolved FIRST and unconditionally: its own value check is
+    // what turns an index assignment on an ancestor into a version bump here.
+    // A clean parent returns after nine comparisons, so the walk to the root
+    // is cheap; skipping it is what let a stale child matrix survive.
+    const parentWorld = this.parent ? this.parent.getWorldMatrix() : null
+    const parentVersion = this.parent ? this.parent._worldVersion : 0
+
+    if (this._dirty || parentVersion !== this._parentVersion || this._componentsChanged()) {
+      this._localMatrix = composeTransform(this._position, this._rotation, this._scale)
+      const c = this._composed
+      c[0] = this._position[0]; c[1] = this._position[1]; c[2] = this._position[2]
+      c[3] = this._rotation[0]; c[4] = this._rotation[1]; c[5] = this._rotation[2]
+      c[6] = this._scale[0]; c[7] = this._scale[1]; c[8] = this._scale[2]
+
+      if (parentWorld) {
         mat4.multiply(this._worldMatrix, parentWorld, this._localMatrix)
       } else {
         mat4.copy(this._worldMatrix, this._localMatrix)
       }
 
       this._dirty = false
+      this._parentVersion = parentVersion
+      this._worldVersion++
     }
     return this._worldMatrix
   }

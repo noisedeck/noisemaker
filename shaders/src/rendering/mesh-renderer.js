@@ -100,6 +100,7 @@ export class MeshRenderer {
     this._geometryCache = new Map()   // meshType+params -> { texWidth, texHeight, vertexCount, meshId }
     this._geometryKeys = new WeakMap() // meshParams object -> cache key
     this._passStates = new Map()      // passId -> WeakMap<node, reusable pass state>
+    this._variantStates = new Map()   // passId -> reusable { passes, viewMatrix, projMatrix }
     this._meshIdCounter = 0
   }
 
@@ -119,6 +120,35 @@ export class MeshRenderer {
     }
     this._geometryCache.clear()
     this._passStates.clear()
+    this._variantStates.clear()
+  }
+
+  /**
+   * Reusable per-VARIANT state: the returned pass list and the view and
+   * projection matrices that variant draws through.
+   *
+   * The list used to be a fresh `[]` per call and the two matrices a fresh
+   * mat4 each (`camera.getViewMatrix()` / `getProjectionMatrix()` allocated
+   * one per call), so a frame with a main view, a mirrored view and a probe
+   * face paid for all three several times over.
+   *
+   * The matrices are COPIES of the camera's, not the camera's own buffers.
+   * A camera now rewrites one buffer per matrix on every call, and the six
+   * probe faces share a single camera — pointing all six variants' uniforms at
+   * it would leave every face carrying the last face's view. One buffer per
+   * variant keeps each pass holding the matrix it was actually built with,
+   * which is what an inspecting caller (and every test that reads a recorded
+   * pass) has always seen.
+   * @param {string} passId - Pass variant this state belongs to
+   * @returns {{passes: object[], viewMatrix: Float32Array, projMatrix: Float32Array}}
+   */
+  _variantState(passId) {
+    let state = this._variantStates.get(passId)
+    if (!state) {
+      state = { passes: [], viewMatrix: mat4.create(), projMatrix: mat4.create() }
+      this._variantStates.set(passId, state)
+    }
+    return state
   }
 
   /**
@@ -232,13 +262,18 @@ export class MeshRenderer {
    *   passes null and omits the input (the shader branch never samples it).
    */
   buildMeshPasses(meshNodes, materials, camera, width, height, opts = {}) {
-    const passes = []
     const aspect = width / height
-    const viewMatrix = camera.getViewMatrix()
-    const projMatrix = camera.getProjectionMatrix(aspect)
     const albedoFallback = opts.albedoFallbackTexture ?? null
     const outputs = opts.outputs ?? DEFAULT_OUTPUTS
     const passId = opts.passId ?? SCENE_GBUFFER_PASS_ID
+    // Reused across frames. The caller consumes the list before asking for the
+    // same variant again — each executePass runs synchronously inside the
+    // frame's own loop — so refilling it in place is safe.
+    const variant = this._variantState(passId)
+    const passes = variant.passes
+    passes.length = 0
+    const viewMatrix = mat4.copy(variant.viewMatrix, camera.getViewMatrix())
+    const projMatrix = mat4.copy(variant.projMatrix, camera.getProjectionMatrix(aspect))
     const clipPlane = opts.clipPlane ?? DEFAULT_CLIP_PLANE
     const clipEnabled = opts.clipPlane ? 1 : 0
 

@@ -724,6 +724,8 @@ export class Pipeline {
                 return 16
             case 'rgba8':
             case 'rgba8unorm':
+            case 'r32f':
+            case 'r32float':
                 return 4
             default:
                 return 8

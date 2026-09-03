@@ -437,9 +437,12 @@ function copyMeshFiles() {
  * ship beside it. Screenshots in that directory are visual-test artifacts and
  * are deliberately left behind.
  *
- * Its three source-tree references need the same redirection to the bundled
- * core that transformShadersDemoHtml() applies to the demo page; `../lib/
- * demo-ui.js` already resolves, because copyShaderDemoLib() writes it there.
+ * Its four source-tree references need the same redirection to the bundled
+ * core that transformShadersDemoHtml() applies to the demo page. That includes
+ * the `../lib/demo-ui.js` import: copyShaderDemoLib() copies demo-ui.js itself,
+ * but not the sibling modules it imports (program-state.js, dsl-utils.js,
+ * emitter.js), so loading it from the site 404s and the viewer never starts.
+ * The bundled core re-exports everything demo-ui.js exports.
  */
 function copySceneDemos() {
     const scenesSrcDir = path.join(repoRoot, 'demo', 'shaders', 'scenes')
@@ -473,6 +476,18 @@ function copySceneDemos() {
             "basePath: '../../../shaders',",
             "basePath: '../../../lib/shaders',"
         )
+
+        html = html.replace(
+            "import { extractEffectNamesFromDsl } from '../lib/demo-ui.js'",
+            "import { extractEffectNamesFromDsl } from '../../../lib/shaders/noisemaker-shaders-core.esm.min.js'"
+        )
+
+        // A reference that survived the rewrites is a 404 on the deployed site.
+        // Fail the build here rather than ship a viewer that cannot start.
+        const leftover = html.match(/(?:\.\.\/)+(?:node_modules|shaders\/src|lib\/demo-ui\.js)[^'"]*/)
+        if (leftover) {
+            throw new Error(`copySceneDemos: viewer.html still references ${leftover[0]} after rewriting`)
+        }
 
         fs.writeFileSync(path.join(scenesDestDir, 'viewer.html'), html)
     }

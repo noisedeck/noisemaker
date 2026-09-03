@@ -91,6 +91,7 @@ const testEntries = [
   { file: 'shaders/tests/test_expander.js', parity: false },
   { file: 'shaders/tests/test_integration.js', parity: false },
   { file: 'shaders/tests/test_resources.js', parity: false },
+  { file: 'shaders/tests/test_phase2_integration.js', parity: false },
   { file: 'shaders/tests/test_expander_palette.js', parity: false },
   { file: 'shaders/tests/test_palette_expansion.js', parity: false },
   { file: 'shaders/tests/test_outputs.js', parity: false },

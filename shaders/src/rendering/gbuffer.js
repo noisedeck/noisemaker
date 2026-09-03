@@ -259,9 +259,12 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
   return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// Equirectangular lookup for the DSL-surface environment
+// Equirectangular lookup for the DSL-surface environment. Pipeline surfaces
+// hold row 0 at the bottom of the image on both backends, so v = 1 is the top
+// row: straight up (d.y = 1) samples the top of the 2D program, the way an
+// equirect image is read. Both languages must compute the same v.
 vec2 equirectUV(vec3 d) {
-  return vec2(atan(d.z, d.x) / 6.2831853 + 0.5, acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
+  return vec2(atan(d.z, d.x) / 6.2831853 + 0.5, 1.0 - acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
 }
 
 void environmentBasis(vec3 direction, out vec3 tangent, out vec3 bitangent) {
@@ -1122,10 +1125,11 @@ fn fresnelSchlick(cosTheta: f32, F0: vec3f) -> vec3f {
   return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// Equirectangular lookup for the DSL-surface environment. Pipeline surface
-// textures store rows flipped on WebGPU relative to GL (their own present
-// path compensates), so v is inverted here to sample the same sky the GLSL
-// shader sees.
+// Equirectangular lookup for the DSL-surface environment. Pipeline surfaces
+// hold row 0 at the bottom of the image on both backends (the surface()
+// material samples them with no flip and matches GLSL byte for byte), so
+// v = 1 is the top row: straight up samples the top of the 2D program. This
+// must stay identical to the GLSL equirectUV.
 fn equirectUV(d: vec3f) -> vec2f {
   return vec2f(atan2(d.z, d.x) / 6.2831853 + 0.5, 1.0 - acos(clamp(d.y, -1.0, 1.0)) / 3.14159265);
 }

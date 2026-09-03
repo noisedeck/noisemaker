@@ -1,6 +1,6 @@
 // shaders/src/scene/camera.js
 import { SceneNode } from './node.js'
-import { lookAtMatrix, perspectiveMatrix, tileFrustumMatrix } from './math.js'
+import { mat4, lookAtMatrix, perspectiveMatrix, tileFrustumMatrix } from './math.js'
 
 /**
  * A perspective camera.
@@ -35,6 +35,22 @@ export class CameraNode extends SceneNode {
      *          fullWidth: number, fullHeight: number}}
      */
     this.tile = null
+    /**
+     * The buffers getViewMatrix()/getProjectionMatrix() write into.
+     *
+     * A camera is asked for both matrices several times per frame — once per
+     * pass group that draws through it — and each call used to mint a fresh
+     * mat4 (plus three vec3s inside lookAt). Render loops must not allocate,
+     * so the camera owns one buffer for each and rewrites it every call.
+     *
+     * Consequence for callers: the returned matrix is the CAMERA's, not the
+     * caller's. It is valid until the next call on the same camera. A caller
+     * that needs to keep a matrix past that — a pass descriptor that outlives
+     * the frame, say — must copy it into its own buffer. Both matrices are
+     * fully overwritten on every call, so neither can go stale.
+     */
+    this._viewMatrix = mat4.create()
+    this._projectionMatrix = mat4.create()
   }
 
   getViewMatrix() {
@@ -57,18 +73,20 @@ export class CameraNode extends SceneNode {
         )
       }
     }
-    return lookAtMatrix(this._position, this.target, this.up)
+    return lookAtMatrix(this._viewMatrix, this._position, this.target, this.up)
   }
 
   /**
    * @param {number} aspect - Aspect ratio of the target being rendered. Ignored
    *   while tiling: the tile derives its bounds from the FULL image's aspect,
    *   and the slice is what gives the tile its own.
+   * @returns {Float32Array} The camera's own projection buffer, rewritten on
+   *   every call. See _projectionMatrix.
    */
   getProjectionMatrix(aspect) {
     if (this.tile) {
-      return tileFrustumMatrix(this.fov, this.near, this.far, this.tile)
+      return tileFrustumMatrix(this._projectionMatrix, this.fov, this.near, this.far, this.tile)
     }
-    return perspectiveMatrix(this.fov, aspect, this.near, this.far)
+    return perspectiveMatrix(this._projectionMatrix, this.fov, aspect, this.near, this.far)
   }
 }

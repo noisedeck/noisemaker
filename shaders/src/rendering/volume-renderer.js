@@ -14,6 +14,8 @@ const EMPTY_PBR = Object.freeze({})
 
 const DEFAULT_COLOR = Object.freeze([1, 1, 1])
 const DEFAULT_CLIP_PLANE = Object.freeze([0, 0, 0, 0])
+/** Stand-in eye for a camera with no position, shared rather than minted. */
+const DEFAULT_CAMERA_POSITION = Object.freeze([0, 0, 5])
 const DEFAULT_OUTPUTS = Object.freeze({
   color0: 'scene_gbuf_albedo_metallic',
   color1: 'scene_gbuf_normal_roughness',
@@ -88,11 +90,32 @@ export class VolumeRenderer {
     // G-buffer variant, and a single shared object would carry the last
     // variant's outputs and camera into every earlier one within a frame.
     this._passStates = new Map() // passId -> WeakMap<node, reusable pass state>
+    this._variantStates = new Map() // passId -> reusable { passes, viewMatrix, projMatrix }
   }
 
   dispose() {
     // Box geometry belongs to the mesh renderer's cache, which disposes it.
     this._passStates.clear()
+    this._variantStates.clear()
+  }
+
+  /**
+   * Reusable per-VARIANT state — the pass list and this variant's view and
+   * projection matrices — mirroring MeshRenderer._variantState, and for the
+   * same reasons: the list was a fresh `[]` per call, the matrices a fresh
+   * mat4 per camera query, and the copy is what keeps each variant's uniforms
+   * holding the matrix that variant was built with when several variants share
+   * one camera.
+   * @param {string} passId - Pass variant this state belongs to
+   * @returns {{passes: object[], viewMatrix: Float32Array, projMatrix: Float32Array}}
+   */
+  _variantState(passId) {
+    let state = this._variantStates.get(passId)
+    if (!state) {
+      state = { passes: [], viewMatrix: mat4.create(), projMatrix: mat4.create() }
+      this._variantStates.set(passId, state)
+    }
+    return state
   }
 
   /**
@@ -210,19 +233,23 @@ export class VolumeRenderer {
    *   mesh list came out empty.
    */
   buildVolumePasses(volumeNodes, materials, camera, width, height, opts = {}) {
-    const passes = []
+    const passId = opts.passId ?? SCENE_GBUFFER_PASS_ID
+    // Reused across frames; the caller consumes it before asking for the same
+    // variant again. See MeshRenderer._variantState.
+    const variant = this._variantState(passId)
+    const passes = variant.passes
+    passes.length = 0
     if (volumeNodes.length === 0) return passes
 
     const handle = this.meshRenderer.getGeometry('box', BOX_PARAMS)
     if (!handle) return passes
 
     const aspect = width / height
-    const viewMatrix = camera.getViewMatrix()
-    const projMatrix = camera.getProjectionMatrix(aspect)
-    const cameraPos = camera._position || [0, 0, 5]
+    const viewMatrix = mat4.copy(variant.viewMatrix, camera.getViewMatrix())
+    const projMatrix = mat4.copy(variant.projMatrix, camera.getProjectionMatrix(aspect))
+    const cameraPos = camera._position || DEFAULT_CAMERA_POSITION
     const firstClear = opts.firstClear === true
     const outputs = opts.outputs ?? DEFAULT_OUTPUTS
-    const passId = opts.passId ?? SCENE_GBUFFER_PASS_ID
     const clipPlane = opts.clipPlane ?? DEFAULT_CLIP_PLANE
     const clipEnabled = opts.clipPlane ? 1 : 0
 

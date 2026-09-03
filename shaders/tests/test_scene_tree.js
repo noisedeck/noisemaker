@@ -306,4 +306,73 @@ function approx(a, b, eps = 1e-4) {
   assert.strictEqual(tree.getPlanarReflector(), null, 'a volume is never a planar reflector')
 }
 
+// ---------------------------------------------------------------------------
+// Index assignment on a transform array.
+//
+// `position` returns the live internal array, so `node.position[0] = 2` and
+// `node.position[1] += dt` — the two most common host patterns — bypass the
+// setter and never reach _markDirty. The cached matrices stayed composed from
+// the old values and the frame did not change, while reading `node.position`
+// back showed the new one. getWorldMatrix() detects the change by value.
+// ---------------------------------------------------------------------------
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c', position: [0, 0, 1] })
+  parent.addChild(child)
+
+  // Prime both caches so nothing is left dirty.
+  approx(parent.getWorldMatrix()[12], 0)
+  approx(child.getWorldMatrix()[12], 0)
+  assert.ok(!parent._dirty && !child._dirty, 'both clean after the first compute')
+
+  parent.position[0] = 7
+  const parentWorld = parent.getWorldMatrix()
+  approx(parentWorld[12], 7)
+
+  const childWorld = child.getWorldMatrix()
+  approx(childWorld[12], 7)
+  approx(childWorld[14], 1)
+
+  // += on a component, the other common form.
+  parent.position[1] += 3
+  approx(parent.getWorldMatrix()[13], 3)
+  approx(child.getWorldMatrix()[13], 3)
+
+  // Rotation and scale too, and the child follows both.
+  parent.rotation[1] = 90
+  approx(child.getWorldMatrix()[12], 8)     // parent [7,3,0] + Ry(90) * [0,0,1]
+  approx(child.getWorldMatrix()[14], 0)
+
+  parent.scale[2] = 4
+  approx(child.getWorldMatrix()[12], 11)    // Ry(90) * [0,0,4] = [4,0,0]
+
+  // The node's own components, not just an ancestor's.
+  child.position[1] = 5
+  approx(child.getWorldMatrix()[13], 8)
+}
+
+// A clean node does not recompute, so the value check costs nothing per frame.
+{
+  const node = new SceneNode({ id: 'n', position: [1, 2, 3] })
+  const first = node.getWorldMatrix()
+  const version = node._worldVersion
+  node.getWorldMatrix()
+  node.getWorldMatrix()
+  assert.strictEqual(node._worldVersion, version, 'a clean node recomposes no further')
+  approx(first[12], 1)
+}
+
+// The setters and _markDirty still work — bindings.js writes through them.
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c' })
+  parent.addChild(child)
+  child.getWorldMatrix()
+  parent.rotation = [0, 0, 90]
+  assert.ok(child._dirty, '_markDirty still reaches children')
+  parent._position[0] = 2
+  parent._markDirty()
+  approx(child.getWorldMatrix()[12], 2)
+}
+
 console.log('Scene tree tests passed')

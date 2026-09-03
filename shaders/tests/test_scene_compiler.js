@@ -295,16 +295,21 @@ function irFor(src) {
 }
 
 // audio() in a transform compiles to the canonical audio descriptor.
+//
+// min/max are a normalized [0, 1] sub-range. This used to write `max: 2` and
+// pin the silent clamp to 1; a scene now rejects the out-of-range value
+// instead (see the sub-range block near the end of this file), so the shape is
+// pinned with an in-range sub-range.
 {
   const ir = irFor(`
     search synth
     scene(
-      mesh("box", scale: [audio(band: audioBand.low, min: 0.5, max: 2), 1, 1])
+      mesh("box", scale: [audio(band: audioBand.low, min: 0.5, max: 0.9), 1, 1])
     ).write(o0)
   `)
   assert.deepStrictEqual(ir.nodes[0].transform.scale[0], {
-    type: 'Audio', band: 0, min: 0.5, max: 1
-  }, 'audio() compiles to the canonical descriptor with a clamped [0, 1] sub-range')
+    type: 'Audio', band: 0, min: 0.5, max: 0.9
+  }, 'audio() compiles to the canonical descriptor with its [0, 1] sub-range')
 }
 
 // audio() defaults match the 2D path.
@@ -1187,6 +1192,454 @@ function irFor(src) {
   // Defaults still apply when the enum argument is omitted, on both paths.
   assert.strictEqual(asEffectUniform('midi(1)').mode, 4, 'midi() default mode, effect path')
   assert.strictEqual(asSceneTransform('midi(1)').mode, 4, 'midi() default mode, scene path')
+}
+
+
+// A positional that is not a node chain is a compile error, not a silent drop.
+//
+// scene() and group() take their children positionally, so anything else
+// written there names no node. Dropping it in silence is the same failure mode
+// the keyword whitelists above exist to prevent: `scene(0.15, camera())` is a
+// setting the author forgot to name, and it compiled clean and did nothing.
+{
+  assert.throws(() => irFor(`
+    search synth
+    scene(0.15, camera()).write(o0)
+  `), /Unknown scene child '0\.15'.*node chains as positional arguments.*line/s,
+    'bare positional in scene() rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene("ambient", mesh("box")).write(o0)
+  `), /Unknown scene child '"ambient"'.*settings as keyword arguments.*line/s,
+    'string positional in scene() rejected')
+
+  // A scene child written inside a group() is not one of the three node kinds a
+  // group nests, so it named nothing and vanished: the light simply never lit.
+  assert.throws(() => irFor(`
+    search synth
+    scene(group(light(type: "point", pos: [1, 1, 1]), mesh("box"))).write(o0)
+  `), /Unknown group\(\) child 'light\(\)'.*belongs at scene\(\) level.*line/s, 'light inside a group rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(group(camera(fov: 30), mesh("box"))).write(o0)
+  `), /Unknown group\(\) child 'camera\(\)'.*belongs at scene\(\) level.*line/s, 'camera inside a group rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(group("oops", mesh("box"))).write(o0)
+  `), /Unknown group\(\) child '"oops"'.*accepts only mesh\(\), volume\(\), group\(\) children.*line/s,
+    'bare positional in group() rejected')
+
+  // A loc-less positional (a surface reference) anchors to the group instead
+  // of reporting line 0 col 0.
+  assert.throws(() => irFor(`
+    search synth
+    scene(group(o1, mesh("box"))).write(o0)
+  `), /Unknown group\(\) child 'o1'.*at line 3 col (?!0\b)\d+/s, 'loc-less group positional is located')
+
+  // The shapes that were always legal stay legal.
+  const ir = irFor(`
+    search synth
+    scene(
+      ambient: 0.2,
+      camera(fov: 50),
+      light(type: "point"),
+      environment(o1),
+      group(id: "g", mesh("box"), group(mesh("sphere")), volume(vol0)),
+      mesh("plane")
+    ).write(o0)
+  `)
+  assert.strictEqual(ir.nodes.length, 6, 'every legal child still compiles')
+  assert.strictEqual(ir.lights.length, 1, 'top-level light still compiles')
+  assert.strictEqual(ir.environment.surface, 'o1', 'environment still compiles')
+}
+
+
+// A descriptor's min/max is a NORMALIZED sub-range, and a scene says so.
+//
+// clampPercentage folded anything outside [0, 1] onto the edge in silence, so
+// `rot: [0, osc(min: 90, max: 270), 0]` became min 1 / max 1 and the node sat
+// frozen at 360 degrees with nothing reported. The effect-uniform path keeps
+// clamping — that is its documented leniency; a scene is strict, as it is about
+// every other out-of-range value.
+{
+  assert.throws(() => irFor(`
+    search synth
+    scene(mesh("box", rot: [0, osc(type: oscKind.saw, min: 90, max: 270), 0])).write(o0)
+  `), /osc\(\) min must be between 0 and 1.*normalized.*line/s, 'osc() min above 1 rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(mesh("box", rot: [0, osc(type: oscKind.saw, min: -1), 0])).write(o0)
+  `), /osc\(\) min must be between 0 and 1.*line/s, 'osc() min below 0 rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(mesh("box", scale: [audio(band: audioBand.low, min: 1, max: 3), 1, 1])).write(o0)
+  `), /audio\(\) max must be between 0 and 1.*line/s, 'audio() max above 1 rejected')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(light(type: "point", intensity: midi(channel: 1, min: 0, max: 2))).write(o0)
+  `), /midi\(\) max must be between 0 and 1.*line/s, 'midi() max above 1 rejected')
+
+  // In range is untouched, edges included.
+  const ir = irFor(`
+    search synth
+    scene(mesh("box", rot: [0, osc(type: oscKind.saw, min: 0, max: 1), 0])).write(o0)
+  `)
+  assert.strictEqual(ir.nodes[0].transform.rotation[1].min, 0, 'min 0 accepted')
+  assert.strictEqual(ir.nodes[0].transform.rotation[1].max, 1, 'max 1 accepted')
+
+  // The effect-uniform path is untouched: it still clamps rather than throwing.
+  const uniform = compile(`
+    search synth
+    descprobe(scale: osc(type: oscKind.saw, min: 90, max: 270)).write(o0)
+  `).plans[0].chain.find(step => step.op === 'synth.descprobe').args.scale
+  assert.strictEqual(uniform.min, 1, 'effect uniform still clamps min')
+  assert.strictEqual(uniform.max, 1, 'effect uniform still clamps max')
+}
+
+// A descriptor written where only a plain number is read names that fact.
+//
+// Camera and light vectors are read by vectorKw, whose "must contain finite
+// numbers" sent authors looking for a typo in a perfectly well-formed osc().
+// Only a node's pos/rot/scale and a light's intensity animate.
+{
+  assert.throws(() => irFor(`
+    search synth
+    scene(camera(pos: [osc(type: oscKind.sine), 0, 5])).write(o0)
+  `), /camera\(\) pos does not accept osc\(\), midi\(\) or audio\(\).*line/s,
+    'camera pos descriptor names the real problem')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(camera(target: [audio(band: audioBand.low), 0, 0])).write(o0)
+  `), /camera\(\) target does not accept osc\(\), midi\(\) or audio\(\).*line/s,
+    'camera target descriptor names the real problem')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(light(type: "directional", dir: [osc(type: oscKind.sine), -1, 0])).write(o0)
+  `), /light\(\) dir does not accept osc\(\), midi\(\) or audio\(\).*line/s,
+    'light dir descriptor names the real problem')
+
+  assert.throws(() => irFor(`
+    search synth
+    scene(light(type: "point", pos: [midi(channel: 1), 0, 0])).write(o0)
+  `), /light\(\) pos does not accept osc\(\), midi\(\) or audio\(\).*line/s,
+    'light pos descriptor names the real problem')
+
+  // A genuinely malformed vector still gets the arity/finiteness message.
+  assert.throws(() => irFor(`
+    search synth
+    scene(camera(pos: [0, "x", 5])).write(o0)
+  `), /pos must contain finite numbers.*line/s, 'non-descriptor junk keeps its own message')
+
+  // buildTransform's message, which lists the descriptors as ACCEPTED, is
+  // unchanged.
+  assert.throws(() => irFor(`
+    search synth
+    scene(mesh("box", pos: [0, "x", 0])).write(o0)
+  `), /pos values must be finite numbers or osc\(\), midi\(\) or audio\(\).*line/s,
+    'node transform message is unchanged')
+}
+
+// Every "Unknown X" names the legal values.
+//
+// volume()'s messages listed their sets — `(vol0..vol7)`, `(expected: smooth,
+// voxel)` — while the light type, the mesh type and every unknown-keyword
+// error named only the thing that was wrong. A newcomer typo is the exact case
+// these fire on, and the set is what the author needs to see.
+{
+  const cases = [
+    ['light type', 'scene(light(type: "sun")).write(o0)',
+      /Unknown light type 'sun' \(expected: directional, point, spot\).*line/s],
+    ['mesh type', 'scene(mesh("cone")).write(o0)',
+      /Unknown mesh type 'cone' \(expected: sphere, box, plane, cylinder, torus\).*line/s],
+    ['camera keyword', 'scene(camera(fow: 60)).write(o0)',
+      /Unknown keyword 'fow' for camera\(\) \(expected: fov, near, far, pos, target\).*line/s],
+    ['scene setting', 'scene(ambiant: 0.2, mesh("box")).write(o0)',
+      /Unknown keyword 'ambiant' for scene\(\) \(expected: ambient, background, exposure, ground, sky, reflections, reflectionProbe, reflectionProbeSize, ssao, ssaoRadius\).*line/s],
+    ['group keyword', 'scene(group(position: [0,1,0], mesh("box"))).write(o0)',
+      /Unknown keyword 'position' for group\(\) \(expected: id, pos, rot, scale\).*line/s],
+    ['volume keyword', 'scene(volume(vol0, thresholdd: 0.5)).write(o0)',
+      /Unknown keyword 'thresholdd' for volume\(\) \(expected: id, pos, rot, scale, threshold, mode\).*line/s],
+    ['directional light keyword', 'scene(light(pos: [0,1,0])).write(o0)',
+      /Unknown keyword 'pos' for light\(\) \(expected: type, color, intensity, dir\).*line/s],
+    ['spot light keyword', 'scene(light(type: "spot", falof: 1)).write(o0)',
+      /Unknown keyword 'falof' for light\(\) \(expected: type, color, intensity, pos, falloff, dir, angle, penumbra\).*line/s],
+    ['environment keyword', 'scene(environment(o1, strength: 1)).write(o0)',
+      /Unknown keyword 'strength' for environment\(\) \(expected: intensity\).*line/s],
+    ['mesh shape keyword', 'scene(mesh("sphere", tube: 1)).write(o0)',
+      /Unknown keyword 'tube' for mesh\("sphere"\) \(expected: id, pos, rot, scale, radius, segments\).*line/s],
+    ['solid keyword', 'scene(mesh("box").material(solid(colour: [1,0,0]))).write(o0)',
+      /Unknown keyword 'colour' for solid\(\) \(expected: color\).*line/s],
+    ['surface keyword', 'scene(mesh("box").material(surface(o1, tile: 2))).write(o0)',
+      /Unknown keyword 'tile' for surface\(\) \(expected: tint, uvScale, uvOffset\).*line/s],
+    ['pbr keyword', 'scene(mesh("box").material(solid().pbr(rough: 1))).write(o0)',
+      /Unknown keyword 'rough' for pbr\(\) \(expected: metallic, roughness\).*line/s],
+    ['emit keyword', 'scene(mesh("box").material(solid().emit(power: 1))).write(o0)',
+      /Unknown keyword 'power' for emit\(\) \(expected: strength\).*line/s]
+  ]
+  for (const [label, program, pattern] of cases) {
+    assert.throws(() => irFor(`search synth\n${program}`), pattern,
+      `${label}: the diagnostic must enumerate the legal values`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Every scene() setting is validated before it is stored.
+//
+// The settings loop called litValue and assigned, so whatever the author wrote
+// travelled straight into the IR and out to the renderer's uniforms:
+// `exposure: "bright"` was handed to u_exposure as a string, `ssaoRadius: 0`
+// collapsed the sampling kernel onto the shaded point so nothing ever occluded,
+// and a negative `ambient` drove the hemisphere terms below zero. scene.rst has
+// always said these take "plain numbers or vectors".
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    ['ambient type', 'scene(ambient: "dim", mesh("box")).write(o0)',
+      /ambient must be a finite number/],
+    ['ambient range', 'scene(ambient: -0.5, mesh("box")).write(o0)',
+      /ambient must be non-negative/],
+    ['exposure type', 'scene(exposure: [1, 2, 3], mesh("box")).write(o0)',
+      /exposure must be a finite number/],
+    ['exposure range', 'scene(exposure: -1, mesh("box")).write(o0)',
+      /exposure must be non-negative/],
+    ['ssao type', 'scene(ssao: "on", mesh("box")).write(o0)',
+      /ssao must be a finite number/],
+    ['ssao range', 'scene(ssao: -1, mesh("box")).write(o0)',
+      /ssao must be non-negative/],
+    // Zero is not "off" here the way it is for ssao: it is a kernel with no
+    // extent, which reads the shaded point itself for every sample.
+    ['ssaoRadius zero', 'scene(ssaoRadius: 0, mesh("box")).write(o0)',
+      /ssaoRadius must be greater than zero/],
+    ['ssaoRadius range', 'scene(ssaoRadius: -0.5, mesh("box")).write(o0)',
+      /ssaoRadius must be greater than zero/],
+    ['reflections type', 'scene(reflections: "yes", mesh("box")).write(o0)',
+      /reflections must be a finite number/],
+    ['reflections range', 'scene(reflections: -1, mesh("box")).write(o0)',
+      /reflections must be non-negative/],
+    ['sky arity', 'scene(sky: [0.4, 0.6], mesh("box")).write(o0)',
+      /sky must contain exactly 3 values/],
+    ['sky components', 'scene(sky: [0.4, "blue", 1], mesh("box")).write(o0)',
+      /sky must contain finite numbers/],
+    ['sky range', 'scene(sky: [-0.4, 0.6, 1], mesh("box")).write(o0)',
+      /sky values must be non-negative/],
+    ['ground arity', 'scene(ground: [0.3], mesh("box")).write(o0)',
+      /ground must contain exactly 3 values/],
+    ['ground range', 'scene(ground: [0.3, -0.25, 0.2], mesh("box")).write(o0)',
+      /ground values must be non-negative/],
+    ['background arity', 'scene(background: [0, 0, 0, 1], mesh("box")).write(o0)',
+      /background must contain exactly 3 values/],
+    ['background range', 'scene(background: [0, 0, -0.1], mesh("box")).write(o0)',
+      /background values must be non-negative/]
+  ]
+  for (const [label, program, pattern] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${program}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `${label}: expected a compile error rather than a silent store`)
+    assert.match(thrown.message, pattern, `${label}: unexpected message`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `${label}: expected a real source position, got "${thrown.message}"`)
+  }
+
+  // Zero is a legal value for every setting that gates on it, and the compiler
+  // stores only what the author wrote — the renderer owns the defaults.
+  const ir = irFor(`
+    search synth
+    scene(
+      ambient: 0, exposure: 0, ssao: 0, reflections: 0, ssaoRadius: 0.0001,
+      sky: [0, 0, 0], ground: [0, 0, 0], background: [0, 0, 0],
+      mesh("box")
+    ).write(o0)
+  `)
+  assert.deepStrictEqual(ir.settings, {
+    ambient: 0, exposure: 0, ssao: 0, reflections: 0, ssaoRadius: 0.0001,
+    sky: [0, 0, 0], ground: [0, 0, 0], background: [0, 0, 0]
+  }, 'zero-valued settings are stored, and nothing else is')
+}
+
+// A descriptor in a scene() setting is named for what it is.
+//
+// None of the settings animates — scene.rst says so — but litValue canonicalized
+// osc()/midi()/audio() and the settings loop stored the descriptor object,
+// which reached the uniform upload as NaN with nothing reported.
+{
+  const scalars = ['ambient', 'exposure', 'ssao', 'ssaoRadius', 'reflections']
+  const vectors = ['sky', 'ground', 'background']
+  const kinds = ['osc(oscKind.saw)', 'midi(1)', 'audio(audioBand.low)']
+  for (const kind of kinds) {
+    for (const name of scalars) {
+      assert.throws(
+        () => irFor(`search synth\nscene(${name}: ${kind}, mesh("box")).write(o0)`),
+        new RegExp(`scene\\(\\) ${name} does not accept osc\\(\\), midi\\(\\) or audio\\(\\).*line [1-9]`, 's'),
+        `scene() ${name}: ${kind} must be rejected by name`)
+    }
+    for (const name of vectors) {
+      // Written as one component of the vector...
+      assert.throws(
+        () => irFor(`search synth\nscene(${name}: [${kind}, 0, 0], mesh("box")).write(o0)`),
+        new RegExp(`scene\\(\\) ${name} does not accept osc\\(\\), midi\\(\\) or audio\\(\\).*line [1-9]`, 's'),
+        `scene() ${name}: ${kind} in a component must be rejected by name`)
+      // ...and written in place of the whole vector, where "must contain
+      // exactly 3 values" would have sent the author hunting for an arity.
+      assert.throws(
+        () => irFor(`search synth\nscene(${name}: ${kind}, mesh("box")).write(o0)`),
+        new RegExp(`scene\\(\\) ${name} does not accept osc\\(\\), midi\\(\\) or audio\\(\\).*line [1-9]`, 's'),
+        `scene() ${name}: a bare ${kind} must be rejected by name`)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A light's intensity is a number or a descriptor, and nothing else.
+//
+// It was read bare — `kw(call, 'intensity') ?? 1` — because it is the one light
+// channel bindings animate. A string or an array is not a descriptor, so
+// collectBindings left it alone and _buildLightingUniforms uploaded it to a
+// float uniform.
+// ---------------------------------------------------------------------------
+{
+  const cases = [
+    ['string', 'scene(light(type: "point", intensity: "bright")).write(o0)',
+      /intensity must be a finite number or osc\(\), midi\(\) or audio\(\)/],
+    ['array', 'scene(light(type: "directional", intensity: [1, 2, 3])).write(o0)',
+      /intensity must be a finite number or osc\(\), midi\(\) or audio\(\)/],
+    ['negative', 'scene(light(type: "point", intensity: -2)).write(o0)',
+      /intensity must be non-negative/]
+  ]
+  for (const [label, program, pattern] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${program}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `light intensity ${label}: expected a compile error`)
+    assert.match(thrown.message, pattern, `light intensity ${label}: unexpected message`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `light intensity ${label}: expected a real source position, got "${thrown.message}"`)
+  }
+
+  // Descriptors stay legal on this one channel: bindings.js hoists them.
+  const ir = irFor(`
+    search synth
+    scene(
+      light(type: "point", intensity: osc(type: oscKind.saw)),
+      light(type: "directional", intensity: 0),
+      mesh("box")
+    ).write(o0)
+  `)
+  assert.strictEqual(ir.lights[0].intensity.type, 'Oscillator', 'osc() still reaches light intensity')
+  assert.strictEqual(ir.lights[1].intensity, 0, 'an unlit light is a legal light')
+}
+
+// An environment's intensity is a plain number: nothing hoists it.
+//
+// It was read bare like a light's, but no binding is ever collected for it, so
+// a descriptor written here sat in the IR as an object and reached
+// u_envIntensity as NaN.
+{
+  const cases = [
+    ['string', 'scene(environment(o1, intensity: "hot")).write(o0)',
+      /intensity must be a finite number/],
+    ['negative', 'scene(environment(o1, intensity: -1)).write(o0)',
+      /intensity must be non-negative/],
+    ['osc', 'scene(environment(o1, intensity: osc(oscKind.saw))).write(o0)',
+      /environment\(\) intensity does not accept osc\(\), midi\(\) or audio\(\)/],
+    ['midi', 'scene(environment(o1, intensity: midi(1))).write(o0)',
+      /environment\(\) intensity does not accept osc\(\), midi\(\) or audio\(\)/],
+    ['audio', 'scene(environment(o1, intensity: audio(audioBand.low))).write(o0)',
+      /environment\(\) intensity does not accept osc\(\), midi\(\) or audio\(\)/]
+  ]
+  for (const [label, program, pattern] of cases) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${program}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `environment intensity ${label}: expected a compile error`)
+    assert.match(thrown.message, pattern, `environment intensity ${label}: unexpected message`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `environment intensity ${label}: expected a real source position, got "${thrown.message}"`)
+  }
+
+  const ir = irFor('search synth\nscene(environment(o1, intensity: 0), mesh("box")).write(o0)')
+  assert.strictEqual(ir.environment.intensity, 0, 'a dark environment is a legal environment')
+}
+
+// A second environment() is an error, anchored to the second one.
+//
+// The switch assigned ir.environment unconditionally, so the later call
+// replaced the earlier without a word: the surface lighting the frame was not
+// the one the author had wired last.
+{
+  let thrown = null
+  try {
+    irFor(`search synth
+scene(
+  environment(o1),
+  environment(o2),
+  mesh("box")
+).write(o0)`)
+  } catch (err) {
+    thrown = err
+  }
+  assert.ok(thrown, 'expected a compile error for a second environment()')
+  assert.match(thrown.message, /Only one environment\(\) per scene is supported/,
+    `unexpected message: ${thrown.message}`)
+  const at = thrown.message.match(/line (\d+) col (\d+)/)
+  assert.ok(at, `expected a line/col in: ${thrown.message}`)
+  assert.strictEqual(at[1], '4',
+    `the diagnostic must anchor to the SECOND environment(), got "${thrown.message}"`)
+
+  // One is still one, wherever it sits among the children.
+  const ir = irFor('search synth\nscene(mesh("box"), environment(o1)).write(o0)')
+  assert.strictEqual(ir.environment.surface, 'o1', 'a single environment still compiles')
+}
+
+// mesh() with no positional names the argument that is missing.
+//
+// The count check only fired above one, so zero fell through to litValue and
+// the author was told `Unknown mesh type 'undefined'` — a type they never
+// wrote, instead of the argument they left out.
+{
+  for (const [label, program] of [
+    ['bare', 'scene(mesh()).write(o0)'],
+    ['keywords only', 'scene(mesh(pos: [0, 1, 0], radius: 2)).write(o0)'],
+    ['inside a group', 'scene(group(mesh())).write(o0)']
+  ]) {
+    let thrown = null
+    try {
+      irFor(`search synth\n${program}`)
+    } catch (err) {
+      thrown = err
+    }
+    assert.ok(thrown, `mesh() ${label}: expected a compile error`)
+    assert.match(thrown.message, /mesh\(\) takes one positional argument, the mesh type/,
+      `mesh() ${label}: unexpected message`)
+    assert.doesNotMatch(thrown.message, /Unknown mesh type/,
+      `mesh() ${label}: names a type the author never wrote`)
+    assert.match(thrown.message, /line [1-9]\d* col [1-9]\d*/,
+      `mesh() ${label}: expected a real source position, got "${thrown.message}"`)
+  }
+
+  // A second positional keeps the same message, and one still compiles.
+  assert.throws(() => irFor('search synth\nscene(mesh("box", "sphere")).write(o0)'),
+    /mesh\(\) takes one positional argument, the mesh type/,
+    'a second positional keeps the count message')
+  assert.strictEqual(irFor('search synth\nscene(mesh("box")).write(o0)').nodes[0].meshType, 'box',
+    'exactly one positional still compiles')
 }
 
 console.log('Scene compiler tests passed')

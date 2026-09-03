@@ -284,6 +284,12 @@ export class CanvasRenderer {
         this._fpsLastUpdateTime = performance.now()
         this._currentFPS = 0
 
+        // Frame time tracking for jitter measurement (circular buffer)
+        this._frameTimeBufferSize = 120  // Track last ~2 seconds at 60fps
+        this._frameTimeBuffer = new Float32Array(this._frameTimeBufferSize)
+        this._frameTimeIndex = 0
+        this._frameTimeCount = 0
+        this._lastRenderTime = 0
         this._lastPassCount = 0
 
         // Lazy loading infrastructure
@@ -590,9 +596,57 @@ export class CanvasRenderer {
         return this._loopDuration
     }
 
+    /** @returns {number} Last frame render time in ms */
+    get lastRenderTime() {
+        return this._lastRenderTime
+    }
+
     /** @returns {number} Number of render passes in last frame */
     get lastPassCount() {
         return this._lastPassCount
+    }
+
+    /**
+     * Get frame time statistics for jitter measurement
+     * @returns {{mean: number, std: number, min: number, max: number, count: number}}
+     */
+    getFrameTimeStats() {
+        if (this._frameTimeCount === 0) {
+            return { mean: 0, std: 0, min: 0, max: 0, count: 0 }
+        }
+
+        const count = this._frameTimeCount
+        let sum = 0
+        let min = Infinity
+        let max = -Infinity
+
+        for (let i = 0; i < count; i++) {
+            const t = this._frameTimeBuffer[i]
+            sum += t
+            if (t < min) min = t
+            if (t > max) max = t
+        }
+
+        const mean = sum / count
+
+        // Calculate standard deviation (jitter)
+        let sumSq = 0
+        for (let i = 0; i < count; i++) {
+            const diff = this._frameTimeBuffer[i] - mean
+            sumSq += diff * diff
+        }
+        const std = Math.sqrt(sumSq / count)
+
+        return { mean, std, min, max, count }
+    }
+
+    /**
+     * Reset frame time tracking buffer
+     */
+    resetFrameTimeStats() {
+        this._frameTimeIndex = 0
+        this._frameTimeCount = 0
+        this._lastRenderTime = 0
     }
 
     /** @returns {string} Current DSL source */
@@ -948,7 +1002,15 @@ export class CanvasRenderer {
         // below then blits that into its surface and runs any 2D effects.
         // Awaited, so a single-shot render + readback sees the scene it just
         // asked for rather than the previous frame's.
-        await this._renderScene(normalizedTime * this._loopDuration * 1000, normalizedTime)
+        //
+        // Gated on _isScene rather than awaiting unconditionally: a program
+        // with no scene has nothing to wait for, and awaiting anyway pushes
+        // the pipeline past a microtask. render() is synchronous for 2D
+        // programs and hosts call it that way — set a uniform, render, read
+        // the canvas back — so the readback would see the previous frame.
+        if (this._isScene) {
+            await this._renderScene(normalizedTime * this._loopDuration * 1000, normalizedTime)
+        }
 
         if (this._pipeline && !this._isContextLost) {
             try {
@@ -1059,7 +1121,10 @@ export class CanvasRenderer {
         // the last completed scene texture instead, and the in-flight render
         // lands on whichever frame it finishes in. Single-shot render() keeps
         // the strict await: a capture must see the frame it asked for.
-        if (!this._sceneRenderPending) {
+        // Same _isScene gate as render(): a 2D frame has no scene to wait for,
+        // and awaiting anyway moves every draw out of the rAF callback and into
+        // a microtask after it.
+        if (this._isScene && !this._sceneRenderPending) {
             await this._renderScene(time, normalizedTime)
             // Teardown can land while the scene render is in flight.
             if (!this._isRunning) return
@@ -1068,7 +1133,18 @@ export class CanvasRenderer {
         if (this._pipeline) {
             // Normal effect pipeline rendering path
             try {
+                const renderStart = performance.now()
                 this._pipeline.render(normalizedTime)
+                const renderEnd = performance.now()
+
+                // Track frame time for jitter measurement
+                const frameTime = renderEnd - renderStart
+                this._frameTimeBuffer[this._frameTimeIndex] = frameTime
+                this._frameTimeIndex = (this._frameTimeIndex + 1) % this._frameTimeBufferSize
+                if (this._frameTimeCount < this._frameTimeBufferSize) {
+                    this._frameTimeCount++
+                }
+                this._lastRenderTime = frameTime
                 this._lastPassCount = this._pipeline.lastPassCount
 
                 this._frameCount++
@@ -1369,6 +1445,20 @@ export class CanvasRenderer {
                 this._sceneRenderPending = null
                 this._sceneRenderer = new SceneRenderer(this._pipeline.backend, this._pipeline)
                 await this._sceneRenderer.initialize(this._width, this._height)
+            } else {
+                // Same backend, same renderer, new tree. Geometry textures are
+                // cached by mesh type and params and never evicted on their
+                // own, so live-editing mesh("sphere", segments: N) stranded
+                // three textures per distinct value for the life of the
+                // backend. A render still in flight may be drawing from that
+                // cache, so let it settle first; the next frame re-uploads
+                // whatever the new tree declares.
+                if (this._sceneRenderPending) await this._sceneRenderPending
+                if (!this._isLifecycleCurrent(lifecycleGeneration) ||
+                    this._pipeline !== compiledPipeline) {
+                    return null
+                }
+                this._sceneRenderer.releaseGeometry()
             }
         }
 

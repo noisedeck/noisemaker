@@ -45,6 +45,32 @@ function assertStable(src, label) {
     return once
 }
 
+test('an unparsed scene is emitted one argument per line', () => {
+    // A thirty-line scene came back from the demo's parameter round-trip as
+    // one line joined with ', '. Block calls (scene, group) now put settings
+    // first and every argument on its own line; everything else stays inline.
+    const out = assertStable(`search synth
+scene(ambient: 0.15, camera(fov: 60, pos: [0, 3, -8]), light(type: "directional", dir: [1, -1, 1]), group(id: "rig", rot: [0, osc(type: oscKind.saw), 0], mesh("sphere", radius: 1.3, pos: [0, 0.7, 0]), mesh("box", size: [1, 1, 1]).material(solid(color: [0.8, 0.2, 0.1]).pbr(metallic: 0.9)))).write(o0)
+render(o0)`, 'block layout')
+    const lines = out.split('\n')
+    const open = lines.indexOf('scene(')
+    assert.ok(open >= 0, `scene( opens its own line:\n${out}`)
+    assert.deepStrictEqual(lines.slice(open, open + 12), [
+        'scene(',
+        '  ambient: 0.15,',
+        '  camera(fov: 60, pos: [0, 3, -8]),',
+        '  light(type: "directional", dir: [1, -1, 1]),',
+        '  group(',
+        '    id: "rig",',
+        '    rot: [0, osc(type: oscKind.saw, min: 0, max: 1, speed: 1, offset: 0, seed: 1), 0],',
+        '    mesh("sphere", radius: 1.3, pos: [0, 0.7, 0]),',
+        '    mesh("box", size: [1, 1, 1]).material(solid(color: [0.8, 0.2, 0.1]).pbr(metallic: 0.9))',
+        '  )',
+        ')',
+        '  .write(o0)'
+    ], `block layout:\n${out}`)
+})
+
 test('a minimal scene round-trips', () => {
     assertStable('search synth\nscene(camera(fov: 60)).write(o0)\nrender(o0)', 'minimal')
 })

@@ -470,7 +470,15 @@ export function marchingCubes(field, xRes, yRes, zRes, threshold) {
             normals.push(nrm[0], nrm[1], nrm[2])
           }
 
-          indices.push(baseIndex, baseIndex + 1, baseIndex + 2)
+          // Reversed relative to the table order. Bourke's triangle table,
+          // paired with the `value < threshold` inside test above, lists each
+          // triangle wound around the inside of the surface; emitted verbatim
+          // its geometric normal opposes the +gradient normals stored beside
+          // it. The mesh pass draws frontFace(CCW) / cullFace(BACK), so that
+          // order culls the exterior of every face. Every primitive in
+          // primitives.js — and the OBJ parser — is wound the other way, and
+          // this is the one packing path they all share.
+          indices.push(baseIndex, baseIndex + 2, baseIndex + 1)
         }
       }
     }

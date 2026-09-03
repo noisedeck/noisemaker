@@ -98,7 +98,20 @@ function formatOscillator(osc) {
  * @param {object} node - AST node from the preserved scene tree
  * @returns {string} DSL source for the node
  */
-function formatSceneAst(node) {
+/**
+ * Calls whose arguments are emitted one per line when a block indent is in
+ * effect. A scene is routinely thirty lines of nodes; joined with ', ' it came
+ * back from the demo's parameter round-trip as a single unreadable line.
+ */
+const SCENE_BLOCK_CALLS = new Set(['scene', 'group'])
+
+/**
+ * @param {object} node - AST node from the preserved scene tree
+ * @param {?string} [indent] - Current line indent when emitting the scene as
+ *   a block (one argument per line); null emits everything inline, which is
+ *   what array and object literals outside a scene want.
+ */
+function formatSceneAst(node, indent = null) {
     if (node === null || node === undefined) return 'null'
     // A let binding that reached this arg was inlined by the validator's
     // substitute(), which tags the copy with the name it came from. Emitting
@@ -107,14 +120,29 @@ function formatSceneAst(node) {
     if (typeof node._varRef === 'string') return node._varRef
     switch (node.type) {
         case 'Call': {
-            const parts = (node.args ?? []).map(formatSceneAst)
-            for (const [key, value] of Object.entries(node.kwargs ?? {})) {
+            const positionals = node.args ?? []
+            const keywords = Object.entries(node.kwargs ?? {})
+            if (indent !== null && SCENE_BLOCK_CALLS.has(node.name) &&
+                positionals.length + keywords.length > 0) {
+                // Settings first, then children, one per line. Positional and
+                // keyword arguments are stored apart, so their interleaving in
+                // the source is not recoverable; this order reads naturally.
+                const inner = `${indent}  `
+                const lines = keywords.map(([key, value]) =>
+                    `${inner}${key}: ${formatSceneAst(value)}`)
+                for (const arg of positionals) {
+                    lines.push(`${inner}${formatSceneAst(arg, inner)}`)
+                }
+                return `${node.name}(\n${lines.join(',\n')}\n${indent})`
+            }
+            const parts = positionals.map(arg => formatSceneAst(arg))
+            for (const [key, value] of keywords) {
                 parts.push(`${key}: ${formatSceneAst(value)}`)
             }
             return `${node.name}(${parts.join(', ')})`
         }
         case 'Chain':
-            return (node.chain ?? []).map(formatSceneAst).join('.')
+            return (node.chain ?? []).map(el => formatSceneAst(el, indent)).join('.')
         case 'ArrayLiteral':
             return `[${(node.elements ?? []).map(formatSceneAst).join(', ')}]`
         case 'Object': {
@@ -1007,7 +1035,7 @@ export function unparse(compiled, overrides = {}, options = {}) {
             }
             // Scene steps carry their original AST rather than validated args.
             if (step.scene && step.args?._ast) {
-                currentChain.push(makeChainElement(formatSceneAst(step.args._ast)))
+                currentChain.push(makeChainElement(formatSceneAst(step.args._ast, '')))
                 globalStepIndex++
                 continue
             }

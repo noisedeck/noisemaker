@@ -314,3 +314,94 @@ test('scene() itself still passes through to the scene compiler',
             throw new Error(`Expected a chain-initial scene() to be clean, got ${JSON.stringify(result.diagnostics)}`)
         }
     })
+
+// ---------------------------------------------------------------------------
+// `let` bindings inside an animation descriptor.
+//
+// substitute() rebuilds Oscillator nodes so a `let`-bound value reaches the
+// descriptor's fields, but Midi and Audio nodes were returned untouched. The
+// binding then never resolved: the 2D path's resolveMidiParam/resolveAudioParam
+// see an Ident, return undefined, and fall back to the parameter's DEFAULT — so
+// `let ch = 5; midi(channel: ch)` silently played channel 1. In a scene() the
+// same node reaches the scene compiler and throws
+// `midi() channel must be a number`.
+// ---------------------------------------------------------------------------
+
+registerOp('synth.descarg', {
+    name: 'descarg',
+    args: [{ name: 'scale', type: 'float', default: 1, min: 0, max: 100 }]
+})
+registerStarterOps(['synth.noise', 'synth.descarg'])
+
+test('a let binding resolves inside midi()',
+    'search synth\nlet ch = 5\ndescarg(scale: midi(channel: ch)).write(o0)', (result) => {
+        const step = result.plans[0].chain.find(s => s.op === 'synth.descarg')
+        const value = step.args.scale
+        if (value?.type !== 'Midi') throw new Error(`Expected a Midi descriptor, got ${JSON.stringify(value)}`)
+        if (value.channel !== 5) throw new Error(`Expected channel 5 from the let binding, got ${value.channel}`)
+    })
+
+test('a let binding resolves inside midi() mode',
+    'search synth\nlet m = midiMode.gateNote\ndescarg(scale: midi(channel: 2, mode: m)).write(o0)', (result) => {
+        const value = result.plans[0].chain.find(s => s.op === 'synth.descarg').args.scale
+        if (value?.mode !== 1) throw new Error(`Expected midiMode.gateNote (1) from the let binding, got ${value?.mode}`)
+    })
+
+test('a let binding resolves inside audio()',
+    'search synth\nlet lo = 0.25\ndescarg(scale: audio(band: audioBand.low, min: lo)).write(o0)', (result) => {
+        const value = result.plans[0].chain.find(s => s.op === 'synth.descarg').args.scale
+        if (value?.type !== 'Audio') throw new Error(`Expected an Audio descriptor, got ${JSON.stringify(value)}`)
+        if (value.min !== 0.25) throw new Error(`Expected min 0.25 from the let binding, got ${value.min}`)
+    })
+
+// ---------------------------------------------------------------------------
+// A positional hex colour splatting across an r/g/b triple.
+//
+// The splat was detected only when the 'r' slot was filled by that positional,
+// so naming `r:` as a keyword stood the splat down: the Color fell through to
+// the 'g' float slot, which defaulted g AND b and reported a bogus S002 about
+// 'g'. The colour claims the whole triple; a keyword overrides its own member.
+// ---------------------------------------------------------------------------
+
+registerOp('synth.rgbprobe', {
+    name: 'rgbprobe',
+    args: [
+        { name: 'r', type: 'float', default: 1, min: 0, max: 1 },
+        { name: 'g', type: 'float', default: 1, min: 0, max: 1 },
+        { name: 'b', type: 'float', default: 1, min: 0, max: 1 }
+    ]
+})
+
+function rgbOf(result) {
+    const step = result.plans[0].chain.find(s => s.op === 'synth.rgbprobe')
+    return [step.args.r, step.args.g, step.args.b]
+}
+const HEX = [0x80 / 255, 0x40 / 255, 0x20 / 255]
+const near = (a, b) => Math.abs(a - b) < 1e-9
+
+test('a positional hex colour splats across r/g/b',
+    'search synth\nnoise().rgbprobe(#804020).write(o0)', (result) => {
+        const [r, g, b] = rgbOf(result)
+        if (!near(r, HEX[0]) || !near(g, HEX[1]) || !near(b, HEX[2])) {
+            throw new Error(`Expected the hex components, got ${JSON.stringify([r, g, b])}`)
+        }
+        if (result.diagnostics.length > 0) throw new Error(`Expected no diagnostics, got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+test('a g: keyword overrides only its own member of a splatted hex colour',
+    'search synth\nnoise().rgbprobe(#804020, g: 0.25).write(o0)', (result) => {
+        const [r, g, b] = rgbOf(result)
+        if (!near(r, HEX[0]) || g !== 0.25 || !near(b, HEX[2])) {
+            throw new Error(`Expected r/b from the hex and g from the keyword, got ${JSON.stringify([r, g, b])}`)
+        }
+        if (result.diagnostics.length > 0) throw new Error(`Expected no diagnostics, got ${JSON.stringify(result.diagnostics)}`)
+    })
+
+test('an r: keyword overrides only its own member of a splatted hex colour',
+    'search synth\nnoise().rgbprobe(#804020, r: 0.25).write(o0)', (result) => {
+        const [r, g, b] = rgbOf(result)
+        if (r !== 0.25 || !near(g, HEX[1]) || !near(b, HEX[2])) {
+            throw new Error(`Expected g/b from the hex and r from the keyword, got ${JSON.stringify([r, g, b])}`)
+        }
+        if (result.diagnostics.length > 0) throw new Error(`Expected no diagnostics, got ${JSON.stringify(result.diagnostics)}`)
+    })

@@ -6,6 +6,42 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let activeServer = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    const server = activeServer
+    activeServer = null
+    try {
+        server?.close()
+    } catch {
+        // Server already closed.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { activeServer?.close() } catch { /* already closed */ }
+})
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '../..')
@@ -463,6 +499,7 @@ async function main() {
     const expectedBackend = useWebGL ? 'WebGL2' : 'WebGPU'
 
     const server = await startServer()
+    activeServer = server
     const port = server.address().port
     // Headed: the headless adapter exposes the default
     // maxColorAttachmentBytesPerSample of 32, and this pipeline's G-buffer
@@ -472,6 +509,7 @@ async function main() {
         headless: false,
         args: ['--enable-unsafe-webgpu', '--enable-webgpu-developer-features']
     })
+    activeBrowser = browser
 
     try {
         const page = await browser.newPage({

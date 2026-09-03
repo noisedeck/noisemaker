@@ -76,6 +76,23 @@ export function parse(tokens) {
         return comments
     }
 
+    /**
+     * Discard any pending COMMENT tokens.
+     *
+     * Comments were consumed only between statements and between chain links,
+     * so one written inside a call's parentheses — or an array or object
+     * literal — was `Unexpected token COMMENT`. scene() is the one construct
+     * that routinely runs to forty lines, and annotating its children is the
+     * first thing anyone tries.
+     *
+     * These are DROPPED rather than attached: an argument list is re-emitted on
+     * one line (see formatSceneAst in unparser.js), where a line comment would
+     * swallow everything after it and the text would no longer reparse.
+     */
+    function skipComments() {
+        while (peek()?.type === 'COMMENT') advance()
+    }
+
     const exprStartTokens = new Set([
         'PLUS', 'MINUS', 'NUMBER', 'HEX', 'FUNC', 'STRING',
         'IDENT', 'OUTPUT_REF', 'SOURCE_REF', 'VOL_REF', 'GEO_REF', 'MESH_REF',
@@ -838,18 +855,22 @@ export function parse(tokens) {
         let keyword = false
 
         function parseNextArg() {
+            skipComments()
             if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
                 keyword = true
                 parseKwarg(kwargs)
             } else {
                 args.push(parseArg())
             }
+            skipComments()
         }
 
+        skipComments()
         if (peek().type !== 'RPAREN') {
             parseNextArg()
             while (peek().type === 'COMMA') {
                 advance()
+                skipComments()
                 if (peek().type === 'RPAREN') break
                 parseNextArg()
             }
@@ -1012,11 +1033,16 @@ export function parse(tokens) {
                 const startCol = token.col
                 advance()
                 const elements = []
+                skipComments()
                 if (peek().type !== 'RBRACKET') {
                     elements.push(parseArg())
+                    skipComments()
                     while (peek().type === 'COMMA') {
                         advance()
+                        skipComments()
+                        if (peek().type === 'RBRACKET') break
                         elements.push(parseArg())
+                        skipComments()
                     }
                 }
                 if (peek().type !== 'RBRACKET') {
@@ -1103,16 +1129,22 @@ export function parse(tokens) {
             case 'LBRACE': {
                 advance()
                 const properties = {}
+                skipComments()
                 if (peek().type !== 'RBRACE') {
                     const key = expect('IDENT', 'Expected property name').lexeme
                     expect('COLON', "Expect ':'")
+                    skipComments()
                     properties[key] = parseAdditive()
+                    skipComments()
                     while (peek().type === 'COMMA') {
                         advance()
+                        skipComments()
                         if (peek().type === 'RBRACE') break
                         const nextKey = expect('IDENT', 'Expected property name').lexeme
                         expect('COLON', "Expect ':'")
+                        skipComments()
                         properties[nextKey] = parseAdditive()
+                        skipComments()
                     }
                 }
                 expect('RBRACE', "Expect '}'")
@@ -1133,6 +1165,7 @@ export function parse(tokens) {
     function parseKwarg(obj) {
         const key = expect('IDENT', 'Expected identifier').lexeme
         expect('COLON', "Expect ':'")
+        skipComments()
         if (!exprStartTokens.has(peek().type)) {
             const t = peek()
             throw new SyntaxError(`Expected expression after '=' at line ${t.line} col ${t.col}`)

@@ -59,18 +59,53 @@ export function decomposeTransform(matrix) {
   }
 }
 
-export function lookAtMatrix(eye, center, up) {
-  const out = mat4.create()
-  mat4.lookAt(out,
-    vec3.fromValues(eye[0], eye[1], eye[2]),
-    vec3.fromValues(center[0], center[1], center[2]),
-    vec3.fromValues(up[0], up[1], up[2])
-  )
+/**
+ * Float32 stand-ins for the eye/centre/up a view matrix is built from.
+ *
+ * The three vectors used to be `vec3.fromValues(...)`, which rounds each
+ * component to float32 BEFORE gl-matrix does any arithmetic. Handing
+ * `mat4.lookAt` the caller's plain (float64) arrays instead would do the
+ * normalisation at double precision and round only the result, moving the
+ * matrix by an ulp or two. These buffers keep the original rounding, and
+ * keep the call allocation-free: it sits on the per-frame render path, which
+ * is single-threaded and never yields between the copy and the call.
+ */
+const LOOK_EYE = new Float32Array(3)
+const LOOK_CENTER = new Float32Array(3)
+const LOOK_UP = new Float32Array(3)
+
+/**
+ * View matrix for an eye looking at a centre, written into `out`.
+ *
+ * `out` is written in every case — `mat4.lookAt` fills all sixteen elements,
+ * and its degenerate eye-equals-centre branch writes an identity — so a reused
+ * buffer can never carry a previous frame's value forward.
+ * @param {Float32Array} out - Destination matrix
+ * @param {ArrayLike<number>} eye - Eye position
+ * @param {ArrayLike<number>} center - Point looked at
+ * @param {ArrayLike<number>} up - Up direction
+ * @returns {Float32Array} out
+ */
+export function lookAtMatrix(out, eye, center, up) {
+  for (let i = 0; i < 3; i++) {
+    LOOK_EYE[i] = eye[i]
+    LOOK_CENTER[i] = center[i]
+    LOOK_UP[i] = up[i]
+  }
+  mat4.lookAt(out, LOOK_EYE, LOOK_CENTER, LOOK_UP)
   return out
 }
 
-export function perspectiveMatrix(fovDeg, aspect, near, far) {
-  const out = mat4.create()
+/**
+ * Symmetric perspective projection, written into `out`.
+ * @param {Float32Array} out - Destination matrix
+ * @param {number} fovDeg - Vertical field of view in degrees
+ * @param {number} aspect - Width / height of the target
+ * @param {number} near - Near plane distance
+ * @param {number} far - Far plane distance
+ * @returns {Float32Array} out
+ */
+export function perspectiveMatrix(out, fovDeg, aspect, near, far) {
   mat4.perspective(out, degToRad(fovDeg), aspect, near, far)
   return out
 }
@@ -86,7 +121,7 @@ export function perspectiveMatrix(fovDeg, aspect, near, far) {
  * renders exactly the tile's content, at the tile's full resolution, with no
  * shader change at all: the projection matrix is the only thing that moves.
  *
- * Derivation. `perspectiveMatrix(fov, aspect, near, far)` is, by definition,
+ * Derivation. `perspectiveMatrix(out, fov, aspect, near, far)` is, by definition,
  * the symmetric frustum
  *
  *   top = near * tan(fov / 2)      right = top * aspect
@@ -106,15 +141,16 @@ export function perspectiveMatrix(fovDeg, aspect, near, far) {
  * the 2D path (gl_FragCoord.y is bottom-up, and the tile-parity gate crops
  * full frames from the bottom-left on both backends).
  *
+ * @param {Float32Array} out - Destination matrix
  * @param {number} fovDeg - Vertical field of view in degrees
  * @param {number} near - Near plane distance
  * @param {number} far - Far plane distance
  * @param {{x: number, y: number, width: number, height: number,
  *          fullWidth: number, fullHeight: number}} tile - Tile rectangle in
  *   full-image pixels, with the origin at the bottom-left
- * @returns {Float32Array} Off-centre projection matrix for the tile
+ * @returns {Float32Array} out, the off-centre projection matrix for the tile
  */
-export function tileFrustumMatrix(fovDeg, near, far, tile) {
+export function tileFrustumMatrix(out, fovDeg, near, far, tile) {
   const top = near * Math.tan(degToRad(fovDeg) * 0.5)
   const right = top * (tile.fullWidth / tile.fullHeight)
 
@@ -123,7 +159,6 @@ export function tileFrustumMatrix(fovDeg, near, far, tile) {
   const bottom = -top + 2 * top * (tile.y / tile.fullHeight)
   const tileTop = -top + 2 * top * ((tile.y + tile.height) / tile.fullHeight)
 
-  const out = mat4.create()
   mat4.frustum(out, left, tileRight, bottom, tileTop, near, far)
   return out
 }

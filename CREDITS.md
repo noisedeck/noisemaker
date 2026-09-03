@@ -14,3 +14,33 @@ Noisemaker's shader effects build on work generously shared by the creative codi
 - [Simplex, cell noise](https://github.com/ashima/webgl-noise/) by Ian McEwan, Ashima Arts (maintained by Stefan Gustavson)
 - [Smooth minimum, 3D SDFs](https://www.iquilezles.org/www/index.htm) by Inigo Quilez
 - [Tunnel shader](https://www.shadertoy.com/view/Ms2SWW) by Inigo Quilez
+
+## Third-party libraries
+
+The shader runtime bundles the following library into the distributed
+`noisemaker-shaders-core` files. Its license notice is reproduced here because
+the bundles are built without source comments.
+
+### gl-matrix
+
+[gl-matrix](https://glmatrix.net/) by Brandon Jones and Colin MacKenzie IV, used by the scene graph for vector, matrix and quaternion math. MIT License:
+
+> Copyright (c) 2015-2025, Brandon Jones, Colin MacKenzie IV.
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in
+> all copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+> THE SOFTWARE.

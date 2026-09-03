@@ -4,7 +4,7 @@
 // and executing them via the existing WebGL2 backend. Never calls gl.* directly.
 
 import { GBufferConfig } from './gbuffer.js'
-import { MeshRenderer } from './mesh-renderer.js'
+import { MeshRenderer, SCENE_GBUFFER_PASS_ID } from './mesh-renderer.js'
 import { VolumeRenderer } from './volume-renderer.js'
 import { volumeFragmentGLSL, volumeFragmentWGSL } from './volume-shaders.js'
 import { presentShader, tonemapPresentShader } from './post-shaders.js'
@@ -177,9 +177,118 @@ function aimCameraAtCubeFace(camera, position, face, upSign) {
 
 const LIGHT_TYPE_CODE = Object.freeze({ point: 0, directional: 1, spot: 2 })
 
-// Shared by every untiled frame so the live loop never allocates for it.
-const ZERO_TILE_OFFSET = Object.freeze([0, 0])
+/**
+ * Uniform names for one light slot, interned per index.
+ *
+ * `u_lights[i].position` and its seven siblings were built from template
+ * literals inside the per-frame uniform walk — eight strings per light per
+ * frame. The names depend only on the index, so they are built once and reused
+ * for the life of the module.
+ * @param {number} index - Light slot
+ * @returns {object} The eight uniform names for that slot
+ */
+const LIGHT_UNIFORM_KEYS = []
+function lightUniformKeys(index) {
+  let keys = LIGHT_UNIFORM_KEYS[index]
+  if (!keys) {
+    const prefix = `u_lights[${index}]`
+    keys = {
+      position: `${prefix}.position`,
+      color: `${prefix}.color`,
+      intensity: `${prefix}.intensity`,
+      lightType: `${prefix}.lightType`,
+      direction: `${prefix}.direction`,
+      cosInner: `${prefix}.cosInner`,
+      cosOuter: `${prefix}.cosOuter`,
+      falloff: `${prefix}.falloff`
+    }
+    LIGHT_UNIFORM_KEYS[index] = keys
+  }
+  return keys
+}
+
+/**
+ * Read-only stand-ins for values a scene may leave unset.
+ *
+ * Each was an inline literal on the per-frame path, so an unset background (or
+ * a light with no explicit colour) minted a fresh array every tick. Frozen
+ * because they are shared by every frame and every pass that falls back to
+ * them.
+ */
+const DEFAULT_BACKGROUND = Object.freeze([0, 0, 0])
+const DEFAULT_CAMERA_POSITION = Object.freeze([0, 0, 5])
+const DEFAULT_TARGET = Object.freeze([0, 0, 0])
+const DEFAULT_UP = Object.freeze([0, 1, 0])
+const DEFAULT_LIGHT_POSITION = Object.freeze([0, 0, 0])
+const DEFAULT_LIGHT_COLOR = Object.freeze([1, 1, 1])
+const DEFAULT_LIGHT_DIRECTION = Object.freeze([0, -1, 0])
+
+/** The main G-buffer's targets, for the nothing-drew clear. */
+const GBUF_OUTPUTS = Object.freeze({
+  color0: 'scene_gbuf_albedo_metallic',
+  color1: 'scene_gbuf_normal_roughness',
+  color2: 'scene_gbuf_position_emission',
+  color3: 'scene_gbuf_depth'
+})
+
+/** Hoisted out of `meshNodes.find(...)`, which built a closure every frame. */
+const IS_PLANAR_REFLECTOR = node => node.planarReflection
+
+/**
+ * Colour-attachment bytes per sample, by texture format.
+ *
+ * Mirrors Pipeline.mrtFormatBytes for the two formats the scene G-buffer uses.
+ * The pipeline's own table has no r32f entry (its MRT surfaces are all rgba),
+ * and a single-channel 32-bit target costs four bytes, not eight.
+ */
+const FORMAT_BYTES_PER_SAMPLE = Object.freeze({ rgba16f: 8, r32f: 4 })
+
+/** What one G-buffer sample costs across its four colour attachments. */
+const GBUF_BYTES_PER_SAMPLE = GBUF_TEXTURES.reduce(
+  (total, tex) => total + FORMAT_BYTES_PER_SAMPLE[tex.format], 0)
+
 const ALL_TEXTURES = [...GBUF_TEXTURES, ...PLANAR_GBUF_TEXTURES, ...WORK_TEXTURES]
+
+/**
+ * One deferred-lighting pass, built once and rewritten in place each frame.
+ *
+ * The three variants — the main view, the mirrored planar view, and each probe
+ * face — run one program over different G-buffers into different targets. What
+ * is fixed for the life of a variant is set here; the two swappable inputs and
+ * the whole uniform block are rewritten every frame by the caller.
+ *
+ * Input key ORDER is load-bearing on WebGL2, which assigns texture units in
+ * insertion order, so it matches what these passes have always declared.
+ * @param {string} id - Pass id
+ * @param {object} gbuf - colorN -> texture id map of the G-buffer to light
+ * @param {string} target - Texture the lit result is written to
+ * @param {number} [cubeFace] - Cube face index; omitted for a 2D target
+ * @returns {{pass: object, lightCount: number}} Reusable state; lightCount is
+ *   how many light slots the uniform block currently carries
+ */
+function lightingPassState(id, gbuf, target, cubeFace) {
+  const pass = {
+    id,
+    program: 'scene_lighting',
+    inputs: {
+      u_albedoMetallic: gbuf.color0,
+      u_normalRoughness: gbuf.color1,
+      u_positionEmission: gbuf.color2,
+      u_depth: gbuf.color3,
+      u_ssao: 'scene_albedo_fallback',
+      u_envTexture: 'scene_albedo_fallback',
+      u_reflectionProbe: REFLECTION_PROBE_FALLBACK
+    },
+    outputs: { color0: target },
+    drawBuffers: 1
+  }
+  // Inserted here, between drawBuffers and clear, so a probe face's descriptor
+  // enumerates exactly as it did when it was rebuilt per frame.
+  if (cubeFace !== undefined) pass.cubeFace = cubeFace
+  pass.clear = true
+  pass.uniforms = {}
+  return { pass, lightCount: -1 }
+}
 
 export class SceneRenderer {
   constructor(backend, existingPipeline) {
@@ -238,9 +347,149 @@ export class SceneRenderer {
     // beginCubemapExport for why an export captures the probe exactly once.
     this._probeFrozen = false
     this._probeStateBeforeExport = null
+
+    /**
+     * Everything a frame hands the backend, built once and rewritten in place.
+     *
+     * The project bans per-frame allocation in render loops, and this file
+     * said so over the view-projection buffers above while rebuilding a frame
+     * state, five fullscreen pass descriptors, one more per probe face, and
+     * every one of their inputs/outputs/uniform objects on each tick. The mesh
+     * and volume renderers already reuse their per-node passes; these are the
+     * rest of the frame.
+     *
+     * Only two things reshape any of this, and neither happens in a steady
+     * loop: a light count change (which also recompiles the lighting shader,
+     * and drops the surplus u_lights[] keys here) and a resize (which
+     * reallocates textures, not descriptors — the ids are stable, so the
+     * descriptors survive it untouched).
+     */
+    this._frameState = {
+      frameIndex: 0,
+      time: 0,
+      globalUniforms: { u_time: 0, u_resolution: [0, 0] },
+      surfaces: {},
+      writeSurfaces: {},
+      screenWidth: 0,
+      screenHeight: 0
+    }
+    // The names currently present in frameState.surfaces, and the buffer next
+    // frame fills. A name the pipeline has stopped publishing has to be
+    // deleted from the reused map rather than left to resolve against a
+    // destroyed texture; the two arrays swap each frame so the bookkeeping
+    // allocates nothing.
+    this._surfaceNames = []
+    this._surfaceNamesScratch = []
+    /**
+     * The flat grey settings.sky and settings.ground fall back to.
+     *
+     * It cannot be a frozen constant: the value is settings.ambient, which the
+     * scene owns. One buffer serves both uniforms — they take the same value,
+     * and a pass only ever reads them.
+     */
+    this._ambientColor = [0, 0, 0]
+    // SSAO's tile-local dither offset, (0,0) on every untiled frame.
+    this._tileOffset = [0, 0]
+
+    this._ssaoPass = {
+      id: 'scene_ssao_pass',
+      program: 'scene_ssao',
+      inputs: {
+        u_normalRoughness: 'scene_gbuf_normal_roughness',
+        u_positionEmission: 'scene_gbuf_position_emission',
+        u_depth: 'scene_gbuf_depth'
+      },
+      outputs: { color: 'scene_ssao' },
+      clear: true,
+      uniforms: {
+        u_viewProj: this._viewProj,
+        u_cameraPos: DEFAULT_CAMERA_POSITION,
+        u_radius: 0.75,
+        // The SSAO kernel-rotation hash seeds from the fragment coordinate,
+        // which is tile-local under tiled export — without the tile's pixel
+        // offset each tile re-dithers with a different phase. (0,0) leaves
+        // untiled output byte-identical.
+        u_tileOffset: this._tileOffset
+      }
+    }
+
+    this._lightingPassState = lightingPassState(
+      'scene_lighting', GBUF_OUTPUTS, 'scene_lit_color')
+    this._planarLightingPassState = lightingPassState(
+      'scene_planar_lighting', PLANAR_GBUF_OUTPUTS, 'scene_planar_lit')
+    this._probeLightingPassStates = CUBE_FACES.map((_, face) => lightingPassState(
+      `scene_probe_lighting_face_${face}`,
+      PROBE_GBUF_OUTPUTS,
+      REFLECTION_PROBE_TEXTURE,
+      face
+    ))
+
+    this._ssrPass = {
+      id: 'scene_ssr_pass',
+      program: 'scene_ssr',
+      inputs: {
+        u_litColor: 'scene_lit_color',
+        u_albedoMetallic: 'scene_gbuf_albedo_metallic',
+        u_normalRoughness: 'scene_gbuf_normal_roughness',
+        u_positionEmission: 'scene_gbuf_position_emission',
+        u_depth: 'scene_gbuf_depth',
+        u_planarReflection: 'scene_albedo_fallback'
+      },
+      outputs: { color: 'scene_reflect_color' },
+      clear: true,
+      uniforms: {
+        u_viewProj: this._viewProj,
+        u_reflectionViewProj: this._reflectionViewProj,
+        u_cameraPos: DEFAULT_CAMERA_POSITION,
+        u_reflStrength: 1,
+        u_planarEnabled: 0,
+        u_planePoint: this._planePoint,
+        u_planeNormal: this._planeNormal
+      }
+    }
+
+    this._presentPass = {
+      id: 'scene_tonemap_present',
+      program: 'scene_tonemap_present',
+      inputs: { u_texture: 'scene_lit_color' },
+      outputs: { color: 'screen' },
+      clear: true,
+      uniforms: { u_exposure: 1 }
+    }
+  }
+
+  /**
+   * Refuse a device whose colour-attachment budget cannot hold the G-buffer.
+   *
+   * The 2D pipeline handles an over-budget MRT pass by demoting trailing
+   * rgba32f attachments to rgba16f (Pipeline.applyMrtFormatBudget, measured
+   * against `backend.capabilities.maxColorBytesPerSample`). The scene
+   * G-buffer has nothing to demote — three rgba16f plus an r32f depth is
+   * already the minimum the deferred shaders can reconstruct from — and it
+   * bypasses that pass entirely, because these textures are created here
+   * rather than declared in the pipeline's graph.
+   *
+   * So the budget is checked instead of trimmed. Without this the framebuffer
+   * simply comes back FRAMEBUFFER_UNSUPPORTED on every frame, one console warn
+   * at a time, with nothing on screen and no statement of why; a throw out of
+   * initialize() surfaces through compile() where a host can report it.
+   * @private
+   */
+  _assertColorBudget() {
+    const budget = this.backend?.capabilities?.maxColorBytesPerSample
+    if (typeof budget !== 'number' || budget >= GBUF_BYTES_PER_SAMPLE) return
+    const formats = GBUF_TEXTURES.map(tex => tex.format).join(' + ')
+    throw new Error(
+      `Scene G-buffer pass '${SCENE_GBUFFER_PASS_ID}' needs ` +
+      `${GBUF_BYTES_PER_SAMPLE} bytes per sample across ${GBUF_TEXTURES.length} ` +
+      `colour attachments (${formats}), but this device allows ${budget}. ` +
+      'The deferred scene renderer cannot run here; its attachment formats are ' +
+      'already at the minimum the lighting pass can reconstruct from.'
+    )
   }
 
   async initialize(width, height) {
+    this._assertColorBudget()
     this._width = width
     this._height = height
     this.gbufferConfig = new GBufferConfig(width, height)
@@ -370,29 +619,49 @@ export class SceneRenderer {
     // encoder mid-flight on WebGPU.
     await this._ensureLightingShader(lights.length)
 
-    const frameState = {
-      frameIndex: this._frameIndex++,
-      time,
-      globalUniforms: {
-        u_time: time,
-        u_resolution: [width, height]
-      },
-      surfaces: {},
-      writeSurfaces: {},
-      screenWidth: width,
-      screenHeight: height
-    }
+    // Rewritten in place: one frame state for the life of the renderer. See
+    // the constructor.
+    const frameState = this._frameState
+    frameState.frameIndex = this._frameIndex++
+    frameState.time = time
+    frameState.globalUniforms.u_time = time
+    frameState.globalUniforms.u_resolution[0] = width
+    frameState.globalUniforms.u_resolution[1] = height
+    frameState.screenWidth = width
+    frameState.screenHeight = height
 
     // Expose the pipeline's surfaces (read side) so scene passes can bind
     // global_oN — surface(oN) materials and environment(oN) sample the
     // surface's previous-frame content, since the scene renders before the
     // pipeline's own frame each tick.
+    //
+    // The map is reused, so a name the pipeline has stopped publishing (a
+    // recompile with fewer surfaces) has to be removed rather than left to
+    // resolve against a destroyed texture.
+    const surfaces = frameState.surfaces
+    const previousNames = this._surfaceNames
+    const currentNames = this._surfaceNamesScratch
+    let count = 0
     if (this.pipeline?.surfaces) {
       for (const [name, surface] of this.pipeline.surfaces) {
         const tex = this.backend.textures?.get?.(surface.read)
-        if (tex) frameState.surfaces[name] = tex
+        if (!tex) continue
+        surfaces[name] = tex
+        currentNames[count++] = name
       }
     }
+    currentNames.length = count
+    for (let i = 0; i < previousNames.length; i++) {
+      const name = previousNames[i]
+      let live = false
+      for (let j = 0; j < count; j++) {
+        if (currentNames[j] === name) { live = true; break }
+      }
+      if (!live) delete surfaces[name]
+    }
+    // Swap rather than copy: next frame's scratch is this frame's record.
+    this._surfaceNames = currentNames
+    this._surfaceNamesScratch = previousNames
 
     // Bracket all scene passes in a backend frame. WebGL2 treats this as
     // cosmetic; WebGPU allocates its command encoder in beginFrame() and
@@ -419,12 +688,17 @@ export class SceneRenderer {
     }
   }
 
-  /** @private All per-frame pass execution; must contain no awaits. */
+  /**
+   * @private All per-frame pass execution; must contain no awaits, and must
+   * not allocate: every descriptor, uniform block and default array it submits
+   * is built once (in the constructor, or by the mesh and volume renderers)
+   * and rewritten in place here.
+   */
   _renderPasses(frameState, meshNodes, volumeNodes, materials, camera, lights, settings, environment, target, width, height, probeActive) {
     const reflStrength = settings.reflections ?? 1
     const aspect = width / height
     const reflector = reflStrength > 0
-      ? meshNodes.find(node => node.planarReflection)
+      ? meshNodes.find(IS_PLANAR_REFLECTOR)
       : null
     const planarActive = Boolean(
       reflector && this._preparePlanarReflection(reflector, camera, aspect)
@@ -432,9 +706,15 @@ export class SceneRenderer {
     const envTexture = environment ? `global_${environment.surface}` : 'scene_albedo_fallback'
     const envIntensity = environment ? (environment.intensity ?? 1) : 0
     const ambient = settings.ambient ?? 0.1
-    const sky = settings.sky ?? [ambient, ambient, ambient]
-    const ground = settings.ground ?? [ambient, ambient, ambient]
-    const background = settings.background ?? [0, 0, 0]
+    // One reused buffer behind both defaults — see _ambientColor.
+    const ambientColor = this._ambientColor
+    ambientColor[0] = ambient
+    ambientColor[1] = ambient
+    ambientColor[2] = ambient
+    const sky = settings.sky ?? ambientColor
+    const ground = settings.ground ?? ambientColor
+    const background = settings.background ?? DEFAULT_BACKGROUND
+    const cameraPosition = camera._position || DEFAULT_CAMERA_POSITION
 
     // A frozen probe is still sampled by lighting below; it is only the
     // capture that is skipped. See beginCubemapExport().
@@ -488,12 +768,7 @@ export class SceneRenderer {
     // Nothing filled the G-buffer, so zero it directly — the `depth <= 0`
     // no-hit sentinel every downstream pass reads is backed by this clear.
     if (meshPasses.length === 0 && volumePasses.length === 0) {
-      clearGBuffer(this.backend, {
-        color0: 'scene_gbuf_albedo_metallic',
-        color1: 'scene_gbuf_normal_roughness',
-        color2: 'scene_gbuf_position_emission',
-        color3: 'scene_gbuf_depth'
-      })
+      clearGBuffer(this.backend, GBUF_OUTPUTS)
     }
 
     // A planar reflector is a second view of the scene, not a screen-space
@@ -573,33 +848,47 @@ export class SceneRenderer {
     // procedural seeds. testSceneTileStitch measures both effects separately.
     const ssaoStrength = settings.ssao ?? 1
     if (ssaoStrength > 0) {
-      this.backend.executePass({
-        id: 'scene_ssao_pass',
-        program: 'scene_ssao',
-        inputs: {
-          u_normalRoughness: 'scene_gbuf_normal_roughness',
-          u_positionEmission: 'scene_gbuf_position_emission',
-          u_depth: 'scene_gbuf_depth'
-        },
-        outputs: { color: 'scene_ssao' },
-        clear: true,
-        uniforms: {
-          u_viewProj: this._viewProj,
-          u_cameraPos: camera._position || [0, 0, 5],
-          u_radius: settings.ssaoRadius ?? 0.75,
-          // The SSAO kernel-rotation hash seeds from the fragment coordinate,
-          // which is tile-local under tiled export — without the tile's pixel
-          // offset each tile re-dithers with a different phase. (0,0) leaves
-          // untiled output byte-identical.
-          u_tileOffset: camera.tile ? [camera.tile.x, camera.tile.y] : ZERO_TILE_OFFSET
-        }
-      }, frameState)
+      const ssaoUniforms = this._ssaoPass.uniforms
+      ssaoUniforms.u_cameraPos = cameraPosition
+      ssaoUniforms.u_radius = settings.ssaoRadius ?? 0.75
+      this._tileOffset[0] = camera.tile ? camera.tile.x : 0
+      this._tileOffset[1] = camera.tile ? camera.tile.y : 0
+      this.backend.executePass(this._ssaoPass, frameState)
     }
 
     // --- 2. Deferred lighting pass ---
     // (shader ensured before the frame opened — see render())
-    const lightingUniforms = this._buildLightingUniforms(
-      camera._position || [0, 0, 5],
+    const probeTexture = probeActive ? REFLECTION_PROBE_TEXTURE : REFLECTION_PROBE_FALLBACK
+
+    if (planarActive) {
+      const planar = this._planarLightingPassState
+      planar.pass.inputs.u_envTexture = envTexture
+      planar.pass.inputs.u_reflectionProbe = probeTexture
+      this._buildLightingUniforms(
+        planar,
+        this._reflectionCamera._position,
+        lights,
+        background,
+        sky,
+        ground,
+        0,
+        envIntensity,
+        probeActive ? 1 : 0,
+        0
+      )
+      this.backend.executePass(planar.pass, frameState)
+    }
+
+    const lighting = this._lightingPassState
+    // With SSAO off, u_ssaoStrength is 0 so the shader ignores the sample —
+    // any bindable texture satisfies the declaration. Same contract for the
+    // environment at intensity 0.
+    lighting.pass.inputs.u_ssao = ssaoStrength > 0 ? 'scene_ssao' : 'scene_albedo_fallback'
+    lighting.pass.inputs.u_envTexture = envTexture
+    lighting.pass.inputs.u_reflectionProbe = probeTexture
+    this._buildLightingUniforms(
+      lighting,
+      cameraPosition,
       lights,
       background,
       sky,
@@ -609,57 +898,7 @@ export class SceneRenderer {
       probeActive ? 1 : 0,
       0
     )
-
-    if (planarActive) {
-      this.backend.executePass({
-        id: 'scene_planar_lighting',
-        program: 'scene_lighting',
-        inputs: {
-          u_albedoMetallic: 'scene_planar_gbuf_albedo_metallic',
-          u_normalRoughness: 'scene_planar_gbuf_normal_roughness',
-          u_positionEmission: 'scene_planar_gbuf_position_emission',
-          u_depth: 'scene_planar_gbuf_depth',
-          u_ssao: 'scene_albedo_fallback',
-          u_envTexture: envTexture,
-          u_reflectionProbe: probeActive ? REFLECTION_PROBE_TEXTURE : REFLECTION_PROBE_FALLBACK
-        },
-        outputs: { color0: 'scene_planar_lit' },
-        drawBuffers: 1,
-        clear: true,
-        uniforms: this._buildLightingUniforms(
-          this._reflectionCamera._position,
-          lights,
-          background,
-          sky,
-          ground,
-          0,
-          envIntensity,
-          probeActive ? 1 : 0,
-          0
-        )
-      }, frameState)
-    }
-
-    this.backend.executePass({
-      id: 'scene_lighting',
-      program: 'scene_lighting',
-      inputs: {
-        u_albedoMetallic: 'scene_gbuf_albedo_metallic',
-        u_normalRoughness: 'scene_gbuf_normal_roughness',
-        u_positionEmission: 'scene_gbuf_position_emission',
-        u_depth: 'scene_gbuf_depth',
-        // With SSAO off, u_ssaoStrength is 0 so the shader ignores the
-        // sample — any bindable texture satisfies the declaration. Same
-        // contract for the environment at intensity 0.
-        u_ssao: ssaoStrength > 0 ? 'scene_ssao' : 'scene_albedo_fallback',
-        u_envTexture: envTexture,
-        u_reflectionProbe: probeActive ? REFLECTION_PROBE_TEXTURE : REFLECTION_PROBE_FALLBACK
-      },
-      outputs: { color0: 'scene_lit_color' },
-      drawBuffers: 1,
-      clear: true,
-      uniforms: lightingUniforms
-    }, frameState)
+    this.backend.executePass(lighting.pass, frameState)
 
     // --- 2b. Reflections ---
     // The existing reflection stage composites the mirrored scene on the
@@ -679,29 +918,12 @@ export class SceneRenderer {
     // than SSAO does, exactly as a 24-step screen-space march must. The 2D
     // pipeline accepts the identical trade for its own neighbourhood effects.
     if (reflStrength > 0) {
-      this.backend.executePass({
-        id: 'scene_ssr_pass',
-        program: 'scene_ssr',
-        inputs: {
-          u_litColor: 'scene_lit_color',
-          u_albedoMetallic: 'scene_gbuf_albedo_metallic',
-          u_normalRoughness: 'scene_gbuf_normal_roughness',
-          u_positionEmission: 'scene_gbuf_position_emission',
-          u_depth: 'scene_gbuf_depth',
-          u_planarReflection: planarActive ? 'scene_planar_lit' : 'scene_albedo_fallback'
-        },
-        outputs: { color: 'scene_reflect_color' },
-        clear: true,
-        uniforms: {
-          u_viewProj: this._viewProj,
-          u_reflectionViewProj: this._reflectionViewProj,
-          u_cameraPos: camera._position || [0, 0, 5],
-          u_reflStrength: reflStrength,
-          u_planarEnabled: planarActive ? 1 : 0,
-          u_planePoint: this._planePoint,
-          u_planeNormal: this._planeNormal
-        }
-      }, frameState)
+      const ssr = this._ssrPass
+      ssr.inputs.u_planarReflection = planarActive ? 'scene_planar_lit' : 'scene_albedo_fallback'
+      ssr.uniforms.u_cameraPos = cameraPosition
+      ssr.uniforms.u_reflStrength = reflStrength
+      ssr.uniforms.u_planarEnabled = planarActive ? 1 : 0
+      this.backend.executePass(ssr, frameState)
     }
 
     // --- 3. Present (with tone mapping + gamma) ---
@@ -709,14 +931,11 @@ export class SceneRenderer {
     // of the tile's texels through a per-pixel tone curve. Nothing here reads a
     // neighbour or a screen position, so the tile's output is byte-identical to
     // the corresponding rectangle of a full-frame present of the same input.
-    this.backend.executePass({
-      id: 'scene_tonemap_present',
-      program: 'scene_tonemap_present',
-      inputs: { u_texture: reflStrength > 0 ? 'scene_reflect_color' : 'scene_lit_color' },
-      outputs: { color: target },
-      clear: true,
-      uniforms: { u_exposure: settings.exposure ?? 1 }
-    }, frameState)
+    const present = this._presentPass
+    present.inputs.u_texture = reflStrength > 0 ? 'scene_reflect_color' : 'scene_lit_color'
+    present.outputs.color = target
+    present.uniforms.u_exposure = settings.exposure ?? 1
+    this.backend.executePass(present, frameState)
   }
 
   _prepareReflectionProbe(settings) {
@@ -814,34 +1033,23 @@ export class SceneRenderer {
         clearGBuffer(this.backend, PROBE_GBUF_OUTPUTS)
       }
 
-      this.backend.executePass({
-        id: `scene_probe_lighting_face_${face}`,
-        program: 'scene_lighting',
-        inputs: {
-          u_albedoMetallic: 'scene_probe_gbuf_albedo_metallic',
-          u_normalRoughness: 'scene_probe_gbuf_normal_roughness',
-          u_positionEmission: 'scene_probe_gbuf_position_emission',
-          u_depth: 'scene_probe_gbuf_depth',
-          u_ssao: 'scene_albedo_fallback',
-          u_envTexture: envTexture,
-          u_reflectionProbe: REFLECTION_PROBE_FALLBACK
-        },
-        outputs: { color0: REFLECTION_PROBE_TEXTURE },
-        drawBuffers: 1,
-        cubeFace: face,
-        clear: true,
-        uniforms: this._buildLightingUniforms(
-          position,
-          lights,
-          background,
-          sky,
-          ground,
-          0,
-          envIntensity,
-          0,
-          1
-        )
-      }, frameState)
+      // One descriptor per face, built with the constructor. Only the
+      // environment binding and the uniform block move between frames.
+      const probeLighting = this._probeLightingPassStates[face]
+      probeLighting.pass.inputs.u_envTexture = envTexture
+      this._buildLightingUniforms(
+        probeLighting,
+        position,
+        lights,
+        background,
+        sky,
+        ground,
+        0,
+        envIntensity,
+        0,
+        1
+      )
+      this.backend.executePass(probeLighting.pass, frameState)
     }
 
     if (this._probeInitialized) {
@@ -898,7 +1106,7 @@ export class SceneRenderer {
     camera.near = sceneCamera.near
     camera.far = sceneCamera.far
     // -1: the face is read back as an image, not sampled as a cube texture.
-    aimCameraAtCubeFace(camera, sceneCamera._position || [0, 0, 5], face, -1)
+    aimCameraAtCubeFace(camera, sceneCamera._position || DEFAULT_CAMERA_POSITION, face, -1)
 
     await this.render(sceneTree, clock, target, null, camera)
     this._probeFrozen = true
@@ -927,7 +1135,7 @@ export class SceneRenderer {
     )
     if (normalLength < 0.5) return false
 
-    const cameraPosition = camera._position || [0, 0, 5]
+    const cameraPosition = camera._position || DEFAULT_CAMERA_POSITION
     const cameraSide =
       (cameraPosition[0] - this._planePoint[0]) * this._planeNormal[0] +
       (cameraPosition[1] - this._planePoint[1]) * this._planeNormal[1] +
@@ -955,13 +1163,13 @@ export class SceneRenderer {
     )
     reflectPointAcrossPlane(
       reflectedCamera.target,
-      camera.target || [0, 0, 0],
+      camera.target || DEFAULT_TARGET,
       this._planePoint,
       this._planeNormal
     )
     reflectDirectionAcrossPlane(
       reflectedCamera.up,
-      camera.up || [0, 1, 0],
+      camera.up || DEFAULT_UP,
       this._planeNormal
     )
 
@@ -982,7 +1190,29 @@ export class SceneRenderer {
     return true
   }
 
+  /**
+   * Write one lighting variant's uniform block into its reused pass state.
+   *
+   * The block used to be a fresh object literal per variant per frame, plus
+   * eight template-literal keys per light. Both are now written into the
+   * descriptor the constructor built; `state.lightCount` records how many
+   * light slots the block currently carries so a scene that DROPS a light does
+   * not leave the surplus slots behind for the shader to read. That is a
+   * rebuild, not a steady-state cost: the same change recompiles the lighting
+   * shader in _ensureLightingShader.
+   * @param {{pass: object, lightCount: number}} state - Reusable pass state
+   * @param {ArrayLike<number>} cameraPosition - Eye the variant lights from
+   * @param {object[]} lights - Scene lights
+   * @param {ArrayLike<number>} background - Background colour
+   * @param {ArrayLike<number>} sky - Upper hemisphere ambient
+   * @param {ArrayLike<number>} ground - Lower hemisphere ambient
+   * @param {number} ssaoStrength - 0 disables the AO sample
+   * @param {number} envIntensity - 0 disables the environment sample
+   * @param {number} [probeEnabled=0] - Whether specular samples the probe
+   * @param {number} [probeCapture=0] - Whether this IS a probe capture
+   */
   _buildLightingUniforms(
+    state,
     cameraPosition,
     lights,
     background,
@@ -993,32 +1223,42 @@ export class SceneRenderer {
     probeEnabled = 0,
     probeCapture = 0
   ) {
-    const uniforms = {
-      u_cameraPos: cameraPosition,
-      u_backgroundColor: background,
-      u_skyColor: sky,
-      u_groundColor: ground,
-      u_ssaoStrength: ssaoStrength,
-      u_envIntensity: envIntensity,
-      u_probeEnabled: probeEnabled,
-      u_probeCapture: probeCapture
-    }
+    const uniforms = state.pass.uniforms
+    uniforms.u_cameraPos = cameraPosition
+    uniforms.u_backgroundColor = background
+    uniforms.u_skyColor = sky
+    uniforms.u_groundColor = ground
+    uniforms.u_ssaoStrength = ssaoStrength
+    uniforms.u_envIntensity = envIntensity
+    uniforms.u_probeEnabled = probeEnabled
+    uniforms.u_probeCapture = probeCapture
     // Per-light uniforms. lightType: 0 = point, 1 = directional, 2 = spot.
     for (let i = 0; i < lights.length; i++) {
       const light = lights[i]
-      const prefix = `u_lights[${i}]`
-      uniforms[`${prefix}.position`] = light.position || [0, 0, 0]
-      uniforms[`${prefix}.color`] = light.color || [1, 1, 1]
-      uniforms[`${prefix}.intensity`] = light.intensity ?? 1
-      uniforms[`${prefix}.lightType`] = LIGHT_TYPE_CODE[light.lightType] ?? 0
-      uniforms[`${prefix}.direction`] = light.direction || [0, -1, 0]
+      const keys = lightUniformKeys(i)
+      uniforms[keys.position] = light.position || DEFAULT_LIGHT_POSITION
+      uniforms[keys.color] = light.color || DEFAULT_LIGHT_COLOR
+      uniforms[keys.intensity] = light.intensity ?? 1
+      uniforms[keys.lightType] = LIGHT_TYPE_CODE[light.lightType] ?? 0
+      uniforms[keys.direction] = light.direction || DEFAULT_LIGHT_DIRECTION
       const angleRad = (light.angle ?? 45) * Math.PI / 180
       const outerRad = angleRad * (1 + (light.penumbra ?? 0.1))
-      uniforms[`${prefix}.cosInner`] = Math.cos(angleRad)
-      uniforms[`${prefix}.cosOuter`] = Math.cos(outerRad)
-      uniforms[`${prefix}.falloff`] = light.falloff ?? 0
+      uniforms[keys.cosInner] = Math.cos(angleRad)
+      uniforms[keys.cosOuter] = Math.cos(outerRad)
+      uniforms[keys.falloff] = light.falloff ?? 0
     }
-    return uniforms
+    for (let i = lights.length; i < state.lightCount; i++) {
+      const keys = lightUniformKeys(i)
+      delete uniforms[keys.position]
+      delete uniforms[keys.color]
+      delete uniforms[keys.intensity]
+      delete uniforms[keys.lightType]
+      delete uniforms[keys.direction]
+      delete uniforms[keys.cosInner]
+      delete uniforms[keys.cosOuter]
+      delete uniforms[keys.falloff]
+    }
+    state.lightCount = lights.length
   }
 
   async _ensureLightingShader(numLights) {
@@ -1030,6 +1270,17 @@ export class SceneRenderer {
       await this.backend.compileProgram(id, { fragment: shader, perBindingUniforms: true })
       this._lastLightCount = count
     }
+  }
+
+  /**
+   * Release the geometry cache and per-node pass state without touching the
+   * render targets. For a renderer that outlives the tree it drew — a
+   * same-backend recompile — so geometry the new tree no longer declares is
+   * not stranded on the GPU. The next render re-uploads what it needs.
+   */
+  releaseGeometry() {
+    if (this.volumeRenderer) this.volumeRenderer.dispose()
+    if (this.meshRenderer) this.meshRenderer.dispose()
   }
 
   dispose() {

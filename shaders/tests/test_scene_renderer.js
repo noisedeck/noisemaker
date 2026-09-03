@@ -4,7 +4,7 @@ import { SceneRenderer } from '../src/rendering/scene-renderer.js'
 import { MeshRenderer } from '../src/rendering/mesh-renderer.js'
 
 import { SceneTree } from '../src/scene/tree.js'
-import { mat4, lookAtMatrix, perspectiveMatrix } from '../src/scene/math.js'
+import { mat4, vec3, lookAtMatrix, perspectiveMatrix } from '../src/scene/math.js'
 import { CUBE_FACES, faceBasisMat3 } from '../src/renderer/cubeCamera.js'
 
 /**
@@ -487,6 +487,24 @@ function treeWithMaterial(material) {
   await renderer.render(tree, { elapsed: 0 }, 'scene_color')
   assert.ok(backend.lastFrameState.surfaces, 'frame state has surfaces')
   assert.strictEqual(backend.lastFrameState.surfaces.o2.handle, 'H_o2_read', 'read texture injected under surface name')
+
+  // The surface map is reused frame to frame rather than rebuilt, so a name
+  // the pipeline stops publishing has to be deleted from it. Left behind, it
+  // would keep resolving to a texture the recompile destroyed.
+  const surfaces = backend.lastFrameState.surfaces
+  fakePipeline.surfaces = new Map([['o5', { read: 'ptex_o5_a', write: 'ptex_o5_b' }]])
+  backend.textures.set('ptex_o5_a', { handle: 'H_o5_read' })
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+  assert.strictEqual(backend.lastFrameState.surfaces, surfaces, 'the map is reused')
+  assert.strictEqual(surfaces.o5.handle, 'H_o5_read', 'the new surface is published')
+  assert.ok(!('o2' in surfaces), 'the retired surface is gone, not stale')
+
+  // Same count, different name: the pruning cannot be a length comparison.
+  fakePipeline.surfaces = new Map([['o7', { read: 'ptex_o7_a', write: 'ptex_o7_b' }]])
+  backend.textures.set('ptex_o7_a', { handle: 'H_o7_read' })
+  await renderer.render(tree, { elapsed: 0.032 }, 'scene_color')
+  assert.strictEqual(surfaces.o7.handle, 'H_o7_read')
+  assert.ok(!('o5' in surfaces), 'a same-size swap still retires the old name')
 }
 
 // --- Lighting v2 ---
@@ -939,8 +957,10 @@ function treeWithLights(lights, settings = {}) {
   const meshNodes = tree.getMeshNodes()
   const camera = tree.camera
 
-  const first = renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})
-  const second = renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})
+  // Snapshotted: the returned LIST is reused too, so holding the array itself
+  // would make every identity assertion below trivially true.
+  const first = [...renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})]
+  const second = [...renderer.meshRenderer.buildMeshPasses(meshNodes, [], camera, 320, 240, {})]
 
   assert.strictEqual(first.length, 2, 'two mesh passes')
   for (let i = 0; i < first.length; i++) {
@@ -1400,8 +1420,10 @@ function reflectedVolumeTree(extraNodes = [], settings = {}) {
   const volumeNodes = tree.getVolumeNodes()
   const camera = tree.camera
 
-  const first = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})
-  const second = renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})
+  // Snapshotted for the same reason as the mesh case: the list is reused, so
+  // the array itself must not stand in for the passes it held.
+  const first = [...renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})]
+  const second = [...renderer.volumeRenderer.buildVolumePasses(volumeNodes, {}, camera, 320, 240, {})]
 
   assert.strictEqual(first.length, 2, 'two volume passes')
   for (let i = 0; i < first.length; i++) {
@@ -1642,7 +1664,7 @@ function projectionOf(backend, program, passId) {
   await renderer.initialize(320, 240)
   await renderer.render(tileTree(), { elapsed: 0 }, 'scene_color')
 
-  const expected = perspectiveMatrix(90, 320 / 240, 1, 1000)
+  const expected = perspectiveMatrix(mat4.create(), 90, 320 / 240, 1, 1000)
   assert.deepStrictEqual(projectionOf(backend, 'scene_mesh_gbuf'), Array.from(expected),
     'untiled mesh projection must be bit-identical to the pre-tiling perspective matrix')
   assert.deepStrictEqual(projectionOf(backend, 'scene_volume_gbuf'), Array.from(expected),
@@ -1730,7 +1752,7 @@ function projectionOf(backend, program, passId) {
     { offset: [0, 0], fullResolution: [320, 240] })
   assert.deepStrictEqual(
     projectionOf(backend, 'scene_mesh_gbuf'),
-    Array.from(perspectiveMatrix(90, 320 / 240, 1, 1000)),
+    Array.from(perspectiveMatrix(mat4.create(), 90, 320 / 240, 1, 1000)),
     'a full-frame tile region renders exactly as an untiled frame')
 }
 
@@ -1799,7 +1821,7 @@ function projectionOf(backend, program, passId) {
     { offset: [50, 50], fullResolution: [100, 100] })
 
   const probeProjection = projectionOf(backend, 'scene_mesh_gbuf', 'scene_probe_gbuf_face_0')
-  assert.deepStrictEqual(probeProjection, Array.from(perspectiveMatrix(90, 1, 0.1, 1000)),
+  assert.deepStrictEqual(probeProjection, Array.from(perspectiveMatrix(mat4.create(), 90, 1, 0.1, 1000)),
     'probe faces keep the untiled 90-degree square frustum')
   for (let face = 0; face < 6; face++) {
     assert.deepStrictEqual(
@@ -1822,7 +1844,7 @@ function projectionOf(backend, program, passId) {
   await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
   assert.deepStrictEqual(
     projectionOf(backend, 'scene_mesh_gbuf'),
-    Array.from(perspectiveMatrix(90, 320 / 240, 1, 1000)),
+    Array.from(perspectiveMatrix(mat4.create(), 90, 320 / 240, 1, 1000)),
     'a frame rendered without a tile region is untiled, whatever the previous frame did')
 }
 
@@ -1930,7 +1952,7 @@ async function exportCubemap(renderer, backend, tree, inspect, clock = { elapsed
   })
 
   assert.strictEqual(seen.length, 6, 'six faces')
-  const square90 = Array.from(perspectiveMatrix(90, 1, 0.25, 900))
+  const square90 = Array.from(perspectiveMatrix(mat4.create(), 90, 1, 0.25, 900))
   for (let face = 0; face < 6; face++) {
     assert.deepStrictEqual(seen[face].projection, square90,
       `face ${face} projects through a square 90-degree frustum, not the scene camera's 35`)
@@ -2025,7 +2047,7 @@ async function exportCubemap(renderer, backend, tree, inspect, clock = { elapsed
   await renderer.render(tree, { elapsed: 0 }, 'scene_color',
     { offset: [32, 32], fullResolution: [128, 128] })
 
-  const square90 = Array.from(perspectiveMatrix(90, 1, 0.25, 900))
+  const square90 = Array.from(perspectiveMatrix(mat4.create(), 90, 1, 0.25, 900))
   await exportCubemap(renderer, backend, tree, (face, passes) => {
     const mesh = passes.find(p => p.program === 'scene_mesh_gbuf')
     assert.deepStrictEqual(Array.from(mesh.uniforms.u_projectionMatrix), square90,
@@ -2051,12 +2073,364 @@ async function exportCubemap(renderer, backend, tree, inspect, clock = { elapsed
     assert.ok(pass, `probe face ${face} rasterizes the mesh`)
     const { forward, up } = CUBE_FACES[face]
     const expected = lookAtMatrix(
+      mat4.create(),
       probePosition,
       [probePosition[0] + forward[0], probePosition[1] + forward[1], probePosition[2] + forward[2]],
       up
     )
     assertMatrixClose(pass.uniforms.u_viewMatrix, expected, `probe face ${face} view matrix`)
   }
+}
+
+// releaseGeometry() frees the cached geometry textures but not the render
+// targets, and the next render re-uploads what the tree declares
+{
+  const textures = new Map()
+  const destroyed = []
+  const uploads = []
+  const mockBackend = {
+    type: 'webgl2',
+    createTexture(id, spec) { textures.set(id, spec) },
+    destroyTexture(id) { destroyed.push(id); textures.delete(id) },
+    async compileProgram() {},
+    executePass() {},
+    beginFrame() {},
+    endFrame() {},
+    uploadMeshData(meshId, p, n, u, w, h, c) { uploads.push(meshId); return { success: true, vertexCount: c } }
+  }
+  const renderer = new SceneRenderer(mockBackend, null)
+  await renderer.initialize(64, 64)
+  const ir = {
+    camera: { fov: 60, near: 0.1, far: 1000, position: [0, 0, 5], target: [0, 0, 0], up: [0, 1, 0] },
+    lights: [],
+    nodes: [
+      { id: 'b', type: 'mesh', parent: null, meshType: 'box', meshParams: {}, material: null,
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } }
+    ],
+    materials: {},
+    settings: {}
+  }
+  await renderer.render(SceneTree.fromIR(ir), { delta: 0.016, elapsed: 0, frame: 0 })
+  assert.strictEqual(uploads.length, 1, 'the first render uploads the box once')
+
+  renderer.releaseGeometry()
+  const geometryDestroys = destroyed.filter(id => /_(positions|normals|uvs)$/.test(id))
+  assert.strictEqual(geometryDestroys.length, 3, 'release destroys the three geometry textures')
+  assert.ok(textures.has('scene_gbuf_albedo_metallic'), 'release leaves the G-buffer alone')
+  assert.ok(textures.has('scene_lit_color'), 'release leaves the work textures alone')
+
+  await renderer.render(SceneTree.fromIR(ir), { delta: 0.016, elapsed: 0.016, frame: 1 })
+  assert.strictEqual(uploads.length, 2, 'the next render re-uploads the geometry')
+}
+
+// =============================================================================
+// Steady-state allocation
+// =============================================================================
+
+/**
+ * Deep snapshot of a pass, taken at execute time.
+ *
+ * The descriptors are reused and rewritten in place, so reading one after the
+ * frame shows the LAST frame's values. Comparing what two frames actually
+ * submitted needs a copy taken as each pass goes by.
+ */
+function snapshotPass(value) {
+  if (ArrayBuffer.isView(value)) return Array.from(value)
+  if (Array.isArray(value)) return value.map(snapshotPass)
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const key of Object.keys(value)) out[key] = snapshotPass(value[key])
+    return out
+  }
+  return value
+}
+
+/**
+ * Every object reachable from a submitted pass, for counting how many of them
+ * are new. Typed arrays are leaves: their identity is what matters, not their
+ * contents.
+ */
+function collectObjects(value, into, depth = 0) {
+  if (depth > 5 || value === null || typeof value !== 'object') return
+  if (into.has(value)) return
+  into.add(value)
+  if (ArrayBuffer.isView(value)) return
+  for (const key of Object.keys(value)) collectObjects(value[key], into, depth + 1)
+}
+
+/**
+ * Count the gl-matrix constructors the scene path calls.
+ *
+ * `mat4` and `vec3` are the CommonJS namespace objects gl-matrix exports, and
+ * every call this codebase makes goes through them by property lookup, so
+ * wrapping the two allocating entry points measures exactly the matrices and
+ * vectors a frame mints. Restored in a finally.
+ * @param {Function} body - Called with counting armed
+ * @returns {Promise<number>} Typed arrays allocated during body()
+ */
+async function countMatrixAllocations(body) {
+  const realCreate = mat4.create
+  const realFromValues = vec3.fromValues
+  let count = 0
+  mat4.create = function (...args) { count++; return realCreate.apply(this, args) }
+  vec3.fromValues = function (...args) { count++; return realFromValues.apply(this, args) }
+  try {
+    await body()
+  } finally {
+    mat4.create = realCreate
+    vec3.fromValues = realFromValues
+  }
+  return count
+}
+
+/** A scene exercising every pass group: meshes, a volume, a planar reflector. */
+function allocationTree(settings = {}) {
+  return SceneTree.fromIR({
+    camera: { fov: 55, near: 0.2, far: 800, position: [0.1, 1.7, 5.3], target: [0.4, 0.6, -0.2] },
+    lights: [
+      { type: 'directional', direction: [0.3, -1, 0.2], color: [1, 0.95, 0.9], intensity: 1.3 },
+      { type: 'spot', position: [-1.5, 4, 2], direction: [0, -1, 0], color: [0.4, 0.6, 1], intensity: 3 }
+    ],
+    settings,
+    materials: { m0: { baseColor: [0.8, 0.2, 0.2], pbr: { metallic: 0.25, roughness: 0.6 } } },
+    nodes: [
+      { id: 's', type: 'mesh', parent: null, meshType: 'sphere', meshParams: {}, material: 'm0',
+        transform: { position: [0, 0.5, 0], rotation: [10, 20, 30], scale: [1, 1, 1] } },
+      { id: 'floor', type: 'mesh', parent: null, meshType: 'plane', meshParams: {}, material: null,
+        planarReflection: true, transform: { position: [0, -1, 0], rotation: [0, 0, 0], scale: [6, 1, 6] } },
+      { id: 'v', type: 'volume', parent: null, surface: 'vol0', threshold: 0.42, mode: 'voxel', material: null,
+        transform: { position: [2.2, 0.3, -0.4], rotation: [0, 15, 0], scale: [1, 1, 1] } }
+    ]
+  })
+}
+
+/** stubBackend, plus a deep snapshot of every pass as it is submitted. */
+function recordingBackend() {
+  const backend = stubBackend()
+  backend.snapshots = []
+  backend.executePass = function (pass, state) {
+    this.passes.push(pass)
+    this.snapshots.push(snapshotPass(pass))
+    this.lastFrameState = state
+  }
+  return backend
+}
+
+// A steady frame allocates nothing the backend can see.
+//
+// The project bans per-frame allocation in render loops and _renderPasses says
+// so, yet the frame rebuilt its five fullscreen pass descriptors (and one more
+// per probe face) with their inputs, outputs and uniform blocks, a frame state,
+// the sky/ground/background default arrays, and — through
+// camera.getViewMatrix()/getProjectionMatrix() — a mat4 plus three vec3s for
+// every pass group, every tick. Measured on this scene before the fix: 36 new
+// descriptor objects and 30 gl-matrix typed arrays per frame, 66 allocations a
+// frame, ~3960/s at 60fps.
+{
+  const backend = recordingBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = allocationTree({ ambient: 0.13, ssao: 0.8, reflections: 0.7, exposure: 1.4 })
+
+  // Two warm-up frames: the first uploads geometry and interns the pass
+  // descriptors, the second settles anything built lazily behind them.
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+
+  backend.passes.length = 0
+  backend.snapshots.length = 0
+  await renderer.render(tree, { elapsed: 0.032 }, 'scene_color')
+  const firstPasses = [...backend.passes]
+  const firstSnapshots = [...backend.snapshots]
+
+  backend.passes.length = 0
+  backend.snapshots.length = 0
+  const allocations = await countMatrixAllocations(
+    () => renderer.render(tree, { elapsed: 0.048 }, 'scene_color'))
+  const secondPasses = [...backend.passes]
+  const secondSnapshots = [...backend.snapshots]
+
+  assert.ok(firstPasses.length >= 7, `precondition: a full frame submits several passes (${firstPasses.length})`)
+  assert.strictEqual(secondPasses.length, firstPasses.length, 'the same passes run every frame')
+  for (let i = 0; i < firstPasses.length; i++) {
+    assert.strictEqual(secondPasses[i].id, firstPasses[i].id, `pass ${i} keeps its id`)
+    assert.strictEqual(secondPasses[i], firstPasses[i],
+      `pass ${i} ('${firstPasses[i].id}') must be the SAME object next frame, not a rebuilt one`)
+    assert.strictEqual(secondPasses[i].uniforms, firstPasses[i].uniforms,
+      `pass ${i} ('${firstPasses[i].id}') uniform block must be rewritten in place`)
+    assert.strictEqual(secondPasses[i].inputs, firstPasses[i].inputs,
+      `pass ${i} ('${firstPasses[i].id}') inputs must be rewritten in place`)
+    assert.strictEqual(secondPasses[i].outputs, firstPasses[i].outputs,
+      `pass ${i} ('${firstPasses[i].id}') outputs must be rewritten in place`)
+    // Same object, and the same VALUES: reuse must not have dropped or stalled
+    // anything the pass carries.
+    assert.deepStrictEqual(secondSnapshots[i], firstSnapshots[i],
+      `pass ${i} ('${firstPasses[i].id}') submits identical contents on both frames`)
+  }
+
+  assert.strictEqual(allocations, 0,
+    `a steady frame must allocate no gl-matrix vectors or matrices, got ${allocations}`)
+
+  // The frame state is reused too — it carries the global uniforms every pass
+  // reads, and used to be rebuilt with a fresh u_resolution array each tick.
+  const state = backend.lastFrameState
+  await renderer.render(tree, { elapsed: 0.064 }, 'scene_color')
+  assert.strictEqual(backend.lastFrameState, state, 'the frame state is reused')
+  assert.strictEqual(backend.lastFrameState.globalUniforms, state.globalUniforms,
+    'so is its global uniform block')
+  assert.strictEqual(backend.lastFrameState.globalUniforms.u_resolution, state.globalUniforms.u_resolution,
+    'and the resolution it carries')
+  assert.deepStrictEqual(Array.from(state.globalUniforms.u_resolution), [320, 240])
+  assert.strictEqual(state.time, 0.064, 'while still tracking the clock')
+}
+
+// Nothing NEW reaches the backend on a settled frame, probe included.
+//
+// The probe amortizes to one cube face per frame, so each face's descriptors
+// are new relative to the frame before it and only settle once the rotation has
+// been all the way round. Counted cumulatively across a full cycle. Before the
+// fix this scene minted 44 descriptor objects and 40 gl-matrix typed arrays on
+// every settled frame.
+{
+  const backend = recordingBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = allocationTree({
+    ambient: 0.13, ssao: 1, reflections: 1,
+    reflectionProbe: [0, 1.5, 0], reflectionProbeSize: 32
+  })
+
+  const seen = new Set()
+  // Six faces prime on frame 1, then one face per frame: eight frames covers
+  // the prime plus a full rotation with room to spare.
+  for (let frame = 0; frame < 8; frame++) {
+    backend.passes.length = 0
+    await renderer.render(tree, { elapsed: frame * 0.016 }, 'scene_color')
+    for (const pass of backend.passes) collectObjects(pass, seen)
+    collectObjects(backend.lastFrameState, seen)
+  }
+  const settled = seen.size
+  assert.ok(settled > 20, `precondition: the frame graph is more than a couple of objects (${settled})`)
+
+  for (let frame = 8; frame < 11; frame++) {
+    backend.passes.length = 0
+    const allocations = await countMatrixAllocations(
+      () => renderer.render(tree, { elapsed: frame * 0.016 }, 'scene_color'))
+    for (const pass of backend.passes) collectObjects(pass, seen)
+    collectObjects(backend.lastFrameState, seen)
+    assert.strictEqual(seen.size, settled,
+      `frame ${frame} handed the backend ${seen.size - settled} object(s) it had never seen`)
+    assert.strictEqual(allocations, 0,
+      `frame ${frame} allocated ${allocations} gl-matrix typed array(s)`)
+  }
+}
+
+// Dropping a light must not leave its uniform slots behind in the reused block.
+{
+  const backend = recordingBackend()
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const tree = allocationTree({ ambient: 0.2 })
+  const bothLights = tree.lights
+
+  await renderer.render(tree, { elapsed: 0 }, 'scene_color')
+  assert.ok('u_lights[1].position' in backend.passes.find(p => p.id === 'scene_lighting').uniforms,
+    'precondition: the second light has uniforms')
+
+  tree.lights = bothLights.slice(0, 1)
+  backend.passes.length = 0
+  await renderer.render(tree, { elapsed: 0.016 }, 'scene_color')
+  const lighting = backend.passes.find(p => p.id === 'scene_lighting').uniforms
+  assert.ok('u_lights[0].position' in lighting, 'the remaining light keeps its slot')
+  for (const suffix of ['position', 'color', 'intensity', 'lightType', 'direction', 'cosInner', 'cosOuter', 'falloff']) {
+    assert.ok(!(`u_lights[1].${suffix}` in lighting),
+      `the dropped light's ${suffix} is gone, not left in the reused block`)
+  }
+
+  tree.lights = bothLights
+  backend.passes.length = 0
+  await renderer.render(tree, { elapsed: 0.032 }, 'scene_color')
+  assert.deepStrictEqual(
+    backend.passes.find(p => p.id === 'scene_lighting').uniforms['u_lights[1].color'],
+    [0.4, 0.6, 1], 'and comes back when the light does')
+}
+
+// =============================================================================
+// G-buffer colour-attachment budget
+// =============================================================================
+
+// The scene G-buffer is three rgba16f plus an r32f — 28 bytes per sample —
+// created here rather than declared in the pipeline's graph, so
+// Pipeline.applyMrtFormatBudget never sees it. A device that cannot host that
+// used to fail as a per-frame FRAMEBUFFER_UNSUPPORTED warn with a blank canvas
+// and no explanation. It now refuses at initialize(), where compile() can
+// surface it.
+{
+  const backend = stubBackend()
+  backend.capabilities = { maxColorBytesPerSample: 16 }
+  const renderer = new SceneRenderer(backend, null)
+  await assert.rejects(
+    () => renderer.initialize(320, 240),
+    (err) => {
+      assert.ok(err instanceof Error, 'a real Error, not a thrown object')
+      assert.ok(err.message.includes('scene_gbuf_pass'), `names the pass: ${err.message}`)
+      assert.ok(/\b28\b/.test(err.message), `names the bytes needed: ${err.message}`)
+      assert.ok(/\b16\b/.test(err.message), `names the device limit: ${err.message}`)
+      return true
+    },
+    'a 16-byte budget cannot host the G-buffer')
+  assert.strictEqual(backend.textures.size, 0, 'and nothing was allocated on the way out')
+}
+
+// 28 fits in 32, which is what WebGPU reports by default and what Apple GPUs
+// enforce on WebGL2 — the platform this check exists for still runs.
+{
+  const backend = stubBackend()
+  backend.capabilities = { maxColorBytesPerSample: 32 }
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  assert.ok(backend.textures.has('scene_gbuf_albedo_metallic'), 'the G-buffer is allocated')
+  assert.ok(backend.textures.has('scene_gbuf_depth'), 'including its depth target')
+  await renderer.render(
+    treeWithLights([{ type: 'directional', direction: [0, -1, 0], color: [1, 1, 1], intensity: 1 }]),
+    { elapsed: 0 },
+    'scene_color'
+  )
+  assert.ok(backend.passes.some(p => p.id === 'scene_lighting'), 'and the frame runs')
+}
+
+// Formats are never demoted to fit. The deferred shaders reconstruct world
+// position and depth out of these targets, so a narrower G-buffer is not a
+// degraded render, it is a wrong one — which is why the budget is refused
+// rather than trimmed. The 28 in the error message is these four attachments.
+{
+  const backend = stubBackend()
+  backend.capabilities = { maxColorBytesPerSample: 32 }
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  const bytesPerSample = { rgba16f: 8, r32f: 4 }
+  const gbuffer = [
+    'scene_gbuf_albedo_metallic',
+    'scene_gbuf_normal_roughness',
+    'scene_gbuf_position_emission',
+    'scene_gbuf_depth'
+  ].map(id => backend.textureSpecs.get(id))
+  assert.deepStrictEqual(gbuffer.map(spec => spec.format),
+    ['rgba16f', 'rgba16f', 'rgba16f', 'r32f'],
+    'the G-buffer keeps its HDR formats under a tight budget')
+  assert.strictEqual(
+    gbuffer.reduce((total, spec) => total + bytesPerSample[spec.format], 0), 28,
+    'and costs the 28 bytes per sample the budget check reports')
+}
+
+// A backend that reports no budget at all is left alone — every other test in
+// this file runs on one.
+{
+  const backend = stubBackend()
+  assert.strictEqual(backend.capabilities, undefined, 'precondition: no capabilities reported')
+  const renderer = new SceneRenderer(backend, null)
+  await renderer.initialize(320, 240)
+  assert.ok(backend.textures.has('scene_gbuf_albedo_metallic'), 'initialization proceeds')
 }
 
 console.log('Scene renderer tests passed')

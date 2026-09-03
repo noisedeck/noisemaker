@@ -372,5 +372,111 @@ await test('a failed recompile carries external state and the graph onto the rep
     assert.strictEqual(handedOptions.graph._isScene, true, 'and the scene graph it detected')
 })
 
+/**
+ * A CanvasRenderer with no scene, wired to a recording pipeline. The 2D path
+ * has no scene to wait for, so it must not be pushed behind a microtask.
+ */
+function flatHarness() {
+    const order = []
+    const renderer = new CanvasRenderer({ width: 8, height: 8 })
+    renderer._isScene = false
+    renderer._pipeline = {
+        lastPassCount: 0,
+        render() { order.push('pipeline') }
+    }
+    return { renderer, order }
+}
+
+await test('a 2D program still runs its pipeline synchronously in render()', async () => {
+    // render() was synchronous before scene() existed, and hosts call it that
+    // way: set a uniform, render one frame, read the canvas back. Awaiting the
+    // scene hook on a program that has no scene defers the pipeline past a
+    // microtask, so the readback that follows sees the previous frame.
+    const { renderer, order } = flatHarness()
+    const settled = renderer.render(0.5)
+    assert.deepStrictEqual(order, ['pipeline'],
+        'the pipeline must have run before render() returned')
+    await settled
+})
+
+await test('a 2D program still runs its pipeline synchronously in the render loop', async () => {
+    const { renderer, order } = flatHarness()
+    const previousRAF = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = () => 0
+    renderer._isRunning = true
+    renderer._loopStartTime = 0
+    try {
+        const frame = renderer._renderLoop(0)
+        assert.deepStrictEqual(order, ['pipeline'],
+            'the loop must draw in the rAF callback itself, not a microtask later')
+        await frame
+    } finally {
+        renderer._isRunning = false
+        globalThis.requestAnimationFrame = previousRAF
+    }
+})
+
+await test('a same-backend scene recompile releases the cached geometry', async () => {
+    // The renderer is reused whenever the backend is unchanged, and its
+    // geometry cache is keyed by mesh params, so editing mesh("sphere",
+    // segments: N) live must release the previous upload rather than strand it.
+    const backend = { type: 'fake' }
+    const pipeline = Object.assign(recompileTarget(), {
+        backend,
+        isCompiling: false,
+        async compilePrograms() { this.isCompiling = false },
+        setMidiState() {},
+        setAudioState() {}
+    })
+    const events = []
+    let renderSettled = false
+    const renderer = new CanvasRenderer({ width: 8, height: 8 })
+    renderer._pipeline = pipeline
+    renderer._isScene = true
+    renderer._sceneRenderer = {
+        backend,
+        releaseGeometry() { events.push(renderSettled ? 'release' : 'release-before-render-settled') },
+        dispose() { events.push('dispose') }
+    }
+    renderer._sceneRenderPending = new Promise(resolve => setTimeout(() => {
+        renderSettled = true
+        resolve()
+    }, 5))
+
+    const result = await renderer.compile(
+        'search synth\nscene(camera(fov: 60), mesh("sphere", segments: 12)).write(o0)\nrender(o0)')
+
+    assert.strictEqual(result, pipeline, 'compile returns the reused pipeline')
+    assert.deepStrictEqual(events, ['release'],
+        'the reused renderer releases its geometry once, after the in-flight render, and is not disposed')
+    assert.ok(renderer.sceneTree, 'the new tree is in place')
+})
+
+await test('the 2D frame-time telemetry survives the scene work', async () => {
+    // getFrameTimeStats()/lastRenderTime/resetFrameTimeStats() are public and
+    // read by downstream hosts; the render loop must keep feeding them.
+    const renderer = new CanvasRenderer({ width: 8, height: 8 })
+    assert.deepStrictEqual(renderer.getFrameTimeStats(),
+        { mean: 0, std: 0, min: 0, max: 0, count: 0 }, 'empty stats before any frame')
+    renderer._pipeline = { render() {}, lastPassCount: 1 }
+    renderer._isRunning = true
+    const previousRAF = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = () => 0
+    try {
+        await renderer._renderLoop(0)
+        await renderer._renderLoop(16)
+    } finally {
+        renderer._isRunning = false
+        globalThis.requestAnimationFrame = previousRAF
+    }
+    const stats = renderer.getFrameTimeStats()
+    assert.strictEqual(stats.count, 2, 'two frames were timed')
+    assert.ok(stats.mean >= 0 && Number.isFinite(stats.mean), 'mean is a finite duration')
+    assert.ok(Number.isFinite(renderer.lastRenderTime), 'lastRenderTime is a finite duration')
+    renderer.resetFrameTimeStats()
+    assert.strictEqual(renderer.getFrameTimeStats().count, 0, 'reset clears the buffer')
+    assert.strictEqual(renderer.lastRenderTime, 0, 'reset clears lastRenderTime')
+})
+
 console.log(`\nScene integration: ${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

@@ -28,6 +28,32 @@ const TRANSFORM_KEYS = new Set(['id', 'pos', 'rot', 'scale'])
 /** The only chain links a mesh/volume/group node accepts. */
 const NODE_LINKS = new Set(['material', 'reflector'])
 
+/** The node kinds a group() nests, named in the diagnostic. */
+const NODE_CHILDREN = ['mesh', 'volume', 'group']
+
+/** Scene children that are legal at scene() level but never inside a group(). */
+const SCENE_LEVEL_ONLY = new Set(['camera', 'light', 'environment'])
+
+/**
+ * How a positional that is not a node chain is named back to the author.
+ *
+ * A number, a string or an array in a child position is almost always a
+ * setting whose keyword was left off, so the diagnostic quotes what was
+ * actually written rather than a node name it does not have.
+ */
+function describePositional(node) {
+    if (node === null || node === undefined) return 'nothing'
+    switch (node.type) {
+        case 'Number':
+        case 'Boolean': return String(node.value)
+        case 'String': return `"${node.value}"`
+        case 'ArrayLiteral': return '[...]'
+        case 'Object': return '{...}'
+        case 'Call': return `${node.name}()`
+        default: return node.name ?? node.type
+    }
+}
+
 /** The eight global volume atlases the pipeline allocates. */
 const VOLUME_REF = /^vol[0-7]$/
 
@@ -64,6 +90,36 @@ const SCENE_SETTING_KEYS = new Set([
     'reflections', 'reflectionProbe', 'reflectionProbeSize',
     'ssao', 'ssaoRadius'
 ])
+
+/**
+ * How each scene() setting is validated, and the value it stands in for when
+ * the author leaves it out.
+ *
+ * These reached the renderer verbatim: `exposure: "bright"` was handed to
+ * u_exposure as a string, `ssaoRadius: 0` collapsed the sampling kernel onto
+ * the shaded point (the SSAO pass places each sample at `P + TBN · kernel[i] ·
+ * ssaoRadius`, so nothing ever occludes), a negative `ambient` drove the
+ * hemisphere terms below zero, and an osc() in any of them was stored as a
+ * descriptor object. scene.rst has always said these take "plain numbers or
+ * vectors — none accepts an automation descriptor".
+ *
+ * `fallback` mirrors the default scene-renderer applies for an absent setting
+ * (sky and ground follow `ambient`, so theirs is ambient's own default); the
+ * compiler stores only what the author wrote, so it is never reached here.
+ * reflectionProbe and reflectionProbeSize are absent on purpose: they are
+ * checked against each other after the loop.
+ */
+const SCENE_SETTING_SPEC = {
+    ambient: { kind: 'number', fallback: 0.1, min: 0, rangeLabel: 'non-negative' },
+    exposure: { kind: 'number', fallback: 1, min: 0, rangeLabel: 'non-negative' },
+    reflections: { kind: 'number', fallback: 1, min: 0, rangeLabel: 'non-negative' },
+    ssao: { kind: 'number', fallback: 1, min: 0, rangeLabel: 'non-negative' },
+    ssaoRadius: { kind: 'number', fallback: 0.75, min: 1e-6, rangeLabel: 'greater than zero' },
+    sky: { kind: 'vec3', fallback: Object.freeze([0.1, 0.1, 0.1]) },
+    ground: { kind: 'vec3', fallback: Object.freeze([0.1, 0.1, 0.1]) },
+    background: { kind: 'vec3', fallback: Object.freeze([0, 0, 0]) }
+}
+
 /** Light keywords, by light type — `angle`/`penumbra` are spot-only. */
 const LIGHT_KEYS = {
     directional: new Set(['type', 'color', 'intensity', 'dir']),
@@ -92,6 +148,18 @@ const MESH_PARAM_KEYS = {
     plane: new Set(['width', 'height']),
     cylinder: new Set(['radius', 'height', 'segments']),
     torus: new Set(['radius', 'tube', 'segments', 'tubeSegments'])
+}
+
+/**
+ * The "(expected: ...)" tail every closed-set diagnostic carries.
+ *
+ * volume()'s messages named their sets from the start — `(vol0..vol7)`,
+ * `(expected: smooth, voxel)` — while the light type, the mesh type and every
+ * unknown-keyword error named only what was wrong. A typo is exactly the case
+ * these fire on, and the set is what the author needs.
+ */
+function expected(values) {
+    return ` (expected: ${Array.from(values).join(', ')})`
 }
 
 function locOf(node) {
@@ -178,14 +246,36 @@ function descriptorEnum(node, name, enumName, descriptorNode) {
     throw sceneError(`${fn}() ${name} must be a ${enumName} value`, descriptorNode)
 }
 
-const clampPercentage = value => Math.max(0, Math.min(1, value))
+/**
+ * Read a descriptor's `min` or `max`.
+ *
+ * These are a NORMALIZED sub-range of the channel's own range, not a value in
+ * it: a rotation binding maps [0, 1] onto 0..360 degrees, and a position or
+ * scale binding uses the fraction as it stands. The effect-uniform path folds
+ * anything outside [0, 1] onto the edge and carries on, which is its documented
+ * leniency; a scene refuses, as it refuses every other out-of-range value.
+ * Clamping silently turned `osc(min: 90, max: 270)` into min 1 / max 1 and froze
+ * the channel at its maximum with nothing reported.
+ */
+function descriptorPercentage(node, name, fallback, descriptorNode) {
+    const value = descriptorNumber(node, name, fallback, descriptorNode)
+    if (!(value >= 0 && value <= 1)) {
+        const fn = DESCRIPTOR_FUNCTION[descriptorNode.type]
+        throw sceneError(
+            `${fn}() ${name} must be between 0 and 1: min and max are a normalized ` +
+            `sub-range of the channel's own range, not values in it`,
+            descriptorNode
+        )
+    }
+    return value
+}
 
 function canonicalOscillator(node) {
     return {
         type: 'Oscillator',
         oscType: descriptorEnum(node.oscType, 'type', 'oscKind', node),
-        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
-        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node)),
+        min: descriptorPercentage(node.min, 'min', 0, node),
+        max: descriptorPercentage(node.max, 'max', 1, node),
         speed: descriptorNumber(node.speed, 'speed', 1, node),
         offset: descriptorNumber(node.offset, 'offset', 0, node),
         seed: descriptorNumber(node.seed, 'seed', 1, node)
@@ -200,8 +290,8 @@ function canonicalMidi(node) {
         // the fallback here is the same mode by value, for a node built
         // without it.
         mode: node.mode === undefined ? 4 : descriptorEnum(node.mode, 'mode', 'midiMode', node),
-        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
-        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node)),
+        min: descriptorPercentage(node.min, 'min', 0, node),
+        max: descriptorPercentage(node.max, 'max', 1, node),
         sensitivity: descriptorNumber(node.sensitivity, 'sensitivity', 1, node)
     }
 }
@@ -210,8 +300,8 @@ function canonicalAudio(node) {
     return {
         type: 'Audio',
         band: node.band === undefined ? 0 : descriptorEnum(node.band, 'band', 'audioBand', node),
-        min: clampPercentage(descriptorNumber(node.min, 'min', 0, node)),
-        max: clampPercentage(descriptorNumber(node.max, 'max', 1, node))
+        min: descriptorPercentage(node.min, 'min', 0, node),
+        max: descriptorPercentage(node.max, 'max', 1, node)
     }
 }
 
@@ -266,16 +356,34 @@ function assertKnownKeywords(call, allowed) {
     for (const name of Object.keys(call.kwargs ?? {})) {
         if (!allowed.has(name)) {
             throw sceneError(
-                `Unknown keyword '${name}' for ${call.name}()`,
+                `Unknown keyword '${name}' for ${call.name}()${expected(allowed)}`,
                 located(call.kwargs[name], call)
             )
         }
     }
 }
 
+/**
+ * The error for an osc(), midi() or audio() written where only a plain value is
+ * read.
+ *
+ * One wording for both readers below: a descriptor is the same mistake in a
+ * scalar slot as in a vector one, and "must be a finite number" sent authors
+ * hunting for a typo in a perfectly well-formed osc(). Only a node's pos, rot
+ * and scale and a light's intensity animate, so the message names them.
+ */
+function descriptorRejection(call, name) {
+    return sceneError(
+        `${call.name}() ${name} does not accept osc(), midi() or audio(); ` +
+        `descriptors animate a node's pos, rot and scale, and a light's intensity`,
+        located(call.kwargs?.[name], call)
+    )
+}
+
 function numberKw(call, name, fallback, { min = -Infinity, max = Infinity, rangeLabel = null } = {}) {
     const value = kw(call, name)
     if (value === undefined) return fallback
+    if (isAnimationDescriptor(value)) throw descriptorRejection(call, name)
     if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw sceneError(`${name} must be a finite number`, located(call.kwargs?.[name], call))
     }
@@ -289,6 +397,13 @@ function numberKw(call, name, fallback, { min = -Infinity, max = Infinity, range
 function vectorKw(call, name, fallback, length, { nonNegative = false } = {}) {
     const value = kw(call, name)
     if (value === undefined) return [...fallback]
+    // Checked ahead of the arity so a descriptor written in place of the whole
+    // vector — `sky: osc()` — is named for what it is rather than reported as
+    // a length the author never wrote.
+    if (isAnimationDescriptor(value) ||
+        (Array.isArray(value) && value.some(component => isAnimationDescriptor(component)))) {
+        throw descriptorRejection(call, name)
+    }
     if (!Array.isArray(value) || value.length !== length) {
         throw sceneError(`${name} must contain exactly ${length} values`, located(call.kwargs?.[name], call))
     }
@@ -374,20 +489,45 @@ function buildCamera(call) {
     }
 }
 
+/**
+ * Read a light's `intensity`: a non-negative number, or a descriptor.
+ *
+ * This is the one light channel that animates, so osc(), midi() and audio() are
+ * returned as they stand — scene/bindings.js hoists the descriptor into a
+ * binding and replaces it with the value it starts at. Everything else was
+ * returned as it stood too: collectBindings does not recognize `"bright"` or
+ * `[1, 2, 3]`, so they travelled untouched into _buildLightingUniforms and were
+ * handed to the scalar `u_lights[i].intensity` as a string or an array.
+ */
+function lightIntensity(call) {
+    const value = kw(call, 'intensity')
+    if (value === undefined) return 1
+    if (isAnimationDescriptor(value)) return value
+    const anchor = located(call.kwargs?.intensity, call)
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw sceneError('intensity must be a finite number or osc(), midi() or audio()', anchor)
+    }
+    if (value < 0) throw sceneError('intensity must be non-negative', anchor)
+    return value
+}
+
 function buildLight(call) {
     const type = kw(call, 'type') ?? 'directional'
     if (!LIGHT_TYPES.has(type)) {
-        throw sceneError(`Unknown light type '${type}'`, located(call.kwargs?.type, call))
+        throw sceneError(
+            `Unknown light type '${type}'${expected(LIGHT_TYPES)}`,
+            located(call.kwargs?.type, call)
+        )
     }
     assertKnownKeywords(call, LIGHT_KEYS[type])
     // Vectors and scalars are validated here for the same reason as the camera:
     // an osc() descriptor read bare reached uniform3fv and NaN'd the light.
-    // Intensity is the one channel bindings can animate, so it stays permissive
-    // and is sanitized by collectBindings instead.
+    // Intensity is the one channel bindings can animate, so it takes a
+    // descriptor as well as a number — see lightIntensity.
     const light = {
         type,
         color: vectorKw(call, 'color', [1, 1, 1], 3, { nonNegative: true }),
-        intensity: kw(call, 'intensity') ?? 1
+        intensity: lightIntensity(call)
     }
     if (type === 'directional') {
         light.direction = vectorKw(call, 'dir', [0, -1, 0], 3)
@@ -414,7 +554,11 @@ function buildEnvironment(call) {
     assertKnownKeywords(call, ENVIRONMENT_KEYS)
     return {
         surface: arg.name,
-        intensity: kw(call, 'intensity') ?? 1
+        // A plain scalar, unlike a light's: collectBindings walks the nodes and
+        // the lights, never the environment, so a descriptor written here would
+        // sit in the IR as an object and be handed to the scalar u_envIntensity.
+        // Read bare, so would a string.
+        intensity: numberKw(call, 'intensity', 1, { min: 0, rangeLabel: 'non-negative' })
     }
 }
 
@@ -579,13 +723,35 @@ function walkNode(
     nodes,
     materials,
     inheritedMaterial = undefined,
-    reflectorState = { seen: false }
+    reflectorState = { seen: false },
+    parentCall = null
 ) {
     const resolved = asCallChain(child)
-    if (!resolved) return null
+    // A positional that is not a call chain names no node at all. Returning
+    // null dropped it in silence, so `group("oops", mesh("box"))` compiled
+    // clean and rendered only the box.
+    if (!resolved) {
+        throw sceneError(
+            `Unknown group() child '${describePositional(child)}'; ` +
+            `group() accepts only ${NODE_CHILDREN.map(n => `${n}()`).join(', ')} children`,
+            located(child, parentCall)
+        )
+    }
 
     const { head, links } = resolved
-    if (head.name !== 'mesh' && head.name !== 'group' && head.name !== 'volume') return null
+    // The three node kinds are the only things a group nests. A `light()` or a
+    // `camera()` written inside one used to vanish without a word: the light
+    // never lit, the camera fell back to the default, and nothing said why.
+    if (head.name !== 'mesh' && head.name !== 'group' && head.name !== 'volume') {
+        const placement = SCENE_LEVEL_ONLY.has(head.name)
+            ? `; ${head.name}() belongs at scene() level`
+            : ''
+        throw sceneError(
+            `Unknown group() child '${head.name}()'; ` +
+            `group() accepts only ${NODE_CHILDREN.map(n => `${n}()`).join(', ')} children${placement}`,
+            head
+        )
+    }
 
     // group() takes only placement keywords; its positionals are its children.
     // Unchecked, a mistyped keyword was dropped in silence and the group
@@ -628,16 +794,23 @@ function walkNode(
 
     if (head.name === 'mesh') {
         // mesh() takes exactly one positional, the type. Anything after it was
-        // read past and ignored, so `mesh("box", "sphere")` compiled clean.
-        if ((head.args?.length ?? 0) > 1) {
+        // read past and ignored, so `mesh("box", "sphere")` compiled clean;
+        // with none at all the type read as undefined and the author was told
+        // "Unknown mesh type 'undefined'", naming a type they never wrote
+        // instead of the argument they left out.
+        const meshArgs = head.args ?? []
+        if (meshArgs.length !== 1) {
             throw sceneError(
                 'mesh() takes one positional argument, the mesh type',
-                located(head.args[1], head)
+                located(meshArgs[1], head)
             )
         }
-        const meshType = litValue(head.args?.[0], head)
+        const meshType = litValue(meshArgs[0], head)
         if (!MESH_TYPES.has(meshType)) {
-            throw sceneError(`Unknown mesh type '${meshType}'`, located(head.args?.[0], head))
+            throw sceneError(
+                `Unknown mesh type '${meshType}'${expected(MESH_TYPES)}`,
+                located(meshArgs[0], head)
+            )
         }
         node.meshType = meshType
         node.meshParams = {}
@@ -646,7 +819,11 @@ function walkNode(
             if (TRANSFORM_KEYS.has(key)) continue
             const anchor = located(val, head)
             if (!shapeKeys.has(key)) {
-                throw sceneError(`Unknown keyword '${key}' for mesh("${meshType}")`, anchor)
+                throw sceneError(
+                    `Unknown keyword '${key}' for mesh("${meshType}")` +
+                    expected([...TRANSFORM_KEYS, ...shapeKeys]),
+                    anchor
+                )
             }
             node.meshParams[key] = validateMeshParam(key, litValue(val, head), anchor)
         }
@@ -702,7 +879,8 @@ function walkNode(
                 nodes,
                 materials,
                 material,
-                reflectorState
+                reflectorState,
+                head
             )
             if (childIndex !== null) node.children.push(childIndex)
         }
@@ -739,9 +917,23 @@ export function compileScene(compilationResult) {
     const settings = {}
     for (const [key, val] of Object.entries(sceneAst.kwargs ?? {})) {
         if (!SCENE_SETTING_KEYS.has(key)) {
-            throw sceneError(`Unknown keyword '${key}' for scene()`, located(val, sceneAst))
+            throw sceneError(
+                `Unknown keyword '${key}' for scene()${expected(SCENE_SETTING_KEYS)}`,
+                located(val, sceneAst)
+            )
         }
-        settings[key] = litValue(val, sceneAst)
+        const spec = SCENE_SETTING_SPEC[key]
+        if (!spec) {
+            // The two probe settings, checked against each other below.
+            settings[key] = litValue(val, sceneAst)
+        } else if (spec.kind === 'vec3') {
+            settings[key] = vectorKw(sceneAst, key, spec.fallback, 3, { nonNegative: true })
+        } else {
+            settings[key] = numberKw(sceneAst, key, spec.fallback, {
+                min: spec.min,
+                rangeLabel: spec.rangeLabel
+            })
+        }
     }
     const reflectionProbe = settings.reflectionProbe
     const reflectionProbeNode = located(sceneAst.kwargs?.reflectionProbe, sceneAst)
@@ -781,7 +973,17 @@ export function compileScene(compilationResult) {
 
     for (const child of sceneAst.args ?? []) {
         const resolved = asCallChain(child)
-        if (!resolved) continue
+        // Children are calls; settings are keywords. A bare positional is
+        // neither — most often a setting whose name the author left off — and
+        // skipping it dropped `scene(0.15, camera())` in silence.
+        if (!resolved) {
+            throw sceneError(
+                `Unknown scene child '${describePositional(child)}'; ` +
+                `scene() takes node chains as positional arguments ` +
+                `(${SCENE_CHILDREN.join(', ')}) and settings as keyword arguments`,
+                located(child, sceneAst)
+            )
+        }
 
         switch (resolved.head.name) {
             case 'camera':
@@ -791,6 +993,15 @@ export function compileScene(compilationResult) {
                 ir.lights.push(buildLight(resolved.head))
                 break
             case 'environment':
+                // A scene lights from one environment map. A second call used
+                // to replace the first in silence, so the surface the author
+                // could see in the frame was not the one they had wired last.
+                if (ir.environment) {
+                    throw sceneError(
+                        'Only one environment() per scene is supported',
+                        resolved.head
+                    )
+                }
                 ir.environment = buildEnvironment(resolved.head)
                 break
             case 'mesh':

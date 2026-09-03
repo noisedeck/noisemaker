@@ -64,6 +64,9 @@ jobs:
     - name: Run shader structure tests
       run: npm run test:shaders:structure
 
+    - name: Run effect string catalog tests
+      run: npm run test:shaders:i18n
+
   bundle:
     name: Bundle shaders
     runs-on: ubuntu-latest
