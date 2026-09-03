@@ -6,6 +6,7 @@ import { normalizeMemberPath, pathStartsWith, applyEnumPrefix } from './enumPath
 import { resolveDescriptorEnum } from './descriptorEnums.js'
 import { resolveParamAliases } from './paramAliases.js'
 import { checkEffectAlias } from './effectAliases.js'
+import { decodeJsonStringLiteralContent } from './stringLiterals.js'
 
 /**
  * STRICT ALLOWLIST FOR STRING PARAMETERS
@@ -25,6 +26,11 @@ const ALLOWED_STRING_PARAMS = new Set([
     // the unparser drops it and every recompile reverts the text to the
     // family's first cut.
     'text.style',
+    // MIDI input identity mirrors the Web MIDI MIDIPort surface. These are
+    // descriptor fields rather than effect parameters, but remain here so
+    // every accepted free-form string has one auditable allowlist.
+    'midi.name',
+    'midi.id',
 ])
 
 const stateSurfaces = new Set(['time','frame','mouse','resolution','seed','a'])
@@ -388,7 +394,9 @@ export function validate(ast) {
                 mode: substitute(node.mode),
                 min: substitute(node.min),
                 max: substitute(node.max),
-                sensitivity: substitute(node.sensitivity)
+                sensitivity: substitute(node.sensitivity),
+                name: substitute(node.name),
+                id: substitute(node.id)
             }
         }
         if (node.type === 'Audio') {
@@ -1273,6 +1281,27 @@ export function validate(ast) {
                                 }
                                 return undefined
                             }
+                            const resolveMidiStringParam = (param, paramName) => {
+                                if (!param) return undefined
+                                const allowlistKey = `midi.${paramName}`
+                                if (!ALLOWED_STRING_PARAMS.has(allowlistKey)) {
+                                    pushDiag('S001', param, `String parameter '${allowlistKey}' is not allowlisted`)
+                                    return undefined
+                                }
+                                if (param.type !== 'String') {
+                                    pushDiag('S001', param, `midi() ${paramName} requires a quoted string`)
+                                    return undefined
+                                }
+                                if (param.value.length === 0) {
+                                    pushDiag('S001', param, `midi() ${paramName} must not be empty`)
+                                    return undefined
+                                }
+                                // The lexer intentionally retains escape sequences for
+                                // general DSL strings. MIDI identity is populated from
+                                // host API strings and emitted with JSON escaping, so
+                                // decode only these two explicitly allowlisted fields.
+                                return decodeJsonStringLiteralContent(param.value)
+                            }
                             value = {
                                 type: 'Midi',
                                 channel: resolveMidiParam(node.channel) ?? 1,
@@ -1280,6 +1309,8 @@ export function validate(ast) {
                                 min: Math.max(0, Math.min(1, resolveMidiParam(node.min) ?? 0)),
                                 max: Math.max(0, Math.min(1, resolveMidiParam(node.max) ?? 1)),
                                 sensitivity: resolveMidiParam(node.sensitivity) ?? 1,
+                                name: resolveMidiStringParam(node.name, 'name'),
+                                id: resolveMidiStringParam(node.id, 'id'),
                                 // Keep original AST for unparsing
                                 _ast: node,
                                 // Preserve variable reference marker for unparser round-trip

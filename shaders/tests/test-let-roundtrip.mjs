@@ -146,6 +146,24 @@ render(o0)`;
     assertIncludes(result, 'scale: knob', 'Should reference variable');
 });
 
+test('let with escaped MIDI device identity round-trips stably', () => {
+    const name = 'Launch "Control" \\ XL';
+    const id = 'port\\two';
+    const src = `search synth
+
+let knob = midi(name: ${JSON.stringify(name)}, id: ${JSON.stringify(id)}, channel: 1)
+
+noise(scale: knob)
+  .write(o0)
+
+render(o0)`;
+    const once = unparse(compile(src));
+    const twice = unparse(compile(once));
+    assertEqual(twice, once, 'MIDI identity must not grow escapes across round-trips');
+    assertIncludes(once, `name: ${JSON.stringify(name)}`, 'Should preserve readable MIDI name');
+    assertIncludes(once, `id: ${JSON.stringify(id)}`, 'Should preserve exact MIDI id');
+});
+
 // Test 7: Let with audio
 test('let with audio() round-trips', () => {
     const src = `search synth

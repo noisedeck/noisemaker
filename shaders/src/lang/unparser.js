@@ -170,9 +170,10 @@ function formatSceneAst(node, indent = null) {
             return `audio(${parts.join(', ')})`
         }
         case 'Midi': {
-            // Parser parameter order: channel, mode, min, max, sensitivity.
+            // Parser parameter order: channel, mode, min, max, sensitivity;
+            // name and id are keyword-only identity fields.
             const parts = []
-            for (const key of ['channel', 'mode', 'min', 'max', 'sensitivity']) {
+            for (const key of ['channel', 'mode', 'min', 'max', 'sensitivity', 'name', 'id']) {
                 if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
             }
             return `midi(${parts.join(', ')})`
@@ -271,6 +272,12 @@ function formatMidi(midi) {
     }
     if (midi.sensitivity !== 1) {
         parts.push(`sensitivity: ${midi.sensitivity}`)
+    }
+    if (typeof midi.name === 'string' && midi.name.length > 0) {
+        parts.push(`name: ${JSON.stringify(midi.name)}`)
+    }
+    if (typeof midi.id === 'string' && midi.id.length > 0) {
+        parts.push(`id: ${JSON.stringify(midi.id)}`)
     }
 
     return `midi(${parts.join(', ')})`
@@ -889,6 +896,10 @@ function formatLetExpr(expr, options = {}) {
             pushMidiField('min', expr.min, 0)
             pushMidiField('max', expr.max, 1)
             pushMidiField('sensitivity', expr.sensitivity, 1)
+            // Lexer String nodes retain their original escape sequences. Emit
+            // those raw slices so repeated compile/unparse cycles stay stable.
+            if (expr.name?.type === 'String') parts.push(`name: "${expr.name.value}"`)
+            if (expr.id?.type === 'String') parts.push(`id: "${expr.id.value}"`)
             return `midi(${parts.join(', ')})`
         }
         case 'Audio': {

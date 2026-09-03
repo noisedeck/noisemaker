@@ -29,7 +29,13 @@ function bindingValue(binding, normalizedTime, externalState, nowMs) {
     let percentage
     switch (binding.descriptor.type) {
         case 'Midi':
-            percentage = evaluateMidi(binding.descriptor, externalState?.midi ?? null, nowMs)
+            {
+                const aggregateState = externalState?.midi ?? null
+                const selectedState = aggregateState?.getPortState
+                    ? aggregateState.getPortState(binding.descriptor)
+                    : aggregateState
+                percentage = evaluateMidi(binding.descriptor, selectedState, nowMs)
+            }
             break
         case 'Audio':
             percentage = evaluateAudio(binding.descriptor, externalState?.audio ?? null)

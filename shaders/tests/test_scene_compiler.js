@@ -294,6 +294,39 @@ function irFor(src) {
   }, 'midi() defaults match the effect-uniform defaults')
 }
 
+// Port identity is part of the MIDI descriptor in scenes too. Dropping these
+// fields here would make the same DSL select a device for 2D effects but merge
+// every device for scene transforms.
+{
+  const ir = irFor(`
+    search synth
+    scene(group(pos: [midi(channel: 1, name: "Launch Control XL", id: "port-2"), 0, 0])).write(o0)
+  `)
+  assert.deepStrictEqual(ir.nodes[0].transform.position[0], {
+    type: 'Midi',
+    channel: 1,
+    mode: 4,
+    min: 0,
+    max: 1,
+    sensitivity: 1,
+    name: 'Launch Control XL',
+    id: 'port-2'
+  }, 'scene midi() retains the same port identity as the effect-uniform path')
+}
+
+{
+  const name = 'Launch "Control" \\ XL'
+  const id = 'port\\two'
+  const ir = irFor(`
+    search synth
+    scene(group(pos: [midi(channel: 1, name: ${JSON.stringify(name)}, id: ${JSON.stringify(id)}), 0, 0])).write(o0)
+  `)
+  assert.strictEqual(ir.nodes[0].transform.position[0].name, name,
+    'scene midi() decodes an escaped readable port name')
+  assert.strictEqual(ir.nodes[0].transform.position[0].id, id,
+    'scene midi() decodes an escaped exact port id')
+}
+
 // audio() in a transform compiles to the canonical audio descriptor.
 //
 // min/max are a normalized [0, 1] sub-range. This used to write `max: 2` and

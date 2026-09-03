@@ -1744,7 +1744,10 @@ export class Pipeline {
             pct = evaluateOscillator(value, time)
         } else if (value.type === 'Midi' || value._ast?.type === 'Midi') {
             // Uses Date.now() for trigger falloff timing (real-time evaluation)
-            pct = evaluateMidi(value, this.externalState.midi, Date.now())
+            const midiState = this.externalState.midi?.getPortState
+                ? this.externalState.midi.getPortState(value)
+                : this.externalState.midi
+            pct = evaluateMidi(value, midiState, Date.now())
         } else if (value.type === 'Audio' || value._ast?.type === 'Audio') {
             pct = evaluateAudio(value, this.externalState.audio)
         } else {

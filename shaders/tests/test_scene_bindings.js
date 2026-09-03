@@ -154,7 +154,70 @@ function build(src) {
   midi.getChannel(1).noteOff(60)
   evaluateBindings(bindings, 0, external)
   assert.strictEqual(spin.rotation[1], 0, 'gate off returns to zero degrees')
-  assert.strictEqual(spin._dirty, true, 'dirty after evaluation')
+    assert.strictEqual(spin._dirty, true, 'dirty after evaluation')
+}
+
+// Scene bindings must route through the same selected-port registry as 2D
+// uniforms. Two identical controller names must not collapse back into the
+// aggregate state when an exact id is present.
+{
+  const { tree, bindings } = build(`
+    search synth
+    scene(
+      group(id: "spin", rot: [0, midi(channel: 1, mode: midiMode.gateVelocity, name: "Launch Control XL", id: "left-id"), 0],
+        mesh("box")
+      )
+    ).write(o0)
+  `)
+  const midi = new MidiState()
+  midi.handleMessage(new Uint8Array([0x90, 60, 32]), { id: 'left-id', name: 'Launch Control XL' })
+  midi.handleMessage(new Uint8Array([0x90, 72, 127]), { id: 'right-id', name: 'Launch Control XL' })
+
+  evaluateBindings(bindings, 0, { midi, audio: null })
+  assert.ok(
+    Math.abs(tree.getById('spin').rotation[1] - (32 / 127) * 360) < 1e-9,
+    'scene binding should read only the exact selected port'
+  )
+}
+
+// A readable name remains a compatibility selector only while it identifies
+// exactly one connected port. Ambiguity must hold the descriptor at its min.
+{
+  const { tree, bindings } = build(`
+    search synth
+    scene(mesh("box", pos: [midi(channel: 1, mode: midiMode.gateVelocity, min: 0.25, name: "Launch Control XL"), 0, 0])).write(o0)
+  `)
+  const midi = new MidiState()
+  midi.handleMessage(new Uint8Array([0x90, 60, 64]), { id: 'left-id', name: 'Launch Control XL' })
+  evaluateBindings(bindings, 0, { midi, audio: null })
+  assert.ok(
+    Math.abs(tree.getMeshNodes()[0].position[0] - (0.25 + (64 / 127) * 0.75)) < 1e-9,
+    'one exact readable-name match should drive the scene'
+  )
+
+  midi.handleMessage(new Uint8Array([0x90, 72, 127]), { id: 'right-id', name: 'Launch Control XL' })
+  evaluateBindings(bindings, 0, { midi, audio: null })
+  assert.strictEqual(tree.getMeshNodes()[0].position[0], 0.25,
+    'duplicate readable names should make the scene binding inert at min')
+}
+
+// The id remains authoritative across a port rename, then becomes unavailable
+// immediately when that exact port disconnects.
+{
+  const { tree, bindings } = build(`
+    search synth
+    scene(mesh("box", pos: [midi(channel: 1, mode: midiMode.gateVelocity, min: 0.1, name: "Old Name", id: "port-id"), 0, 0])).write(o0)
+  `)
+  const midi = new MidiState()
+  midi.handleMessage(new Uint8Array([0x90, 60, 127]), { id: 'port-id', name: 'New Name' })
+  evaluateBindings(bindings, 0, { midi, audio: null })
+  assert.strictEqual(tree.getMeshNodes()[0].position[0], 1,
+    'exact id should drive the scene despite readable-name drift')
+
+  midi.disconnectPort('port-id')
+  evaluateBindings(bindings, 0, { midi, audio: null })
+  assert.strictEqual(tree.getMeshNodes()[0].position[0], 0.1,
+    'disconnected exact id should hold the scene binding at min')
 }
 
 // An audio-driven scale reads the same AudioState the pipeline reads.

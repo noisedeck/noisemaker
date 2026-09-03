@@ -298,6 +298,17 @@ render(o0)`, 'midi binding')
     assert.match(out, /midi\(/, 'keeps the midi() call')
 })
 
+test('selected midi() identity inside a scene argument round-trips', () => {
+    const out = assertStable(`search synth
+scene(
+  camera(fov: 60),
+  light(type: "point", intensity: midi(name: "Launch Control XL", id: "port-2", channel: 1))
+).write(o0)
+render(o0)`, 'selected midi binding')
+    assert.match(out, /name: "Launch Control XL"/, 'keeps the readable MIDI device name')
+    assert.match(out, /id: "port-2"/, 'keeps the exact MIDI device id')
+})
+
 test('an unhandled scene node type fails loudly instead of deleting itself', () => {
     const result = compile('search synth\nscene(camera(fov: 60)).write(o0)\nrender(o0)')
     const step = result.plans[0].chain.find(s => s.op === '_scene.scene')

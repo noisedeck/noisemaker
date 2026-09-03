@@ -199,13 +199,15 @@ export function parse(tokens) {
      * Transform a midi() call into a Midi AST node.
      *
      * Midi signature:
-     * midi(channel, mode?, min?, max?, sensitivity?)
+     * midi(channel, mode?, min?, max?, sensitivity?, name:?, id:?)
      *
      * channel: MIDI channel 1-16 (required)
      * mode: midiMode enum (default midiMode.velocity)
      * min: low end of the normalized [0, 1] output sub-range (default 0)
      * max: high end of the normalized [0, 1] output sub-range (default 1)
      * sensitivity: trigger falloff rate (default 1)
+     * name: readable MIDIPort.name selector (keyword-only)
+     * id: exact MIDIPort.id selector (keyword-only, requires name)
      */
     function transformMidiInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -213,6 +215,16 @@ export function parse(tokens) {
 
         // Parameter order: channel, mode, min, max, sensitivity
         const paramOrder = ['channel', 'mode', 'min', 'max', 'sensitivity']
+        const keywordOnlyParams = ['name', 'id']
+        const validParams = [...paramOrder, ...keywordOnlyParams]
+        if (args.length > paramOrder.length) {
+            throw new SyntaxError(`midi() name and id are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const key of Object.keys(kwargs)) {
+            if (!validParams.includes(key)) {
+                throw new SyntaxError(`midi() unknown parameter '${key}' at line ${nameToken.line} col ${nameToken.col}. Valid: ${validParams.join(', ')}`)
+            }
+        }
         const defaults = {
             mode: { type: 'Member', path: ['midiMode', 'velocity'] },
             min: { type: 'Number', value: 0 },
@@ -240,8 +252,25 @@ export function parse(tokens) {
             }
         }
 
+        if (posCursor < args.length) {
+            throw new SyntaxError(`midi() has an excess positional argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+
         if (!resolved.channel) {
             throw new SyntaxError(`midi() requires 'channel' argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (kwargs.id !== undefined && kwargs.name === undefined) {
+            throw new SyntaxError(`midi() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const paramName of keywordOnlyParams) {
+            const value = kwargs[paramName]
+            if (value === undefined) continue
+            if (value.type !== 'String') {
+                throw new SyntaxError(`midi() '${paramName}' requires a quoted string at line ${nameToken.line} col ${nameToken.col}`)
+            }
+            if (value.value.length === 0) {
+                throw new SyntaxError(`midi() '${paramName}' must not be empty at line ${nameToken.line} col ${nameToken.col}`)
+            }
         }
 
         return {
@@ -251,6 +280,8 @@ export function parse(tokens) {
             min: resolved.min,
             max: resolved.max,
             sensitivity: resolved.sensitivity,
+            name: kwargs.name,
+            id: kwargs.id,
             loc: { line: nameToken.line, col: nameToken.col }
         }
     }

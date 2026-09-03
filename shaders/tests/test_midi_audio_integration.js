@@ -147,6 +147,47 @@ test('midi sensitivity affects trigger falloff', () => {
     assertEqual(value, 0, 'should be 0 when fully decayed')
 })
 
+test('midi resolves from only the exact selected Web MIDI port', () => {
+    const result = compile('search synth\nnoise(scale: midi(channel: 1, mode: midiMode.gateVelocity, name: "Launch Control XL", id: "left-id")).write(o0)')
+    const scaleArg = result.plans[0].chain[0].args.scale
+    const { pipeline, midiState } = createTestPipeline()
+
+    midiState.handleMessage(new Uint8Array([0x90, 60, 32]), { id: 'left-id', name: 'Launch Control XL' })
+    midiState.handleMessage(new Uint8Array([0x90, 72, 127]), { id: 'right-id', name: 'Launch Control XL' })
+
+    const value = pipeline.resolveUniformValue(scaleArg, 0)
+    assertApprox(value, 32 / 127, 0.01, 'selected port should not be overwritten by its identical sibling')
+})
+
+test('name-only midi is inert when duplicate readable names are ambiguous', () => {
+    const result = compile('search synth\nnoise(scale: midi(channel: 1, mode: midiMode.gateVelocity, min: 0.25, name: "Launch Control XL")).write(o0)')
+    const scaleArg = result.plans[0].chain[0].args.scale
+    const { pipeline, midiState } = createTestPipeline()
+
+    midiState.handleMessage(new Uint8Array([0x90, 60, 127]), { id: 'left-id', name: 'Launch Control XL' })
+    midiState.handleMessage(new Uint8Array([0x90, 72, 127]), { id: 'right-id', name: 'Launch Control XL' })
+
+    assertEqual(pipeline.resolveUniformValue(scaleArg, 0), 0.25,
+        'ambiguous readable name should resolve to the automation minimum')
+})
+
+test('midi passes its compiled descriptor directly to port selection', () => {
+    const result = compile('search synth\nnoise(scale: midi(channel: 1, name: "Controller", id: "port-id")).write(o0)')
+    const descriptor = result.plans[0].chain[0].args.scale
+    const pipeline = new Pipeline(null, null)
+    let selectedWith = null
+    pipeline.setMidiState({
+        getPortState(selector) {
+            selectedWith = selector
+            return null
+        }
+    })
+
+    pipeline.resolveUniformValue(descriptor, 0)
+    assertEqual(selectedWith, descriptor,
+        'render path should reuse the compiled descriptor instead of allocating a selector')
+})
+
 // ============================================================================
 // Audio Integration Tests
 // ============================================================================

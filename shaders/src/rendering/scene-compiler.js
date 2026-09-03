@@ -12,6 +12,7 @@
  */
 
 import { resolveDescriptorEnum } from '../lang/descriptorEnums.js'
+import { decodeJsonStringLiteralContent } from '../lang/stringLiterals.js'
 
 /** Texture the scene renderer presents into. */
 export const SCENE_COLOR_TEXTURE = 'scene_color'
@@ -228,6 +229,15 @@ function descriptorNumber(node, name, fallback, descriptorNode) {
     throw sceneError(`${fn}() ${name} must be a number`, descriptorNode)
 }
 
+function descriptorString(node, name, descriptorNode) {
+    if (node === undefined) return undefined
+    if (node?.type === 'String' && node.value.length > 0) {
+        return decodeJsonStringLiteralContent(node.value)
+    }
+    const fn = DESCRIPTOR_FUNCTION[descriptorNode.type]
+    throw sceneError(`${fn}() ${name} requires a non-empty quoted string`, descriptorNode)
+}
+
 /**
  * Resolve a descriptor's enum-valued argument (osc() type, midi() mode,
  * audio() band).
@@ -292,7 +302,9 @@ function canonicalMidi(node) {
         mode: node.mode === undefined ? 4 : descriptorEnum(node.mode, 'mode', 'midiMode', node),
         min: descriptorPercentage(node.min, 'min', 0, node),
         max: descriptorPercentage(node.max, 'max', 1, node),
-        sensitivity: descriptorNumber(node.sensitivity, 'sensitivity', 1, node)
+        sensitivity: descriptorNumber(node.sensitivity, 'sensitivity', 1, node),
+        ...(node.name !== undefined && { name: descriptorString(node.name, 'name', node) }),
+        ...(node.id !== undefined && { id: descriptorString(node.id, 'id', node) })
     }
 }
 
