@@ -146,6 +146,61 @@ render(o0)`;
     assertIncludes(result, 'scale: knob', 'Should reference variable');
 });
 
+test('let with escaped MIDI device identity round-trips stably', () => {
+    const name = 'Launch "Control" \\ XL';
+    const id = 'port\\two';
+    const src = `search synth
+
+let knob = midi(name: ${JSON.stringify(name)}, id: ${JSON.stringify(id)}, channel: 1)
+
+noise(scale: knob)
+  .write(o0)
+
+render(o0)`;
+    const once = unparse(compile(src));
+    const twice = unparse(compile(once));
+    assertEqual(twice, once, 'MIDI identity must not grow escapes across round-trips');
+    assertIncludes(once, `name: ${JSON.stringify(name)}`, 'Should preserve readable MIDI name');
+    assertIncludes(once, `id: ${JSON.stringify(id)}`, 'Should preserve exact MIDI id');
+});
+
+test('let with numeric MIDI mode round-trips without changing mode', () => {
+    for (let mode = 0; mode <= 4; mode++) {
+        const src = `search synth
+
+let knob = midi(channel: 1, mode: ${mode})
+
+noise(scale: knob)
+  .write(o0)
+
+render(o0)`;
+        const once = unparse(compile(src));
+        const twice = unparse(compile(once));
+        assertEqual(twice, once, `Numeric MIDI mode ${mode} should be stable`);
+        if (mode !== 4) {
+            assertIncludes(once, `mode: ${mode}`, `Numeric MIDI mode ${mode} should be preserved`);
+        }
+    }
+});
+
+test('single-quoted MIDI identity with quotes and slashes round-trips to valid DSL', () => {
+    const name = 'Keys "Left" Controller\'s \\ Main';
+    const id = 'port\\one';
+    const src = String.raw`search synth
+
+let knob = midi(name: 'Keys "Left" Controller\'s \\ Main', id: 'port\\one', channel: 1)
+
+noise(scale: knob)
+  .write(o0)
+
+render(o0)`;
+    const once = unparse(compile(src));
+    const twice = unparse(compile(once));
+    assertEqual(twice, once, 'Single-quoted MIDI identity should emit stable valid DSL');
+    assertIncludes(once, `name: ${JSON.stringify(name)}`, 'Should preserve quotes, apostrophe, and slash');
+    assertIncludes(once, `id: ${JSON.stringify(id)}`, 'Should preserve escaped id slash');
+});
+
 // Test 7: Let with audio
 test('let with audio() round-trips', () => {
     const src = `search synth

@@ -66,7 +66,7 @@ export class MidiChannelState {
  * Provides per-channel state tracking for the Pipeline.
  */
 export class MidiState {
-    constructor() {
+    constructor({ portRegistry = true } = {}) {
         /** @type {Object.<number, MidiChannelState>} Per-channel state (1-16) */
         this.channels = {}
         for (let i = 1; i <= 16; i++) {
@@ -76,6 +76,90 @@ export class MidiState {
         this.clockCount = 0
         /** @type {Float32Array} Note grid texture data (128 keys x 16 channels x 4 RGBA) */
         this.noteGrid = new Float32Array(128 * 16 * 4)
+        /** @type {Map<string, {id: string, name: string, connected: boolean, state: MidiState}>|null} */
+        this._ports = portRegistry ? new Map() : null
+        /** @type {Map<string, MidiState|null>|null} Connected name lookup; null means ambiguous. */
+        this._portsByName = portRegistry ? new Map() : null
+    }
+
+    /**
+     * Register or reconnect one Web MIDI input port.
+     * @param {{id: string, name: string}} port
+     * @returns {MidiState|null} Isolated state for this port
+     */
+    registerPort(port) {
+        if (!this._ports || !port || typeof port.id !== 'string' || !port.id) return null
+        const name = typeof port.name === 'string' ? port.name : ''
+        let entry = this._ports.get(port.id)
+        let topologyChanged = false
+        if (!entry) {
+            entry = {
+                id: port.id,
+                name,
+                connected: true,
+                state: new MidiState({ portRegistry: false })
+            }
+            this._ports.set(port.id, entry)
+            topologyChanged = true
+        } else {
+            topologyChanged = entry.name !== name || !entry.connected
+            entry.name = name
+            entry.connected = true
+        }
+        if (topologyChanged) this._rebuildPortNameIndex()
+        return entry.state
+    }
+
+    /**
+     * Mark one Web MIDI port unavailable without losing its identity record.
+     * @param {string} id
+     */
+    disconnectPort(id) {
+        const entry = this._ports?.get(id)
+        if (!entry) return
+        entry.connected = false
+        entry.state.reset()
+        this._rebuildPortNameIndex()
+    }
+
+    /**
+     * Resolve the MIDI state selected by a compiled midi() descriptor.
+     * An id is authoritative; a name-only selector must match exactly once.
+     * @param {{name?: string, id?: string}} selector
+     * @returns {MidiState|null}
+     */
+    getPortState(selector = {}) {
+        if (!selector.name && !selector.id) return this
+        if (selector.id) {
+            const entry = this._ports?.get(selector.id)
+            return entry?.connected ? entry.state : null
+        }
+        return this._portsByName?.get(selector.name) ?? null
+    }
+
+    _rebuildPortNameIndex() {
+        if (!this._ports || !this._portsByName) return
+        this._portsByName.clear()
+        for (const entry of this._ports.values()) {
+            if (!entry.connected || !entry.name) continue
+            if (this._portsByName.has(entry.name)) {
+                this._portsByName.set(entry.name, null)
+            } else {
+                this._portsByName.set(entry.name, entry.state)
+            }
+        }
+    }
+
+    /**
+     * Return structured port identity and connection state for host UIs.
+     * @returns {Array<{id: string, name: string, connected: boolean}>}
+     */
+    getPorts() {
+        return [...(this._ports?.values() || [])].map(({ id, name, connected }) => ({
+            id,
+            name,
+            connected
+        }))
     }
 
     /**
@@ -94,9 +178,14 @@ export class MidiState {
      * Process a raw MIDI message.
      * Parses the status byte and routes to appropriate channel.
      * @param {Uint8Array} data - Raw MIDI message data [status, key, velocity]
+     * @param {{id: string, name: string}} [port] - Originating Web MIDI port
      */
-    handleMessage(data) {
+    handleMessage(data, port) {
         if (!data || data.length < 1) return
+
+        if (port && this._ports) {
+            this.registerPort(port)?.handleMessage(data)
+        }
 
         const status = data[0]
 
@@ -150,6 +239,9 @@ export class MidiState {
         }
         this.clockCount = 0
         this.noteGrid.fill(0)
+        if (this._ports) {
+            for (const entry of this._ports.values()) entry.state.reset()
+        }
     }
 }
 
@@ -314,6 +406,11 @@ export class MidiInputManager {
         this._midiAccess = null
         this._enabled = false
         this._onStatusChange = null
+        this._onPortsChange = null
+        this._status = { state: 'idle', message: '', deviceCount: 0 }
+        this._enablePromise = null
+        this._generation = 0
+        this._portOperationTokens = new Map()
     }
 
     /**
@@ -328,43 +425,89 @@ export class MidiInputManager {
      * Enable MIDI input
      * @returns {Promise<boolean>} Whether MIDI was successfully enabled
      */
-    async enable() {
-        if (this._enabled) return true
+    enable() {
+        if (this._enabled) return Promise.resolve(true)
+        if (this._enablePromise) return this._enablePromise
+
+        const generation = ++this._generation
+        const operation = this._enable(generation)
+        let wrapped
+        wrapped = operation.finally(() => {
+            if (this._enablePromise === wrapped) {
+                this._enablePromise = null
+            }
+        })
+        this._enablePromise = wrapped
+        return wrapped
+    }
+
+    async _enable(generation) {
 
         if (!MidiInputManager.isSupported()) {
             console.warn('Web MIDI API not supported')
-            this._notifyStatus('MIDI not supported')
+            this._notifyStatus('MIDI not supported', { state: 'unsupported', deviceCount: 0 })
             return false
         }
 
         try {
-            this._midiAccess = await navigator.requestMIDIAccess()
-            this._midiState = this._renderer.setMidiState()
+            const midiAccess = await navigator.requestMIDIAccess()
+            if (generation !== this._generation) return false
+            this._midiAccess = midiAccess
+            const midiState = this._renderer.setMidiState()
+            this._midiState = midiState
 
             // Connect all input devices
+            let openFailures = 0
             for (const input of this._midiAccess.inputs.values()) {
-                this._connectInput(input)
+                if (!await this._connectInput(input, generation, midiState)) openFailures++
+                if (generation !== this._generation) return false
             }
+            this._notifyPortsChange()
 
             // Listen for new devices
-            this._midiAccess.onstatechange = (event) => {
+            this._midiAccess.onstatechange = async (event) => {
+                if (generation !== this._generation) return
                 if (event.port.type === 'input') {
                     if (event.port.state === 'connected') {
-                        this._connectInput(event.port)
-                        this._notifyStatus(`MIDI connected: ${event.port.name}`)
+                        const opened = await this._connectInput(event.port, generation, midiState)
+                        if (generation !== this._generation) return
+                        if (opened) {
+                            this._notifyStatus(`MIDI connected: ${event.port.name}`, {
+                                state: 'connected',
+                                deviceCount: this._midiAccess.inputs.size,
+                                port: { id: event.port.id, name: event.port.name || '' }
+                            })
+                        }
                     } else {
-                        this._notifyStatus(`MIDI disconnected: ${event.port.name}`)
+                        this._invalidatePortOperation(event.port.id)
+                        event.port.onmidimessage = null
+                        this._midiState?.disconnectPort(event.port.id)
+                        this._notifyStatus(`MIDI disconnected: ${event.port.name}`, {
+                            state: 'disconnected',
+                            deviceCount: this._midiAccess.inputs.size,
+                            port: { id: event.port.id, name: event.port.name || '' }
+                        })
                     }
+                    this._notifyPortsChange()
                 }
             }
 
+            if (generation !== this._generation) return false
             this._enabled = true
             const inputCount = this._midiAccess.inputs.size
-            this._notifyStatus(`MIDI enabled (${inputCount} device${inputCount !== 1 ? 's' : ''})`)
+            if (openFailures === 0) {
+                this._notifyStatus(`MIDI enabled (${inputCount} device${inputCount !== 1 ? 's' : ''})`, {
+                    state: 'enabled',
+                    deviceCount: inputCount
+                })
+            }
             return true
         } catch (err) {
-            console.error('MIDI access denied:', err)
-            this._notifyStatus('MIDI access denied')
+            if (generation !== this._generation) return false
+            const denied = err?.name === 'NotAllowedError' || err?.name === 'SecurityError'
+            const message = denied ? 'MIDI access denied' : 'MIDI access failed'
+            console.error(`${message}:`, err)
+            this._notifyStatus(message, { state: denied ? 'denied' : 'error', deviceCount: 0 })
             return false
         }
     }
@@ -373,17 +516,21 @@ export class MidiInputManager {
      * Disable MIDI input
      */
     disable() {
-        if (!this._enabled) return
+        this._generation++
+        this._enablePromise = null
+        this._portOperationTokens.clear()
 
         if (this._midiAccess) {
             for (const input of this._midiAccess.inputs.values()) {
                 input.onmidimessage = null
+                this._midiState?.disconnectPort(input.id)
             }
             this._midiAccess.onstatechange = null
         }
 
         this._enabled = false
-        this._notifyStatus('MIDI disabled')
+        this._notifyPortsChange()
+        this._notifyStatus('MIDI disabled', { state: 'disabled', deviceCount: 0 })
     }
 
     /**
@@ -415,19 +562,78 @@ export class MidiInputManager {
         this._onStatusChange = callback
     }
 
-    _connectInput(input) {
-        input.onmidimessage = (event) => this._handleMidiMessage(event)
-        if (input.connection !== 'open') input.open()
+    /**
+     * Set structured MIDI port inventory callback.
+     * @param {function(Array<{id: string, name: string, connected: boolean}>)} callback
+     */
+    onPortsChange(callback) {
+        this._onPortsChange = callback
     }
 
-    _handleMidiMessage(event) {
+    /**
+     * Return every port encountered by this manager, including disconnected
+     * entries retained so host UIs can keep selected devices visible.
+     */
+    getPorts() {
+        return this._midiState?.getPorts() || []
+    }
+
+    /**
+     * Return the latest structured MIDI access or connection status.
+     */
+    getStatus() {
+        return { ...this._status }
+    }
+
+    async _connectInput(input, generation = this._generation, midiState = this._midiState) {
+        const port = { id: input.id, name: input.name || '' }
+        const operationToken = (this._portOperationTokens.get(input.id) || 0) + 1
+        this._portOperationTokens.set(input.id, operationToken)
+        try {
+            if (input.connection !== 'open') await input.open()
+            const currentInput = this._midiAccess?.inputs?.get(input.id)
+            if (generation !== this._generation ||
+                this._portOperationTokens.get(input.id) !== operationToken ||
+                currentInput !== input || input.state === 'disconnected') return false
+            midiState?.registerPort(port)
+            input.onmidimessage = (event) => this._handleMidiMessage(event, port)
+            return true
+        } catch (err) {
+            if (generation !== this._generation ||
+                this._portOperationTokens.get(input.id) !== operationToken) return false
+            input.onmidimessage = null
+            midiState?.disconnectPort(input.id)
+            this._notifyStatus(`MIDI device failed to open: ${port.name}`, {
+                state: 'error',
+                deviceCount: this.getPorts().filter(candidate => candidate.connected).length,
+                port,
+                error: err?.message || String(err)
+            })
+            return false
+        }
+    }
+
+    _invalidatePortOperation(id) {
+        if (!id) return
+        this._portOperationTokens.set(id, (this._portOperationTokens.get(id) || 0) + 1)
+    }
+
+    _handleMidiMessage(event, port) {
         if (!this._midiState) return
-        this._midiState.handleMessage(event.data)
+        this._midiState.handleMessage(event.data, port)
     }
 
-    _notifyStatus(message) {
+    _notifyStatus(message, detail = {}) {
+        this._status = { ...detail, message }
         if (this._onStatusChange) {
-            this._onStatusChange(message)
+            // Keep the message as the first argument for existing consumers.
+            this._onStatusChange(message, this.getStatus())
+        }
+    }
+
+    _notifyPortsChange() {
+        if (this._onPortsChange) {
+            this._onPortsChange(this.getPorts())
         }
     }
 }

@@ -176,13 +176,15 @@ export function parse(tokens) {
      * Transform a midi() call into a Midi AST node.
      *
      * Midi signature:
-     * midi(channel, mode?, min?, max?, sensitivity?)
+     * midi(channel, mode?, min?, max?, sensitivity?, name:?, id:?)
      *
      * channel: MIDI channel 1-16 (required)
      * mode: midiMode enum (default midiMode.velocity)
      * min: minimum output value (default 0)
      * max: maximum output value (default 1)
      * sensitivity: trigger falloff rate (default 1)
+     * name: readable MIDIPort.name selector (keyword-only)
+     * id: exact MIDIPort.id selector (keyword-only, requires name)
      */
     function transformMidiInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -190,6 +192,16 @@ export function parse(tokens) {
 
         // Parameter order: channel, mode, min, max, sensitivity
         const paramOrder = ['channel', 'mode', 'min', 'max', 'sensitivity']
+        const keywordOnlyParams = ['name', 'id']
+        const validParams = [...paramOrder, ...keywordOnlyParams]
+        if (args.length > paramOrder.length) {
+            throw new SyntaxError(`midi() name and id are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const key of Object.keys(kwargs)) {
+            if (!validParams.includes(key)) {
+                throw new SyntaxError(`midi() unknown parameter '${key}' at line ${nameToken.line} col ${nameToken.col}. Valid: ${validParams.join(', ')}`)
+            }
+        }
         const defaults = {
             mode: { type: 'Member', path: ['midiMode', 'velocity'] },
             min: { type: 'Number', value: 0 },
@@ -199,20 +211,40 @@ export function parse(tokens) {
 
         const resolved = {}
 
-        // Resolve each parameter from positional args or kwargs
+        // Resolve each parameter from positional args or kwargs. Positionals
+        // are dense, so keyword arguments do not consume their slots.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
         }
 
+        if (posCursor < args.length) {
+            throw new SyntaxError(`midi() has an excess positional argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+
         if (!resolved.channel) {
             throw new SyntaxError(`midi() requires 'channel' argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (kwargs.id !== undefined && kwargs.name === undefined) {
+            throw new SyntaxError(`midi() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const paramName of keywordOnlyParams) {
+            const value = kwargs[paramName]
+            if (value === undefined) continue
+            if (value.type !== 'String') {
+                throw new SyntaxError(`midi() '${paramName}' requires a quoted string at line ${nameToken.line} col ${nameToken.col}`)
+            }
+            if (value.value.length === 0) {
+                throw new SyntaxError(`midi() '${paramName}' must not be empty at line ${nameToken.line} col ${nameToken.col}`)
+            }
         }
 
         return {
@@ -222,6 +254,8 @@ export function parse(tokens) {
             min: resolved.min,
             max: resolved.max,
             sensitivity: resolved.sensitivity,
+            name: kwargs.name,
+            id: kwargs.id,
             loc: { line: nameToken.line, col: nameToken.col }
         }
     }
@@ -818,30 +852,28 @@ export function parse(tokens) {
         const args = []
         const kwargs = {}
         let keyword = false
+        let positional = false
+        const allowMixed = nameToken.lexeme === 'midi'
         if (peek().type !== 'RPAREN') {
-            if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
-                keyword = true
-                parseKwarg(kwargs)
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (!(peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON')) {
+            while (true) {
+                if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
+                    if (positional && !allowMixed) {
                         const t = peek()
                         throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
                     }
+                    keyword = true
                     parseKwarg(kwargs)
-                }
-            } else {
-                args.push(parseArg())
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
+                } else {
+                    if (keyword && !allowMixed) {
                         const t = peek()
                         throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
                     }
+                    positional = true
                     args.push(parseArg())
                 }
+                if (peek().type !== 'COMMA') break
+                advance()
+                if (peek().type === 'RPAREN') break
             }
         }
         expect('RPAREN', "Expect ')'")

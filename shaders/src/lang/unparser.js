@@ -6,6 +6,7 @@
  */
 
 import { stdEnums } from './std_enums.js'
+import { decodeJsonStringLiteralContent } from './stringLiterals.js'
 
 /**
  * Map oscillator type number to oscKind enum name
@@ -103,6 +104,12 @@ function formatMidi(midi) {
     }
     if (midi.sensitivity !== 1) {
         parts.push(`sensitivity: ${midi.sensitivity}`)
+    }
+    if (typeof midi.name === 'string' && midi.name.length > 0) {
+        parts.push(`name: ${JSON.stringify(midi.name)}`)
+    }
+    if (typeof midi.id === 'string' && midi.id.length > 0) {
+        parts.push(`id: ${JSON.stringify(midi.id)}`)
     }
 
     return `midi(${parts.join(', ')})`
@@ -701,6 +708,8 @@ function formatLetExpr(expr, options = {}) {
                 if (name !== 'velocity') modeStr = `midiMode.${name}`
             } else if (expr.mode?.type === 'Ident') {
                 modeStr = expr.mode.name  // variable reference, no prefix
+            } else if (expr.mode?.type === 'Number' && expr.mode.value !== 4) {
+                modeStr = String(expr.mode.value)
             }
             if (modeStr) parts.push(`mode: ${modeStr}`)
             const pushMidiField = (name, node, def) => {
@@ -710,6 +719,14 @@ function formatLetExpr(expr, options = {}) {
             pushMidiField('min', expr.min, 0)
             pushMidiField('max', expr.max, 1)
             pushMidiField('sensitivity', expr.sensitivity, 1)
+            // MIDI identity accepts either DSL quote style. Normalize the
+            // decoded value through JSON escaping so every result reparses.
+            if (expr.name?.type === 'String') {
+                parts.push(`name: ${JSON.stringify(decodeJsonStringLiteralContent(expr.name.value))}`)
+            }
+            if (expr.id?.type === 'String') {
+                parts.push(`id: ${JSON.stringify(decodeJsonStringLiteralContent(expr.id.value))}`)
+            }
             return `midi(${parts.join(', ')})`
         }
         case 'Audio': {

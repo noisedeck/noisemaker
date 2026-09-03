@@ -5,7 +5,7 @@
  * that provide real-time input state for midi() and audio() functions.
  */
 
-import { MidiState, MidiChannelState, AudioState } from '../src/runtime/external-input.js'
+import { MidiState, MidiChannelState, MidiInputManager, AudioState } from '../src/runtime/external-input.js'
 
 let passCount = 0
 let failCount = 0
@@ -13,6 +13,18 @@ let failCount = 0
 function test(name, fn) {
     try {
         fn()
+        console.log(`PASS: ${name}`)
+        passCount++
+    } catch (e) {
+        console.error(`FAIL: ${name}`)
+        console.error(e.message)
+        failCount++
+    }
+}
+
+async function asyncTest(name, fn) {
+    try {
+        await fn()
         console.log(`PASS: ${name}`)
         passCount++
     } catch (e) {
@@ -167,6 +179,392 @@ test('MidiState.reset clears all channels', () => {
     for (let i = 1; i <= 16; i++) {
         assertEqual(midi.channels[i].gate, 0, `channel ${i} gate should be 0`)
         assertEqual(midi.channels[i].key, 0, `channel ${i} key should be 0`)
+    }
+})
+
+test('MidiState isolates messages by Web MIDI port while preserving the aggregate', () => {
+    const midi = new MidiState()
+
+    midi.handleMessage(new Uint8Array([0x90, 60, 40]), { id: 'left-id', name: 'Launch Control XL' })
+    midi.handleMessage(new Uint8Array([0x90, 72, 100]), { id: 'right-id', name: 'Launch Control XL' })
+
+    assertEqual(midi.getChannel(1).key, 72, 'legacy aggregate should retain the latest message')
+    assertEqual(midi.getPortState({ name: 'Launch Control XL', id: 'left-id' }).getChannel(1).key,
+        60, 'left port should retain only its own message')
+    assertEqual(midi.getPortState({ name: 'Launch Control XL', id: 'right-id' }).getChannel(1).key,
+        72, 'right port should retain only its own message')
+})
+
+test('MidiState resolves a unique readable name but rejects an ambiguous one', () => {
+    const midi = new MidiState()
+    midi.registerPort({ id: 'left-id', name: 'Launch Control XL' })
+
+    assert(midi.getPortState({ name: 'Launch Control XL' }), 'one readable-name match should resolve')
+
+    midi.registerPort({ id: 'right-id', name: 'Launch Control XL' })
+    assertEqual(midi.getPortState({ name: 'Launch Control XL' }), null,
+        'duplicate readable names should be ambiguous')
+})
+
+test('MidiState uses id as authority when a port name changes', () => {
+    const midi = new MidiState()
+    midi.registerPort({ id: 'port-id', name: 'Renamed Controller' })
+
+    const selected = midi.getPortState({ name: 'Old Controller Name', id: 'port-id' })
+    assert(selected, 'matching id should resolve despite a stale readable name')
+})
+
+test('MidiState makes a disconnected selected port unavailable and clears its held notes', () => {
+    const midi = new MidiState()
+    midi.handleMessage(new Uint8Array([0x90, 60, 127]), { id: 'port-id', name: 'Launch Control XL' })
+    const portState = midi.getPortState({ name: 'Launch Control XL', id: 'port-id' })
+    assertEqual(portState.getChannel(1).gate, 1, 'fixture should begin with a held note')
+
+    midi.disconnectPort('port-id')
+
+    assertEqual(portState.getChannel(1).gate, 0, 'disconnect should clear held notes')
+    assertEqual(midi.getPortState({ name: 'Launch Control XL', id: 'port-id' }), null,
+        'disconnected exact port should not resolve')
+})
+
+test('MidiState exposes structured connected-port inventory', () => {
+    const midi = new MidiState()
+    midi.registerPort({ id: 'port-id', name: 'Launch Control XL' })
+
+    assertEqual(JSON.stringify(midi.getPorts()), JSON.stringify([
+        { id: 'port-id', name: 'Launch Control XL', connected: true }
+    ]), 'inventory should expose the Web MIDI identity fields and connection state')
+})
+
+console.log('\n=== MidiInputManager Tests ===\n')
+
+await asyncTest('MidiInputManager routes messages with structured port identity and reports hot-plug state', async () => {
+    const input = {
+        id: 'port-id',
+        manufacturer: 'Novation',
+        name: 'Launch Control XL',
+        type: 'input',
+        version: '1',
+        state: 'connected',
+        connection: 'closed',
+        onmidimessage: null,
+        open() { this.connection = 'open'; return Promise.resolve(this) },
+        close() { this.connection = 'closed'; return Promise.resolve(this) }
+    }
+    const access = {
+        inputs: new Map([[input.id, input]]),
+        outputs: new Map(),
+        onstatechange: null,
+        sysexEnabled: false
+    }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => access }
+    })
+
+    try {
+        const midiState = new MidiState()
+        const manager = new MidiInputManager({ setMidiState: () => midiState })
+        const inventories = []
+        const statuses = []
+        manager.onPortsChange(ports => inventories.push(ports))
+        manager.onStatusChange((message, status) => statuses.push({ message, status }))
+
+        assertEqual(await manager.enable(), true, 'manager should enable')
+        assertEqual(manager.getStatus().state, 'enabled',
+            'manager should expose a structured enabled state')
+        assertEqual(manager.getStatus().message, 'MIDI enabled (1 device)',
+            'manager should expose the enabled status message')
+        assertEqual(manager.getStatus().deviceCount, 1,
+            'manager should expose the enabled device count')
+        assert(statuses.some(entry => entry.status?.state === 'enabled'),
+            'status callback should include a structured enabled state')
+        assertEqual(JSON.stringify(manager.getPorts()), JSON.stringify([
+            { id: 'port-id', name: 'Launch Control XL', connected: true }
+        ]), 'initial inventory should be structured')
+
+        input.onmidimessage({ data: new Uint8Array([0x90, 60, 100]) })
+        assertEqual(midiState.getPortState({ id: 'port-id' }).getChannel(1).key, 60,
+            'input callback should retain the originating port identity')
+
+        input.state = 'disconnected'
+        access.inputs.delete(input.id)
+        access.onstatechange({ port: input })
+        assertEqual(manager.getStatus().state, 'disconnected',
+            'disconnect should expose a structured disconnected state')
+        assertEqual(manager.getStatus().port.id, 'port-id',
+            'disconnect status should identify the affected port')
+        assertEqual(midiState.getPortState({ id: 'port-id' }), null,
+            'disconnect event should make the exact port unavailable')
+        assert(inventories.some(ports => ports[0]?.connected === false),
+            'port callback should report the disconnected state')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('MidiInputManager classifies non-permission access failures as operational errors', async () => {
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => { throw new Error('adapter unavailable') } }
+    })
+
+    try {
+        const manager = new MidiInputManager({ setMidiState: () => new MidiState() })
+        assertEqual(await manager.enable(), false, 'manager should report failed enable')
+        assertEqual(manager.getStatus().state, 'error',
+            'non-permission access failure should not be reported as denied')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('MidiInputManager handles rejected port open without an unhandled promise', async () => {
+    const input = {
+        id: 'broken-port',
+        name: 'Broken Controller',
+        type: 'input',
+        state: 'connected',
+        connection: 'closed',
+        onmidimessage: null,
+        open: async () => { throw new Error('open failed') }
+    }
+    const access = {
+        inputs: new Map([[input.id, input]]),
+        outputs: new Map(),
+        onstatechange: null
+    }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => access }
+    })
+
+    try {
+        const midiState = new MidiState()
+        const manager = new MidiInputManager({ setMidiState: () => midiState })
+        assertEqual(await manager.enable(), true, 'MIDI access itself should remain enabled')
+        assertEqual(manager.getStatus().state, 'error', 'port open rejection should be an operational error')
+        assertEqual(midiState.getPortState({ id: 'broken-port' }), null,
+            'a port that failed to open must not be registered as connected')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('MidiInputManager coalesces concurrent enable requests', async () => {
+    let requestCount = 0
+    let resolveAccess
+    const accessPromise = new Promise(resolve => { resolveAccess = resolve })
+    const access = { inputs: new Map(), outputs: new Map(), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: {
+            requestMIDIAccess: () => {
+                requestCount++
+                return accessPromise
+            }
+        }
+    })
+
+    try {
+        let stateCount = 0
+        const manager = new MidiInputManager({
+            setMidiState: () => { stateCount++; return new MidiState() }
+        })
+        const first = manager.enable()
+        const second = manager.enable()
+        assertEqual(requestCount, 1, 'concurrent callers should share one permission request')
+        resolveAccess(access)
+        assertEqual(await first, true, 'first caller should receive successful enable')
+        assertEqual(await second, true, 'second caller should share successful enable')
+        assertEqual(stateCount, 1, 'renderer should receive only one MidiState')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('MidiInputManager disable cancels a pending permission request', async () => {
+    let resolveAccess
+    const accessPromise = new Promise(resolve => { resolveAccess = resolve })
+    const access = { inputs: new Map(), outputs: new Map(), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: () => accessPromise }
+    })
+
+    try {
+        let stateCount = 0
+        const manager = new MidiInputManager({
+            setMidiState: () => { stateCount++; return new MidiState() }
+        })
+        const enabling = manager.enable()
+        manager.disable()
+        resolveAccess(access)
+
+        assertEqual(await enabling, false, 'cancelled enable should report false')
+        assertEqual(manager.enabled, false, 'manager must remain disabled')
+        assertEqual(stateCount, 0, 'cancelled request must not install renderer state')
+        assertEqual(access.onstatechange, null, 'cancelled request must not install a port listener')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('MidiInputManager disable survives a stale port-open rejection', async () => {
+    let rejectOpen
+    const openPromise = new Promise((resolve, reject) => { rejectOpen = reject })
+    const input = {
+        id: 'slow-port',
+        name: 'Slow Controller',
+        type: 'input',
+        state: 'connected',
+        connection: 'closed',
+        onmidimessage: null,
+        open: () => openPromise
+    }
+    const access = { inputs: new Map([[input.id, input]]), outputs: new Map(), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => access }
+    })
+
+    try {
+        const manager = new MidiInputManager({ setMidiState: () => new MidiState() })
+        const enabling = manager.enable()
+        await Promise.resolve()
+        manager.disable()
+        rejectOpen(new Error('late open failure'))
+
+        assertEqual(await enabling, false, 'stale open failure should settle as cancelled')
+        assertEqual(manager.getStatus().state, 'disabled',
+            'stale open failure must not overwrite disabled status')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('stale port-open rejection cannot disconnect a newer generation', async () => {
+    let rejectOldOpen
+    const oldOpen = new Promise((resolve, reject) => { rejectOldOpen = reject })
+    const oldInput = {
+        id: 'shared-port',
+        name: 'Old Controller',
+        type: 'input',
+        state: 'connected',
+        connection: 'closed',
+        onmidimessage: null,
+        open: () => oldOpen
+    }
+    const newInput = {
+        id: 'shared-port',
+        name: 'New Controller',
+        type: 'input',
+        state: 'connected',
+        connection: 'open',
+        onmidimessage: null
+    }
+    const accesses = [
+        { inputs: new Map([[oldInput.id, oldInput]]), outputs: new Map(), onstatechange: null },
+        { inputs: new Map([[newInput.id, newInput]]), outputs: new Map(), onstatechange: null }
+    ]
+    let requestIndex = 0
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => accesses[requestIndex++] }
+    })
+
+    try {
+        const manager = new MidiInputManager({ setMidiState: () => new MidiState() })
+        const oldEnable = manager.enable()
+        await Promise.resolve()
+        manager.disable()
+        assertEqual(await manager.enable(), true, 'new generation should enable')
+        rejectOldOpen(new Error('stale failure'))
+        assertEqual(await oldEnable, false, 'old generation should settle as cancelled')
+
+        assertEqual(manager.enabled, true, 'new generation should remain enabled')
+        assertEqual(JSON.stringify(manager.getPorts()), JSON.stringify([
+            { id: 'shared-port', name: 'New Controller', connected: true }
+        ]), 'stale failure must not mutate the new generation port state')
+        assertEqual(manager.getStatus().state, 'enabled',
+            'stale failure must not overwrite the new generation status')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
+    }
+})
+
+await asyncTest('a stale hot-plug open cannot resurrect a disconnected port', async () => {
+    let resolveOpen
+    const openPromise = new Promise(resolve => { resolveOpen = resolve })
+    const input = {
+        id: 'slow-hotplug-port',
+        name: 'Slow Hotplug Controller',
+        type: 'input',
+        state: 'connected',
+        connection: 'closed',
+        onmidimessage: null,
+        open: () => openPromise
+    }
+    const access = { inputs: new Map(), outputs: new Map(), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', {
+        configurable: true,
+        value: { requestMIDIAccess: async () => access }
+    })
+
+    try {
+        const manager = new MidiInputManager({ setMidiState: () => new MidiState() })
+        assertEqual(await manager.enable(), true, 'manager should enable without initial ports')
+
+        access.inputs.set(input.id, input)
+        const connecting = access.onstatechange({ port: input })
+        await Promise.resolve()
+
+        input.state = 'disconnected'
+        access.inputs.delete(input.id)
+        await access.onstatechange({ port: input })
+        resolveOpen(input)
+        await connecting
+
+        assertEqual(manager.getStatus().state, 'disconnected',
+            'stale open completion must not overwrite disconnected status')
+        assertEqual(manager.getPorts().length, 0,
+            'stale open completion must not register the disconnected port')
+        assertEqual(input.onmidimessage, null,
+            'stale open completion must not restore the message listener')
+    } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: previousNavigator
+        })
     }
 })
 
