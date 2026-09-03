@@ -165,7 +165,13 @@ A cubemap renderer renders one face at a time (whichever ``cubeBasis`` the drive
      - 0
      - Time value passed to the render (for animated volumes)
 
-The graph must terminate in a cubemap renderer writing to ``outputSurface``. ``outputSurface`` must name a real surface the DSL wrote to; an unknown name throws. A flat 2D chain (no cubemap renderer) would render the same image six times.
+The graph must terminate in a cubemap renderer writing to ``outputSurface`` —
+or be a :ref:`scene() <shader-scene>` program ending in ``.write(oN)``, which
+exports by rendering the scene six times through cube-face cameras at the
+scene camera's position, full pass stack per face, no cubemap renderer
+involved. ``outputSurface`` must name a real surface the DSL wrote to; an
+unknown name throws. A flat 2D chain (neither a cubemap renderer nor a scene)
+would render the same image six times.
 
 Exporting
 ---------
@@ -227,6 +233,6 @@ Technical Notes
 
 - **Face order is fixed**: ``+X, -X, +Y, -Y, +Z, -Z`` (indices 0–5), consistent across the camera, driver, export names, and cross layout.
 - **Readback works on both backends.** ``renderCubemap`` reads the offscreen output surface directly (via ``copyTextureToBuffer`` on WebGPU), which sidesteps the canvas IOSurface readback race that affects on-screen captures.
-- **Pixel rows are top-down** (``readPixels`` flips WebGL2's bottom-up rows to match WebGPU). The exported PNGs and the cross are in standard top-down image orientation.
+- **Pixel row order is backend-relative.** For the same program, WebGL2 returns each face's rows top-down (row 0 is the top of the image) and WebGPU returns them bottom-up (row 0 is the bottom). This holds identically for the 2D and scene paths, so a face keeps one orientation per backend whatever produced it. Check ``renderer.backend`` (``'glsl'`` or ``'wgsl'``) before encoding: PNGs and cross layouts written straight from the buffer come out upright on WebGL2 and vertically flipped on WebGPU unless the rows are reversed first.
 - **Volume size limits**: ``x16``–``x128`` (128³ is the current ceiling).
 - ``outputSurface`` defaults to ``o0`` and must match the surface the DSL writes to.

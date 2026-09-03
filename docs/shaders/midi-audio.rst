@@ -18,8 +18,8 @@ Once enabled, you can use ``midi()`` and ``audio()`` in your DSL programs:
     search synth
     // React to MIDI velocity and audio bass at the same time
     noise(
-        scale: midi(channel: 1, min: 1, max: 10),
-        speed: audio(band: audioBand.low, min: 0.5, max: 2)
+        scale: midi(channel: 1, min: 0.1, max: 1),
+        speed: audio(band: audioBand.low, min: 0.25, max: 1)
     ).write(o0)
     render(o0)
 
@@ -34,7 +34,7 @@ Control a parameter with MIDI velocity from channel 1:
 .. code-block:: dsl
 
     search synth
-    noise(scale: midi(channel: 1, min: 1, max: 10)).write(o0)
+    noise(scale: midi(channel: 1, min: 0.1, max: 1)).write(o0)
 
 Audio Input
 ~~~~~~~~~~~
@@ -44,7 +44,11 @@ React to bass frequencies in the audio input:
 .. code-block:: dsl
 
     search synth
-    noise(scale: audio(band: audioBand.low, min: 1, max: 5)).write(o0)
+    noise(scale: audio(band: audioBand.low, min: 0.2, max: 1)).write(o0)
+
+``min`` and ``max`` are fractions of the parameter's own range, each in
+``0..1`` — here the bass level sweeps ``scale`` across the upper four fifths
+of its range. See :ref:`shader-language` for the rule.
 
 midi() Function
 ---------------
@@ -128,13 +132,13 @@ Examples
     noise(scale: midi(channel: 1)).write(o0)
 
     // Note pitch controls rotation
-    warp(rotation: midi(channel: 1, mode: midiMode.noteChange, min: 0, max: 360))
+    warp(rotation: midi(channel: 1, mode: midiMode.noteChange))
 
     // Velocity with fast decay for percussive response
-    bloom(strength: midi(channel: 10, mode: midiMode.velocity, sensitivity: 5, min: 0, max: 2))
+    bloom(strength: midi(channel: 10, mode: midiMode.velocity, sensitivity: 5, min: 0, max: 0.5))
 
     // Sustained note control
-    noise(scale: midi(channel: 2, mode: midiMode.gateVelocity, min: 1, max: 10))
+    noise(scale: midi(channel: 2, mode: midiMode.gateVelocity, min: 0.1, max: 1))
 
 audio() Function
 ----------------
@@ -196,13 +200,13 @@ Examples
 .. code-block:: dsl
 
     // React to bass
-    noise(scale: audio(band: audioBand.low, min: 1, max: 5)).write(o0)
+    noise(scale: audio(band: audioBand.low, min: 0.2, max: 1)).write(o0)
 
     // Hi-hat triggers brightness
-    bloom(strength: audio(band: audioBand.high, min: 0, max: 2))
+    bloom(strength: audio(band: audioBand.high, min: 0, max: 0.5))
 
     // Overall volume controls speed
-    warp(speed: audio(band: audioBand.vol, min: 0.5, max: 3))
+    warp(speed: audio(band: audioBand.vol, min: 0.25, max: 0.75))
 
 Combining with Other Automation
 -------------------------------
@@ -214,11 +218,25 @@ Combining with Other Automation
     search synth
     // MIDI controls scale, audio controls speed, oscillator controls rotation
     noise(
-        scale: midi(channel: 1, min: 1, max: 10),
-        speed: audio(band: audioBand.low, min: 0.5, max: 2)
+        scale: midi(channel: 1, min: 0.1, max: 1),
+        speed: audio(band: audioBand.low, min: 0.25, max: 1)
     ).warp(
-        rotation: osc(type: oscKind.sine, min: 0, max: 360)
+        rotation: osc(type: oscKind.sine)
     ).write(o0)
+
+All three descriptors also drive :ref:`scene graph <shader-scene>` nodes:
+``midi()`` and ``audio()`` are accepted in place of a number in a node's
+``pos``, ``rot`` and ``scale`` components and in a light's ``intensity`` (not
+in a camera or in a light's position), resolved from the same ``MidiState``
+and ``AudioState`` as effect uniforms, so 3D motion and 2D automation respond
+to one performance. A scene ``rot`` component spans ``0..360`` degrees;
+``pos``, ``scale`` and ``intensity`` receive the ``0..1`` value directly, and
+a ``min`` or ``max`` outside ``0..1`` is a compile error in a scene.
+
+.. code-block:: dsl
+
+    light(type: "point", intensity: midi(channel: 1, mode: midiMode.velocity))
+    group(pos: [0, 1, 0], mesh("sphere", pos: [0, audio(band: audioBand.low), 0]))
 
 Host Integration
 ----------------

@@ -1,0 +1,23 @@
+{
+  "case": "shaders/tests/pin-cases/renderLit3d.json",
+  "resolution": [
+    192,
+    192
+  ],
+  "webgl2": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 21041,
+    "uniqueColors": 164,
+    "sha256": "dd07649d86792ca55b80358acc704a7d590035465e9a8745b3cd694c50f6d17f"
+  },
+  "webgpu": {
+    "surface": "global_o0_read",
+    "width": 192,
+    "height": 192,
+    "nonzeroRgbPixels": 21041,
+    "uniqueColors": 164,
+    "sha256": "dff6042451508e9f0b458f33831c5f56aeee377dcdfa3b38021df2bedff4dd44"
+  }
+}

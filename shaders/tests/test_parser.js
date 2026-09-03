@@ -1,12 +1,16 @@
 import { lex } from '../src/lang/lexer.js'
 import { parse } from '../src/lang/parser.js'
 
+let failed = 0
+process.on('exit', () => { if (failed > 0) process.exitCode = 1 })
+
 function test(name, code, check, expectError = null) {
     try {
         console.log(`Running test: ${name}`)
         const tokens = lex(code)
         const ast = parse(tokens)
         if (expectError) {
+            failed++
             console.error(`FAIL: ${name}`)
             console.error('Expected error but parsing succeeded')
             return
@@ -20,11 +24,13 @@ function test(name, code, check, expectError = null) {
                 expectError(e)
                 // expectError should have printed pass if successful
             } catch (validationError) {
+                failed++
                 console.error(`FAIL: ${name}`)
                 console.error(validationError)
             }
             return
         }
+        failed++
         console.error(`FAIL: ${name}`)
         console.error(e)
         try {
@@ -280,3 +286,62 @@ test('Existing vecN(...) form is unchanged by array-literal addition', 'search s
     if (arg.type !== 'Call') throw new Error('Expected Call, got ' + arg.type)
     if (arg.name !== 'vec3') throw new Error('Expected vec3 call, got ' + arg.name)
 })
+
+// ---------------------------------------------------------------------------
+// Comments inside an argument list.
+//
+// The lexer emits COMMENT tokens and the parser consumed them only between
+// statements and between chain links, so a comment written INSIDE a call's
+// parentheses was `Unexpected token COMMENT`. scene() is the one construct that
+// routinely runs to forty lines, and annotating its children is the first thing
+// anyone tries.
+//
+// Comments in these positions are SKIPPED, not preserved: scene arguments are
+// re-emitted on a single line, where a `//` comment would swallow the rest of
+// the program.
+// ---------------------------------------------------------------------------
+
+test('comment inside a call argument list',
+    'search synth\nnoise(\n  // the scale\n  10\n).write(o0)', (ast) => {
+        const call = ast.plans[0].chain[0]
+        if (call.args.length !== 1 || call.args[0].value !== 10) {
+            throw new Error(`Expected one positional 10, got ${JSON.stringify(call.args)}`)
+        }
+    })
+
+test('comment before a keyword argument, and trailing before the paren',
+    'search synth\nnoise(\n  // leading\n  scale: 10, // trailing on the arg\n  seed: 2\n  // before the paren\n).write(o0)', (ast) => {
+        const call = ast.plans[0].chain[0]
+        if (call.kwargs.scale.value !== 10 || call.kwargs.seed.value !== 2) {
+            throw new Error(`Expected scale 10 and seed 2, got ${JSON.stringify(call.kwargs)}`)
+        }
+    })
+
+test('block comment between arguments',
+    'search synth\nnoise(10 /* between */, 2).write(o0)', (ast) => {
+        const call = ast.plans[0].chain[0]
+        if (call.args.length !== 2) throw new Error(`Expected two positionals, got ${call.args.length}`)
+    })
+
+test('comment inside an array literal',
+    'search synth\nnoise(p: [\n  1, // x\n  2,\n  // z\n  3\n]).write(o0)', (ast) => {
+        const arg = ast.plans[0].chain[0].kwargs.p
+        if (arg.type !== 'ArrayLiteral' || arg.elements.length !== 3) {
+            throw new Error(`Expected a 3-element ArrayLiteral, got ${JSON.stringify(arg)}`)
+        }
+    })
+
+test('comment inside an object literal',
+    'search synth\nlet cfg = {\n  // a\n  a: 1,\n  b: 2 // b\n}\nnoise(10).write(o0)', (ast) => {
+        const binding = ast.vars.find(v => v.name === 'cfg')
+        if (Object.keys(binding.expr.properties).length !== 2) {
+            throw new Error(`Expected two properties, got ${JSON.stringify(binding.expr)}`)
+        }
+    })
+
+test('comment inside a nested scene() argument list',
+    'search synth\nscene(\n  // the camera\n  camera(fov: 60),\n\n  // the meshes\n  mesh("sphere") // just one\n).write(o0)', (ast) => {
+        const call = ast.plans[0].chain[0]
+        if (call.name !== 'scene') throw new Error(`Expected scene(), got ${call.name}`)
+        if (call.args.length !== 2) throw new Error(`Expected two scene children, got ${call.args.length}`)
+    })

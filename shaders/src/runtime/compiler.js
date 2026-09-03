@@ -7,6 +7,7 @@ import { compile } from '../lang/index.js'
 import { expand } from './expander.js'
 import { allocateResources } from './resources.js'
 import { createPipeline } from './pipeline.js'
+import { compileScene } from '../rendering/scene-compiler.js'
 
 /**
  * Compile DSL source into an executable graph
@@ -33,6 +34,10 @@ export function compileGraph(source, options = {}) {
         }
     }
 
+    // Stage 1b: Compile any scene() program into scene IR. Null for ordinary
+    // effect programs, which are unaffected.
+    const sceneIR = compileScene(compilationResult)
+
     // Stage 2: Expand logical graph into render passes
     const { passes, errors: expandErrors, programs, textureSpecs, renderSurface } = expand(
         compilationResult,
@@ -43,6 +48,16 @@ export function compileGraph(source, options = {}) {
         throw {
             code: 'ERR_EXPANSION_FAILED',
             errors: expandErrors
+        }
+    }
+
+    // Stage 2b: A scene volume() can only read a 64-cube atlas.
+    const volumeProducers = findSceneVolumeProducers(sceneIR, passes)
+    const volumeSizeErrors = checkSceneVolumeAtlasSizes(volumeProducers)
+    if (volumeSizeErrors.length > 0) {
+        throw {
+            code: 'ERR_VOLUME_ATLAS_SIZE',
+            errors: volumeSizeErrors
         }
     }
 
@@ -58,6 +73,11 @@ export function compileGraph(source, options = {}) {
         allocations,
         textures: extractTextureSpecs(passes, options, textureSpecs),
         renderSurface, // Which surface to present to screen (e.g., 'o0', 'o2')
+        _isScene: sceneIR !== null,
+        sceneIR,
+        // The same constraint the check above enforced, in the form the runtime
+        // needs it: which volumeSize uniform scopes are pinned, and to what.
+        sceneVolumeAtlasScopes: collectSceneVolumeAtlasScopes(volumeProducers),
         compiledAt: Date.now()
     }
 
@@ -71,9 +91,140 @@ export function compileGraph(source, options = {}) {
  * @returns {Promise<Pipeline>} Initialized pipeline ready to render
  */
 export async function createRuntime(source, options = {}) {
-    const graph = compileGraph(source, options)
+    // Callers that have already compiled the source — CanvasRenderer.compile()
+    // builds a graph to detect scene programs — pass it in rather than paying
+    // for a second parse, validate, expand and allocation pass on every edit.
+    const graph = options.graph ?? compileGraph(source, options)
     const pipeline = await createPipeline(graph, options)
     return pipeline
+}
+
+/**
+ * Slice size of the vol0..vol7 global atlases.
+ *
+ * Hardwired in three places that must agree: `volumeSliceSize` in pipeline.js
+ * createSurfaces (which allocates them 64 x 4096), VOLUME_ATLAS_SIZE in
+ * volume-renderer.js (which binds u_volumeSize), and the `y + z * u_volumeSize`
+ * decode in volume-shaders.js.
+ */
+const VOLUME_ATLAS_SIZE = 64
+
+/**
+ * Correlate each surface a scene volume() marches with the pass that produces
+ * its atlas.
+ *
+ * write3d into a volN global is a plain 2D blit (expander.js
+ * `_write3d_vol_blit`), so the size the atlas was actually written at lives on
+ * the pass feeding that blit, not on the blit itself. The producer is reached
+ * by correlating the blit's source texture back to the pass that writes it; the
+ * chain's resolved volumeSize rides on that pass's uniforms (the expander
+ * propagates it through `pipelineUniforms`).
+ *
+ * Only the surfaces a volume() node actually marches are constrained; render3d
+ * reads the same globals with its own u_volumeSize and is fine.
+ *
+ * Both the compile-time check and the runtime guard (pipeline.js
+ * `sceneVolumeAtlasConstraint`) are built from this one correlation.
+ * @param {object|null} sceneIR - Scene IR, or null for a non-scene program
+ * @param {Array} passes - Expanded render passes
+ * @returns {Array<{surface: string, producer: object}>} One entry per marched surface with a producer
+ */
+function findSceneVolumeProducers(sceneIR, passes) {
+    if (!sceneIR?.nodes) return []
+
+    const marched = new Set()
+    for (const node of sceneIR.nodes) {
+        if (node.type === 'volume' && node.surface) marched.add(node.surface)
+    }
+    if (marched.size === 0) return []
+
+    // Texture id -> the pass that produces it, so a blit's source resolves to
+    // the effect pass whose uniforms carry the chain's resolved volumeSize.
+    const producerOf = new Map()
+    for (const pass of passes) {
+        for (const texId of Object.values(pass.outputs || {})) {
+            if (!producerOf.has(texId)) producerOf.set(texId, pass)
+        }
+    }
+
+    const found = []
+    for (const surface of [...marched].sort()) {
+        const blit = passes.find(p => p.outputs?.color === `global_${surface}`)
+        // No write3d into this surface: nothing was produced at any size, which
+        // is an empty volume, not a decode mismatch.
+        if (!blit) continue
+
+        const producer = producerOf.get(blit.inputs?.src)
+        if (!producer) continue
+        found.push({ surface, producer })
+    }
+    return found
+}
+
+/**
+ * Reject a scene volume() whose atlas is produced at a size it cannot decode.
+ *
+ * A producer chain at, say, volumeSize x32 emits a 32 x 1024 atlas that the
+ * write3d blit STRETCHES into the 64 x 4096 global. The marcher then decodes it
+ * at the 64-slice stride and reads slices straddling the stretched boundaries —
+ * a sheared volume that still renders something plausible and signals nothing.
+ * Measured: 75% duplicate rows, IoU 0.935.
+ *
+ * Both halves are known here, so it is a compile error rather than a surprise.
+ * The runtime half of the same constraint is enforced from the pinned scopes
+ * this compile records on the graph (`sceneVolumeAtlasScopes`), because the UI
+ * paths patch pass uniforms in place and never re-enter this function.
+ * @param {Array<{surface: string, producer: object}>} volumeProducers - From findSceneVolumeProducers
+ * @returns {Array<{message: string, surface: string, volumeSize: number}>} One entry per offending surface
+ */
+function checkSceneVolumeAtlasSizes(volumeProducers) {
+    const errors = []
+    for (const { surface, producer } of volumeProducers) {
+        const volumeSize = producer.uniforms?.volumeSize
+        // A producer that declares no volumeSize is not making a claim about
+        // the atlas layout, so there is nothing to contradict.
+        if (typeof volumeSize !== 'number') continue
+        if (volumeSize === VOLUME_ATLAS_SIZE) continue
+
+        errors.push({
+            surface,
+            volumeSize,
+            message:
+                `volume(${surface}) marches a ${VOLUME_ATLAS_SIZE}-cube atlas, but ${surface} is ` +
+                `written by a chain at volumeSize x${volumeSize}. The write3d blit would stretch ` +
+                `${volumeSize}x${volumeSize * volumeSize} into ${VOLUME_ATLAS_SIZE}x` +
+                `${VOLUME_ATLAS_SIZE * VOLUME_ATLAS_SIZE} and the marcher would decode the result ` +
+                `at the wrong slice stride. Set volumeSize: x${VOLUME_ATLAS_SIZE} on the chain ` +
+                `writing ${surface}.`
+        })
+    }
+    return errors
+}
+
+/**
+ * The volumeSize uniform scopes pinned by a scene volume(), for the runtime
+ * guard. Keys are the uniform name a UI update writes for that chain — the
+ * chain-scoped variant (`volumeSize_chain_0`) when the producer's atlas is
+ * param-sized, which is every effect that builds one, and the bare
+ * `volumeSize` otherwise. Each carries the surface it feeds and the only size
+ * that surface can be marched at, so the runtime needs neither this module nor
+ * a second copy of the atlas constant.
+ *
+ * Empty for a non-scene program, a scene with no volume() node, a scene whose
+ * volume() reads a surface nothing writes, and a producer that declares no
+ * volumeSize — the same "not making a claim about the atlas layout" rule the
+ * compile-time check applies, and nothing there can be dragged anyway.
+ * @param {Array<{surface: string, producer: object}>} volumeProducers - From findSceneVolumeProducers
+ * @returns {Object<string, {surface: string, size: number}>} Scope name -> constraint
+ */
+function collectSceneVolumeAtlasScopes(volumeProducers) {
+    const scopes = {}
+    for (const { surface, producer } of volumeProducers) {
+        if (typeof producer.uniforms?.volumeSize !== 'number') continue
+        const scopeName = producer.scopedParams?.volumeSize || 'volumeSize'
+        scopes[scopeName] = { surface, size: VOLUME_ATLAS_SIZE }
+    }
+    return scopes
 }
 
 /**
@@ -157,7 +308,8 @@ function formatError(err) {
             })
             .join('; ') || 'Unknown compilation error'
     }
-    if (err.code === 'ERR_EXPANSION_FAILED' && Array.isArray(err.errors)) {
+    if ((err.code === 'ERR_EXPANSION_FAILED' || err.code === 'ERR_VOLUME_ATLAS_SIZE')
+        && Array.isArray(err.errors)) {
         return err.errors.map(e => e.message || String(e)).join('; ')
     }
     if (err.code === 'ERR_SHADER_COMPILE') {
@@ -172,18 +324,26 @@ function formatError(err) {
  * @param {string} newSource - New DSL source
  * @param {object} [options] - Recompilation options
  * @param {object} [options.shaderOverrides] - Per-step shader overrides
+ * @param {object} [options.graph] - Already-compiled graph for newSource
  * @returns {object} New graph (pipeline will update on next frame)
  */
 export function recompile(pipeline, newSource, options = {}) {
     try {
-        const newGraph = compileGraph(newSource, {
+        // Same handoff as createRuntime: CanvasRenderer.compile() has already
+        // compiled this source to detect a scene program, and a live edit is
+        // one keystroke, so re-parsing it here doubles the cost of every one.
+        const newGraph = options.graph ?? compileGraph(newSource, {
             width: pipeline.width,
             height: pipeline.height,
             shaderOverrides: options.shaderOverrides
         })
 
-        // Swap graph on pipeline
+        // Swap graph on pipeline. The scene volume() constraint the runtime
+        // guard enforces is read off the graph, so the guard's warn-once memo
+        // belongs to the graph being replaced: kept, it would silence every
+        // later refusal of a value already refused under the old program.
         pipeline.graph = newGraph
+        pipeline.resetSceneVolumeAtlasWarnings()
 
         // Recreate global surfaces and textures to reflect new graph requirements
         pipeline.createSurfaces()

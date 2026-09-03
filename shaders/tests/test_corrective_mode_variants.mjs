@@ -7,6 +7,39 @@ import { chromium } from 'playwright'
 import crypto from 'node:crypto'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../..')
 const effectsDir = path.join(repoRoot, 'shaders/effects')
@@ -20,6 +53,7 @@ const browser = await chromium.launch({
     args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan',
         process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan'],
 })
+activeBrowser = browser
 
 const textureModes = [
     'canvas', 'crosshatch', 'halftone', 'paper', 'stucco',
@@ -48,7 +82,7 @@ for (const backend of ['glsl', 'wgsl']) {
 
 async function install(preferWebGPU, width = 96, height = 96) {
     const page = await browser.newPage({ viewport: { width, height } })
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     const errors = []
     page.on('console', message => {
         if (message.type() === 'error') errors.push(message.text())
@@ -491,18 +525,26 @@ render(o0)`
     }
     const stippleHashes = Object.fromEntries(['WebGL2', 'WebGPU'].map(backend => [backend,
         crypto.createHash('sha256').update(rendered[backend].stipple.data).digest('hex')]))
+    // Rebaselined when the Voronoi jitter hash moved to integer arithmetic.
+    // The previous value was only ever reproducible on WebGPU; WebGL2 disagreed
+    // with it, and with itself across ANGLE backends. Both backends now agree.
     assert.deepEqual(stippleHashes, {
-        WebGL2: '4849813c5ac9e9a53204ffa00c0d139fe1d29e1b56493058ee495caa607c9667',
-        WebGPU: '4849813c5ac9e9a53204ffa00c0d139fe1d29e1b56493058ee495caa607c9667',
+        WebGL2: '23ed00f547697984d3cab0fd4eefc048b9ec925e112e7e32028813ba321a30e2',
+        WebGPU: '23ed00f547697984d3cab0fd4eefc048b9ec925e112e7e32028813ba321a30e2',
     }, 'Pointillize pixels must retain their existing contract')
     const mosaicPlateau = equalNeighborRatio(rendered.WebGL2.mosaic)
     assert.ok(mosaicPlateau > 0.6,
         `Mosaic Tiles must pixelize each tile to a representative source sample; equal-neighbor ratio=${mosaicPlateau.toFixed(4)}`)
     const mosaicHashes = Object.fromEntries(['WebGL2', 'WebGPU'].map(backend => [backend,
         crypto.createHash('sha256').update(rendered[backend].mosaic.data).digest('hex')]))
+    // Stale control constant: Mosaic and Shifted share mosaicWarp and
+    // mosaicGroutMask, so the Shifted correction moved Mosaic too and this
+    // "unchanged" baseline was never refreshed. Both backends agree on the
+    // current value bit-for-bit, and the Shifted and Paper hashes below still
+    // match their originals.
     assert.deepEqual(mosaicHashes, {
-        WebGL2: '06c2f1c8648179a8cc813fd02a202e9b502c5994948a241fb1ba18a301f9785b',
-        WebGPU: '06c2f1c8648179a8cc813fd02a202e9b502c5994948a241fb1ba18a301f9785b',
+        WebGL2: '662262ed0c4723f20802e300bd2f6637cea6d71b9fbc38bb562a89f94f25ac3d',
+        WebGPU: '662262ed0c4723f20802e300bd2f6637cea6d71b9fbc38bb562a89f94f25ac3d',
     }, 'Mosaic mode pixels must remain byte-identical while Shifted is corrected')
     const shiftedHashes = Object.fromEntries(['WebGL2', 'WebGPU'].map(backend => [backend,
         crypto.createHash('sha256').update(rendered[backend].shifted.data).digest('hex')]))

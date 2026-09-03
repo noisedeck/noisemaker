@@ -6,6 +6,7 @@ Specs
 
    effects
    language
+   deferred-rendering
    pipeline
    compiler
    effect-reference

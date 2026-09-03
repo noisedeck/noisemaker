@@ -87,6 +87,175 @@ function formatOscillator(osc) {
  * @param {object} midi - MIDI configuration object
  * @returns {string} DSL representation of the midi() call
  */
+/**
+ * Render a preserved scene AST back to DSL source.
+ *
+ * Scene calls are not validated against the effect registry — the validator
+ * stores the original AST on the step and the scene compiler interprets it
+ * later — so there is no arg spec to format against. This walks the AST
+ * directly. Without it, scene steps fell through to the generic path and
+ * stringified as `_scene.scene(_ast: [object Object])`, which does not reparse.
+ * @param {object} node - AST node from the preserved scene tree
+ * @returns {string} DSL source for the node
+ */
+/**
+ * Calls whose arguments are emitted one per line when a block indent is in
+ * effect. A scene is routinely thirty lines of nodes; joined with ', ' it came
+ * back from the demo's parameter round-trip as a single unreadable line.
+ */
+const SCENE_BLOCK_CALLS = new Set(['scene', 'group'])
+
+/**
+ * @param {object} node - AST node from the preserved scene tree
+ * @param {?string} [indent] - Current line indent when emitting the scene as
+ *   a block (one argument per line); null emits everything inline, which is
+ *   what array and object literals outside a scene want.
+ */
+function formatSceneAst(node, indent = null) {
+    if (node === null || node === undefined) return 'null'
+    // A let binding that reached this arg was inlined by the validator's
+    // substitute(), which tags the copy with the name it came from. Emitting
+    // the literal instead dissolves the binding the user wrote; the 2D path
+    // has honoured this tag all along.
+    if (typeof node._varRef === 'string') return node._varRef
+    switch (node.type) {
+        case 'Call': {
+            const positionals = node.args ?? []
+            const keywords = Object.entries(node.kwargs ?? {})
+            if (indent !== null && SCENE_BLOCK_CALLS.has(node.name) &&
+                positionals.length + keywords.length > 0) {
+                // Settings first, then children, one per line. Positional and
+                // keyword arguments are stored apart, so their interleaving in
+                // the source is not recoverable; this order reads naturally.
+                const inner = `${indent}  `
+                const lines = keywords.map(([key, value]) =>
+                    `${inner}${key}: ${formatSceneAst(value)}`)
+                for (const arg of positionals) {
+                    lines.push(`${inner}${formatSceneAst(arg, inner)}`)
+                }
+                return `${node.name}(\n${lines.join(',\n')}\n${indent})`
+            }
+            const parts = positionals.map(arg => formatSceneAst(arg))
+            for (const [key, value] of keywords) {
+                parts.push(`${key}: ${formatSceneAst(value)}`)
+            }
+            return `${node.name}(${parts.join(', ')})`
+        }
+        case 'Chain':
+            return (node.chain ?? []).map(el => formatSceneAst(el, indent)).join('.')
+        case 'ArrayLiteral':
+            return `[${(node.elements ?? []).map(formatSceneAst).join(', ')}]`
+        case 'Object': {
+            const entries = Object.entries(node.properties ?? {})
+                .map(([key, value]) => `${key}: ${formatSceneAst(value)}`)
+            return `{${entries.join(', ')}}`
+        }
+        case 'Oscillator': {
+            // Field order matches the parser's parameter order so the emitted
+            // call reparses to the same node.
+            const parts = []
+            if (node.oscType !== undefined) parts.push(`type: ${formatSceneAst(node.oscType)}`)
+            for (const key of ['min', 'max', 'speed', 'offset', 'seed']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `osc(${parts.join(', ')})`
+        }
+        case 'Audio': {
+            // Field order matches the parser's parameter order (band, min,
+            // max) so the emitted call reparses to the same node.
+            const parts = []
+            for (const key of ['band', 'min', 'max']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `audio(${parts.join(', ')})`
+        }
+        case 'Midi': {
+            // Parser parameter order: channel, mode, min, max, sensitivity;
+            // name and id are keyword-only identity fields.
+            const parts = []
+            for (const key of ['channel', 'mode', 'min', 'max', 'sensitivity', 'name', 'id']) {
+                if (node[key] !== undefined) parts.push(`${key}: ${formatSceneAst(node[key])}`)
+            }
+            return `midi(${parts.join(', ')})`
+        }
+        case 'Member':
+            return (node.path ?? []).join('.')
+        case 'Ident':
+            return node.name
+        case 'OutputRef':
+        case 'VolRef':
+        case 'GeoRef':
+        case 'SourceRef':
+        case 'MeshRef':
+        case 'RgbaRef':
+        case 'VelRef':
+        case 'XyzRef':
+            return node.name
+        case 'String':
+            // The lexer stores the raw slice between the quotes and never
+            // decodes escapes, so re-escaping here would double every
+            // backslash on each pass through the unparser.
+            return `"${node.value}"`
+        case 'Boolean':
+            return node.value ? 'true' : 'false'
+        case 'Number':
+            return formatNumber(node.value)
+        case 'Color':
+            return formatColorLiteral(node.value)
+        default:
+            // Returning '' here spliced the node out of the emitted source —
+            // `intensity: audio(...)` became `intensity: )` — silently
+            // corrupting the user's program. A loud failure is strictly
+            // better than a mangled round-trip.
+            throw new Error(`unparse: no scene emitter for AST node type '${node.type}'`)
+    }
+}
+
+/** Shortest representation that reparses to the same number. */
+function formatNumber(value) {
+    if (!Number.isFinite(value)) return '0'
+    const shortest = Number.isInteger(value) ? value : parseFloat(value.toPrecision(10))
+    return toPlainDecimal(shortest)
+}
+
+/**
+ * Expand exponent notation into plain decimal digits.
+ *
+ * String() switches to exponent form outside [1e-6, 1e21), and the number
+ * lexer reads only `digits[.digits]` — so `1e-7` and `1e+21` round-tripped
+ * into source that does not parse at all. The expansion is exact: it only
+ * moves the decimal point, so the text still reparses to the same value.
+ */
+function toPlainDecimal(value) {
+    const text = String(value)
+    if (!/[eE]/.test(text)) return text
+    const negative = text.startsWith('-')
+    const [mantissa, exponentText] = (negative ? text.slice(1) : text).split(/[eE]/)
+    const exponent = Number(exponentText)
+    const [intPart, fracPart = ''] = mantissa.split('.')
+    const digits = intPart + fracPart
+    // Where the decimal point lands inside `digits` once the exponent applies.
+    const point = intPart.length + exponent
+    let out
+    if (point <= 0) {
+        out = `0.${'0'.repeat(-point)}${digits}`
+    } else if (point >= digits.length) {
+        out = digits + '0'.repeat(point - digits.length)
+    } else {
+        out = `${digits.slice(0, point)}.${digits.slice(point)}`
+    }
+    if (out.includes('.')) out = out.replace(/0+$/, '').replace(/\.$/, '')
+    return negative ? `-${out}` : out
+}
+
+/** Format an [r,g,b,a] colour back to a #RRGGBB / #RRGGBBAA literal. */
+function formatColorLiteral(components) {
+    const hex = (v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')
+    const [r, g, b, a = 1] = components
+    const base = `#${hex(r)}${hex(g)}${hex(b)}`
+    return a >= 1 ? base : `${base}${hex(a)}`
+}
+
 function formatMidi(midi) {
     const parts = [`channel: ${midi.channel}`]
 
@@ -103,6 +272,12 @@ function formatMidi(midi) {
     }
     if (midi.sensitivity !== 1) {
         parts.push(`sensitivity: ${midi.sensitivity}`)
+    }
+    if (typeof midi.name === 'string' && midi.name.length > 0) {
+        parts.push(`name: ${JSON.stringify(midi.name)}`)
+    }
+    if (typeof midi.id === 'string' && midi.id.length > 0) {
+        parts.push(`id: ${JSON.stringify(midi.id)}`)
     }
 
     return `midi(${parts.join(', ')})`
@@ -661,7 +836,9 @@ function formatLetExpr(expr, options = {}) {
 
     switch (expr.type) {
         case 'Number':
-            return String(expr.value)
+            // Plain decimals only: String() switches to exponent notation
+            // outside [1e-6, 1e21), which the number lexer cannot read.
+            return toPlainDecimal(expr.value)
         case 'String':
             return JSON.stringify(expr.value)
         case 'Boolean':
@@ -670,6 +847,15 @@ function formatLetExpr(expr, options = {}) {
             return expr.name
         case 'Member':
             return expr.path.join('.')
+        case 'ArrayLiteral':
+            // Without a case here an array binding fell to formatValue and
+            // stringified as `let p = [object Object]`.
+            return formatSceneAst(expr)
+        case 'Object':
+            // Object literals were added to serve scene(), but they are a
+            // general expression form and can appear in a let binding, where
+            // there is no arg spec to format against.
+            return formatSceneAst(expr)
         case 'Oscillator': {
             // Raw AST Oscillator: sub-fields are AST nodes
             let typeStr = 'oscKind.sine'
@@ -710,6 +896,10 @@ function formatLetExpr(expr, options = {}) {
             pushMidiField('min', expr.min, 0)
             pushMidiField('max', expr.max, 1)
             pushMidiField('sensitivity', expr.sensitivity, 1)
+            // Lexer String nodes retain their original escape sequences. Emit
+            // those raw slices so repeated compile/unparse cycles stay stable.
+            if (expr.name?.type === 'String') parts.push(`name: "${expr.name.value}"`)
+            if (expr.id?.type === 'String') parts.push(`id: "${expr.id.value}"`)
             return `midi(${parts.join(', ')})`
         }
         case 'Audio': {
@@ -851,6 +1041,12 @@ export function unparse(compiled, overrides = {}, options = {}) {
                     read3dCode = `read3d(${tex3d}, ${geo})`
                 }
                 currentChain.push(makeChainElement(read3dCode))
+                globalStepIndex++
+                continue
+            }
+            // Scene steps carry their original AST rather than validated args.
+            if (step.scene && step.args?._ast) {
+                currentChain.push(makeChainElement(formatSceneAst(step.args._ast, '')))
                 globalStepIndex++
                 continue
             }

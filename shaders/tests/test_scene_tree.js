@@ -1,0 +1,378 @@
+// shaders/tests/test_scene_tree.js
+import assert from 'assert'
+import { SceneNode } from '../src/scene/node.js'
+import { CameraNode } from '../src/scene/camera.js'
+import { LightNode } from '../src/scene/light.js'
+import { MeshNode } from '../src/scene/mesh-node.js'
+import { VolumeNode } from '../src/scene/volume-node.js'
+import { SceneTree } from '../src/scene/tree.js'
+
+function approx(a, b, eps = 1e-4) {
+  assert.ok(Math.abs(a - b) < eps, `${a} ≈ ${b}`)
+}
+
+// SceneNode basics
+{
+  const node = new SceneNode({ id: 'test' })
+  assert.strictEqual(node.id, 'test')
+  assert.strictEqual(node.parent, null)
+  assert.strictEqual(node.children.length, 0)
+  const wm = node.getWorldMatrix()
+  approx(wm[0], 1); approx(wm[5], 1); approx(wm[10], 1); approx(wm[15], 1)
+}
+
+// Parent-child hierarchy
+{
+  const parent = new SceneNode({ id: 'parent' })
+  const child = new SceneNode({ id: 'child' })
+  parent.addChild(child)
+  assert.strictEqual(child.parent, parent)
+  assert.strictEqual(parent.children.length, 1)
+  assert.strictEqual(parent.children[0], child)
+}
+
+// Transform propagation
+{
+  const parent = new SceneNode({ id: 'p' })
+  parent.position = [10, 0, 0]
+  const child = new SceneNode({ id: 'c' })
+  child.position = [0, 5, 0]
+  parent.addChild(child)
+
+  const wm = child.getWorldMatrix()
+  approx(wm[12], 10)
+  approx(wm[13], 5)
+  approx(wm[14], 0)
+}
+
+// Dirty flag propagation
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c' })
+  parent.addChild(child)
+  child.getWorldMatrix()
+  assert.ok(!child._dirty, 'clean after getWorldMatrix')
+  parent.position = [1, 0, 0]
+  assert.ok(child._dirty, 'child dirty after parent move')
+}
+
+// Remove child
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c' })
+  parent.addChild(child)
+  parent.removeChild(child)
+  assert.strictEqual(parent.children.length, 0)
+  assert.strictEqual(child.parent, null)
+}
+
+// translate
+{
+  const node = new SceneNode({ id: 'n' })
+  node.translate(1, 2, 3)
+  approx(node.position[0], 1)
+  approx(node.position[1], 2)
+  approx(node.position[2], 3)
+  node.translate(1, 0, 0)
+  approx(node.position[0], 2)
+}
+
+// CameraNode
+{
+  const cam = new CameraNode({
+    fov: 60, near: 0.1, far: 100,
+    position: [0, 2, -5], target: [0, 0, 0]
+  })
+  const view = cam.getViewMatrix()
+  assert.strictEqual(view.length, 16)
+  const proj = cam.getProjectionMatrix(16/9)
+  assert.strictEqual(proj.length, 16)
+}
+
+// LightNode
+{
+  const light = new LightNode({
+    type: 'point', position: [0, 3, 0],
+    color: [1, 0.8, 0.6], intensity: 2
+  })
+  assert.strictEqual(light.lightType, 'point')
+  assert.strictEqual(light.intensity, 2)
+}
+
+// MeshNode
+{
+  const mesh = new MeshNode({
+    meshType: 'sphere',
+    meshParams: { radius: 1 },
+    material: 'mat_0',
+    planarReflection: true
+  })
+  assert.strictEqual(mesh.meshType, 'sphere')
+  assert.strictEqual(mesh.materialId, 'mat_0')
+  assert.strictEqual(mesh.planarReflection, true)
+}
+
+// SceneTree.fromIR
+{
+  const ir = {
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0], up: [0, 1, 0] },
+    lights: [{ type: 'directional', direction: [1, -1, 0], color: [1, 1, 1], intensity: 1 }],
+    nodes: [
+      { id: 'root', type: 'group', parent: null, transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, children: [1] },
+      { id: 'obj', type: 'mesh', parent: 0, meshType: 'sphere', meshParams: { radius: 1 }, material: 'mat_0', planarReflection: true }
+    ],
+    sdfs: [],
+    procedurals: [],
+    settings: { background: [0, 0, 0], ambient: 0.1 }
+  }
+  const tree = SceneTree.fromIR(ir)
+  assert.ok(tree.camera instanceof CameraNode)
+  assert.strictEqual(tree.lights.length, 1)
+  // tree.root is a synthetic root node; IR nodes are children of it
+  const rootGroup = tree.root.children[0]
+  assert.strictEqual(rootGroup.id, 'root')
+  assert.strictEqual(rootGroup.children.length, 1)
+  const obj = tree.getById('obj')
+  assert.ok(obj !== null)
+  assert.strictEqual(obj.meshType, 'sphere')
+  assert.strictEqual(obj.planarReflection, true)
+  assert.strictEqual(tree.getPlanarReflector(), obj)
+}
+
+// SceneTree traversal
+{
+  const ir = {
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0], up: [0, 1, 0] },
+    lights: [],
+    nodes: [
+      { id: 'a', type: 'group', parent: null, transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] }, children: [1, 2] },
+      { id: 'b', type: 'mesh', parent: 0, meshType: 'box', meshParams: {}, material: null },
+      { id: 'c', type: 'mesh', parent: 0, meshType: 'sphere', meshParams: {}, material: null }
+    ],
+    sdfs: [],
+    procedurals: [],
+    settings: {}
+  }
+  const tree = SceneTree.fromIR(ir)
+  const meshes = tree.getMeshNodes()
+  assert.strictEqual(meshes.length, 2)
+}
+
+// rotateX/Y/Z
+{
+  const node = new SceneNode({ id: 'r' })
+  node.rotateX(45)
+  approx(node.rotation[0], 45)
+  node.rotateY(90)
+  approx(node.rotation[1], 90)
+  node.rotateZ(30)
+  approx(node.rotation[2], 30)
+  // Incremental
+  node.rotateX(10)
+  approx(node.rotation[0], 55)
+  assert.ok(node._dirty, 'dirty after rotation')
+}
+
+// lookAt
+{
+  const node = new SceneNode({ id: 'l', position: [0, 0, 0] })
+  // Looking straight ahead along +Z
+  node.lookAt([0, 0, 10])
+  approx(node.rotation[0], 0)
+  approx(node.rotation[1], 0)
+  approx(node.rotation[2], 0)
+  // Looking along +X
+  node.lookAt([10, 0, 0])
+  approx(node.rotation[0], 0)
+  approx(node.rotation[1], 90)
+  // Looking up at 45 degrees along +Z
+  node.lookAt([0, 10, 10])
+  approx(node.rotation[0], -45)
+  approx(node.rotation[1], 0)
+}
+
+// CameraNode with custom id
+{
+  const cam = new CameraNode({ id: 'mycam', fov: 90 })
+  assert.strictEqual(cam.id, 'mycam')
+}
+
+// removeChild clears the removed node's inherited transform
+{
+  const parent = new SceneNode({ id: 'p', position: [10, 0, 0] })
+  const child = new SceneNode({ id: 'c', position: [0, 5, 0] })
+  parent.addChild(child)
+
+  const attached = child.getWorldMatrix()
+  approx(attached[12], 10)
+  approx(attached[13], 5)
+
+  parent.removeChild(child)
+  const detached = child.getWorldMatrix()
+  approx(detached[12], 0, 1e-4)
+  approx(detached[13], 5)
+}
+
+// LightNode spot angle default is in DEGREES, matching the DSL compiler's
+// buildLight() default of 45 and scene-renderer's degrees-to-radians convert.
+{
+  const light = new LightNode({ type: 'spot' })
+  assert.strictEqual(light.angle, 45)
+  // An explicit angle is passed through untouched (still degrees).
+  const explicit = new LightNode({ type: 'spot', angle: 30 })
+  assert.strictEqual(explicit.angle, 30)
+}
+
+// CameraNode ignores scene-graph parenting: warn once when a camera is
+// parented under a transform that would otherwise have moved it.
+{
+  const warnings = []
+  const realWarn = console.warn
+  console.warn = (...args) => { warnings.push(args.join(' ')) }
+  try {
+    const moving = new SceneNode({ id: 'rig', position: [10, 0, 0] })
+    const cam = new CameraNode({ position: [0, 0, 5], target: [0, 0, 0] })
+    moving.addChild(cam)
+    cam.getViewMatrix()
+    cam.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'warns exactly once')
+    assert.ok(/parent/i.test(warnings[0]), warnings[0])
+
+    // An identity-transform parent changes nothing, so it stays quiet.
+    const still = new SceneNode({ id: 'still' })
+    const cam2 = new CameraNode({ position: [0, 0, 5] })
+    still.addChild(cam2)
+    cam2.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'identity parent does not warn')
+
+    // An unparented camera stays quiet too.
+    const cam3 = new CameraNode({ position: [0, 0, 5] })
+    cam3.getViewMatrix()
+    assert.strictEqual(warnings.length, 1, 'unparented camera does not warn')
+  } finally {
+    console.warn = realWarn
+  }
+}
+
+// VolumeNode
+{
+  const volume = new VolumeNode({
+    surface: 'vol2',
+    threshold: 0.25,
+    material: 'mat_1',
+    position: [0, 1, 0]
+  })
+  assert.strictEqual(volume.surface, 'vol2')
+  assert.strictEqual(volume.threshold, 0.25)
+  assert.strictEqual(volume.materialId, 'mat_1')
+  assert.deepStrictEqual(volume.position, [0, 1, 0])
+  assert.ok(volume instanceof SceneNode, 'volumes are scene nodes')
+  assert.ok(!(volume instanceof MeshNode), 'volumes are not meshes')
+}
+
+// Volume nodes build from IR, inherit group transforms, and are collected
+// separately from meshes — the mesh renderer must never see one.
+{
+  const ir = {
+    camera: { fov: 60, near: 0.1, far: 100, position: [0, 0, 5], target: [0, 0, 0] },
+    lights: [],
+    nodes: [
+      { id: 'rig', type: 'group', parent: null, transform: { position: [10, 0, 0] }, children: [1, 2] },
+      { id: 'cloud', type: 'volume', parent: 0, surface: 'vol0', threshold: 0.4, material: 'mat_0', transform: { position: [0, 5, 0] }, children: [] },
+      { id: 'floor', type: 'mesh', parent: 0, meshType: 'plane', meshParams: {}, transform: {}, children: [] }
+    ],
+    settings: {},
+    materials: { mat_0: {} }
+  }
+  const tree = SceneTree.fromIR(ir)
+  const volumes = tree.getVolumeNodes()
+  assert.strictEqual(volumes.length, 1, 'one volume collected')
+  assert.strictEqual(volumes[0].surface, 'vol0', 'vol surface carried through')
+  assert.strictEqual(volumes[0].threshold, 0.4, 'threshold carried through')
+  assert.strictEqual(volumes[0].materialId, 'mat_0', 'material id carried through')
+
+  assert.strictEqual(tree.getMeshNodes().length, 1, 'volumes are not mesh nodes')
+  assert.strictEqual(tree.getMeshNodes()[0].id, 'floor', 'the mesh is the plane')
+
+  // Parent transforms compose, and the dirty flag propagates, exactly as for
+  // a mesh — the volume pass reads getWorldMatrix() the same way.
+  const world = volumes[0].getWorldMatrix()
+  approx(world[12], 10)
+  approx(world[13], 5)
+  assert.ok(!volumes[0]._dirty, 'clean after getWorldMatrix')
+  tree.getById('rig').position = [0, 0, 0]
+  assert.ok(volumes[0]._dirty, 'dirty after the parent moves')
+
+  assert.strictEqual(tree.getPlanarReflector(), null, 'a volume is never a planar reflector')
+}
+
+// ---------------------------------------------------------------------------
+// Index assignment on a transform array.
+//
+// `position` returns the live internal array, so `node.position[0] = 2` and
+// `node.position[1] += dt` — the two most common host patterns — bypass the
+// setter and never reach _markDirty. The cached matrices stayed composed from
+// the old values and the frame did not change, while reading `node.position`
+// back showed the new one. getWorldMatrix() detects the change by value.
+// ---------------------------------------------------------------------------
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c', position: [0, 0, 1] })
+  parent.addChild(child)
+
+  // Prime both caches so nothing is left dirty.
+  approx(parent.getWorldMatrix()[12], 0)
+  approx(child.getWorldMatrix()[12], 0)
+  assert.ok(!parent._dirty && !child._dirty, 'both clean after the first compute')
+
+  parent.position[0] = 7
+  const parentWorld = parent.getWorldMatrix()
+  approx(parentWorld[12], 7)
+
+  const childWorld = child.getWorldMatrix()
+  approx(childWorld[12], 7)
+  approx(childWorld[14], 1)
+
+  // += on a component, the other common form.
+  parent.position[1] += 3
+  approx(parent.getWorldMatrix()[13], 3)
+  approx(child.getWorldMatrix()[13], 3)
+
+  // Rotation and scale too, and the child follows both.
+  parent.rotation[1] = 90
+  approx(child.getWorldMatrix()[12], 8)     // parent [7,3,0] + Ry(90) * [0,0,1]
+  approx(child.getWorldMatrix()[14], 0)
+
+  parent.scale[2] = 4
+  approx(child.getWorldMatrix()[12], 11)    // Ry(90) * [0,0,4] = [4,0,0]
+
+  // The node's own components, not just an ancestor's.
+  child.position[1] = 5
+  approx(child.getWorldMatrix()[13], 8)
+}
+
+// A clean node does not recompute, so the value check costs nothing per frame.
+{
+  const node = new SceneNode({ id: 'n', position: [1, 2, 3] })
+  const first = node.getWorldMatrix()
+  const version = node._worldVersion
+  node.getWorldMatrix()
+  node.getWorldMatrix()
+  assert.strictEqual(node._worldVersion, version, 'a clean node recomposes no further')
+  approx(first[12], 1)
+}
+
+// The setters and _markDirty still work — bindings.js writes through them.
+{
+  const parent = new SceneNode({ id: 'p' })
+  const child = new SceneNode({ id: 'c' })
+  parent.addChild(child)
+  child.getWorldMatrix()
+  parent.rotation = [0, 0, 90]
+  assert.ok(child._dirty, '_markDirty still reaches children')
+  parent._position[0] = 2
+  parent._markDirty()
+  approx(child.getWorldMatrix()[12], 2)
+}
+
+console.log('Scene tree tests passed')

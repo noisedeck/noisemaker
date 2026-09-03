@@ -7,6 +7,39 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '../..')
@@ -233,7 +266,7 @@ async function assertTileParity(browser, baseUrl, fullPage, preferWebGPU,
     const tilePage = await browser.newPage({ viewport: { width: tileWidth, height: tileHeight } })
     // Bootstrap WebGPU's trustworthy origin before attaching diagnostics so a
     // navigation-only favicon request cannot hide or pollute shader messages.
-    if (preferWebGPU) await tilePage.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await tilePage.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     tilePage.on('console', (message) => {
         if (!['error', 'warning'].includes(message.type())) return
         const text = message.text()
@@ -278,6 +311,7 @@ async function main() {
             process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan',
         ],
     })
+    activeBrowser = browser
     const page = await browser.newPage({ viewport: { width, height } })
     const consoleMessages = []
     page.on('console', (message) => {
@@ -359,7 +393,7 @@ async function main() {
         // this second backend catch uniform-layout and constant-vector errors
         // that compile-only harness gates cannot see.
         const webgpuPage = await browser.newPage({ viewport: { width, height } })
-        await webgpuPage.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+        await webgpuPage.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
         webgpuPage.on('console', (message) => {
             if (!['error', 'warning'].includes(message.type())) return
             const text = message.text()

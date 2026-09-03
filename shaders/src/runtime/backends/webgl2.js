@@ -388,11 +388,17 @@ export class WebGL2Backend extends Backend {
             if (existing.width !== width || existing.height !== height) {
                 gl.bindRenderbuffer(gl.RENDERBUFFER, existing.buffer)
                 gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height)
+                gl.bindRenderbuffer(gl.RENDERBUFFER, null)
                 existing.width = width
                 existing.height = height
             }
             return
         }
+
+        // executePass binds the target FBO before calling this and draws right
+        // after, so the caller's binding has to survive. Finishing on null sent
+        // that draw to the default framebuffer instead.
+        const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING)
 
         // Create new depth renderbuffer
         const depthBuffer = gl.createRenderbuffer()
@@ -409,7 +415,7 @@ export class WebGL2Backend extends Backend {
             console.warn(`[ensureDepthBuffer] FBO incomplete after adding depth: ${status}`)
         }
 
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer)
         gl.bindRenderbuffer(gl.RENDERBUFFER, null)
 
         this.depthBuffers.set(fbo, { buffer: depthBuffer, width, height })
@@ -513,34 +519,57 @@ export class WebGL2Backend extends Backend {
     /**
      * Allocate a cube-map texture (6 faces, all same size).
      * @param {string} id - Texture identifier
-     * @param {{ size: number }} options - Cube face edge length in pixels
+     * @param {{ size: number, format?: string, usage?: string[] }} options - Cube face specification
      */
-    createCubeTexture(id, { size }) {
+    createCubeTexture(id, { size, format = 'rgba8', usage = [] }) {
         const gl = this.gl
         const handle = gl.createTexture()
+        const glFormat = this.resolveFormat(format)
         gl.bindTexture(gl.TEXTURE_CUBE_MAP, handle)
         for (let f = 0; f < 6; f++) {
-            gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, gl.RGBA8, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, null)
+            gl.texImage2D(
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X + f,
+                0,
+                glFormat.internalFormat,
+                size,
+                size,
+                0,
+                glFormat.format,
+                glFormat.type,
+                null
+            )
         }
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
         gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-        this.textures.set(id, { handle, width: size, height: size, cube: true })
-        return this.textures.get(id)
-    }
+        gl.texParameteri(gl.TEXTURE_CUBE_MAP, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE)
+        gl.bindTexture(gl.TEXTURE_CUBE_MAP, null)
 
-    /**
-     * Upload RGBA8 pixel data to one face of a cube-map texture.
-     * @param {string} id - Texture identifier (must have been created with createCubeTexture)
-     * @param {number} face - Face index 0..5 (added to TEXTURE_CUBE_MAP_POSITIVE_X)
-     * @param {{ width: number, height: number, data: Uint8Array }} faceData
-     */
-    uploadCubeFace(id, face, { width, height, data }) {
-        const gl = this.gl
-        const tex = this.textures.get(id)
-        gl.bindTexture(gl.TEXTURE_CUBE_MAP, tex.handle)
-        gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data)
+        this.textures.set(id, {
+            handle,
+            width: size,
+            height: size,
+            format,
+            glFormat,
+            cube: true
+        })
+
+        if (usage.includes('render')) {
+            const fbo = gl.createFramebuffer()
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+            gl.framebufferTexture2D(
+                gl.FRAMEBUFFER,
+                gl.COLOR_ATTACHMENT0,
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X,
+                handle,
+                0
+            )
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+            this.fbos.set(id, fbo)
+        }
+
+        return this.textures.get(id)
     }
 
     /**
@@ -709,6 +738,12 @@ export class WebGL2Backend extends Backend {
      * WebGPUBackend.readPixels(): returns top-down RGBA8 (0-255) regardless of the
      * texture's internal format. gl.readPixels is bottom-up, so the rows are flipped
      * to top-down to match the WebGPU backend's readback orientation.
+     *
+     * Single-channel attachments (R8/R16F/R32F — scene_gbuf_depth is r32f) are
+     * read as RED, which is their implementation colour read format; asking for
+     * RGBA there is an invalid operation. The one channel expands to greyscale
+     * — value in R, G and B, alpha opaque — matching WebGPUBackend.readPixels()
+     * so the two backends stay diffable.
      * @param {string} textureId
      * @returns {{width:number, height:number, data:Uint8Array}}
      */
@@ -725,7 +760,23 @@ export class WebGL2Backend extends Backend {
         const out = new Uint8Array(width * height * 4)
         if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
             const isFloat = glFormat && (glFormat.type === gl.HALF_FLOAT || glFormat.type === gl.FLOAT)
-            if (isFloat) {
+            if (glFormat?.format === gl.RED) {
+                // One channel per pixel, expanded to greyscale on the way out.
+                // This assumes IMPLEMENTATION_COLOR_READ_FORMAT/TYPE for these
+                // attachments is RED/FLOAT, which holds on ANGLE (Chrome, every
+                // browser this runs in). A driver reporting something else
+                // would need the pair queried and a conversion here.
+                const pixels = width * height
+                const buf = isFloat ? new Float32Array(pixels) : new Uint8Array(pixels)
+                gl.readPixels(0, 0, width, height, gl.RED, isFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, buf)
+                for (let i = 0; i < pixels; i++) {
+                    const v = isFloat ? Math.max(0, Math.min(255, Math.round(buf[i] * 255))) : buf[i]
+                    out[i * 4] = v
+                    out[i * 4 + 1] = v
+                    out[i * 4 + 2] = v
+                    out[i * 4 + 3] = 255
+                }
+            } else if (isFloat) {
                 const buf = new Float32Array(width * height * 4)
                 gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, buf)
                 for (let i = 0; i < out.length; i++) {
@@ -758,6 +809,7 @@ export class WebGL2Backend extends Backend {
         // Delete single-texture FBO for this texture
         const fbo = this.fbos.get(id)
         if (fbo) {
+            this.releaseDepthBuffer(fbo)
             gl.deleteFramebuffer(fbo)
             this.fbos.delete(id)
         }
@@ -771,9 +823,29 @@ export class WebGL2Backend extends Backend {
             }
         }
         for (const mrtId of mrtToDelete) {
-            gl.deleteFramebuffer(this.fbos.get(mrtId))
+            const mrtFbo = this.fbos.get(mrtId)
+            this.releaseDepthBuffer(mrtFbo)
+            gl.deleteFramebuffer(mrtFbo)
             this.fbos.delete(mrtId)
         }
+    }
+
+    /**
+     * Release the depth renderbuffer attached to an FBO, if any.
+     *
+     * depthBuffers is keyed by the WebGLFramebuffer object itself, so deleting
+     * the framebuffer without this both leaks the DEPTH_COMPONENT24 storage and
+     * leaves a Map entry keyed by a dead object. SceneRenderer.resize()
+     * destroys and recreates every scene texture, so that happened once per FBO
+     * per resize event.
+     * @param {WebGLFramebuffer} fbo - Framebuffer being deleted
+     */
+    releaseDepthBuffer(fbo) {
+        if (!fbo) return
+        const depth = this.depthBuffers.get(fbo)
+        if (!depth) return
+        this.gl.deleteRenderbuffer(depth.buffer)
+        this.depthBuffers.delete(fbo)
     }
 
     /**
@@ -807,6 +879,7 @@ export class WebGL2Backend extends Backend {
 
         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     }
+
 
     /**
      * Copy one texture to another (blit operation).
@@ -1124,6 +1197,19 @@ export class WebGL2Backend extends Backend {
 
                 resolvedOutputIds.push(currentOutputId)
                 const tex = this.textures.get(currentOutputId)
+
+                // Face selection below is guarded by !isMRT, so an MRT pass
+                // aimed at a cube map would render every attachment into
+                // whichever face createMRTFBO happened to attach (+X) — wrong
+                // pixels, no diagnostic. Only single-output passes can name a
+                // face via cubeFace, so reject the MRT case outright.
+                if (tex?.cube) {
+                    throw new Error(
+                        `Pass '${effectivePass.id}' targets cube texture '${currentOutputId}' from a multiple-render-target pass. ` +
+                        'Cube render targets are supported only on single-output passes, which select a face via cubeFace.'
+                    )
+                }
+
                 if (tex) {
                     textures.push(tex.handle)
                     if (!viewportTex) viewportTex = tex
@@ -1160,6 +1246,28 @@ export class WebGL2Backend extends Backend {
 
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo || null)
 
+        // Cube-map render targets share one framebuffer. Select the requested
+        // face immediately after binding it; subsequent mesh depth attachment
+        // setup and fullscreen lighting both operate on this face.
+        if (!isMRT && viewportTex?.cube && fbo) {
+            const face = effectivePass.cubeFace
+            if (!Number.isInteger(face) || face < 0 || face > 5) {
+                throw {
+                    code: 'ERR_INVALID_CUBE_FACE',
+                    pass: effectivePass.id,
+                    texture: outputId,
+                    face
+                }
+            }
+            gl.framebufferTexture2D(
+                gl.FRAMEBUFFER,
+                gl.COLOR_ATTACHMENT0,
+                gl.TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                viewportTex.handle,
+                0
+            )
+        }
+
         // For MRT, we need to call drawBuffers again after binding the FBO
         // Use actual attachment count, not outputKeys.length, in case some textures weren't found
         if (isMRT && fbo && mrtAttachmentCount > 0) {
@@ -1179,9 +1287,11 @@ export class WebGL2Backend extends Backend {
             gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
         }
 
-        // DEBUG: Clear to random color to verify FBO write
-        // gl.clearColor(Math.random(), Math.random(), Math.random(), 1.0)
-        // gl.clear(gl.COLOR_BUFFER_BIT)
+        // Clear color buffer when requested by the pass
+        if (effectivePass.clear) {
+            gl.clearColor(0, 0, 0, 0)
+            gl.clear(gl.COLOR_BUFFER_BIT)
+        }
 
         // Bind input textures
         this.bindTextures(effectivePass, program, state)
@@ -1296,13 +1406,24 @@ export class WebGL2Backend extends Backend {
             gl.depthFunc(gl.LESS)
             gl.depthMask(true)
 
-            // Enable back-face culling (CCW = front, cull back faces)
-            gl.enable(gl.CULL_FACE)
-            gl.frontFace(gl.CCW)
-            gl.cullFace(gl.BACK)
+            // Mirrored cameras reverse winding. Reflection passes request
+            // two-sided rasterization so their geometry remains consistent
+            // with WebGPU's MRT path and closed meshes do not disappear.
+            if (effectivePass.cullMode === 'none') {
+                gl.disable(gl.CULL_FACE)
+            } else {
+                gl.enable(gl.CULL_FACE)
+                gl.frontFace(gl.CCW)
+                gl.cullFace(effectivePass.cullMode === 'front' ? gl.FRONT : gl.BACK)
+            }
 
-            // Clear depth buffer for this pass
-            gl.clear(gl.DEPTH_BUFFER_BIT)
+            // Clear depth unless the pass explicitly opts out. Batched mesh
+            // passes set clear:false for all but the first; passes that say
+            // nothing (e.g. render/meshRender) must still clear each frame,
+            // otherwise stale depth from prior frames breaks occlusion.
+            if (effectivePass.clear !== false) {
+                gl.clear(gl.DEPTH_BUFFER_BIT)
+            }
 
             let count = effectivePass.count || 3  // Default to 1 triangle
 
@@ -1471,11 +1592,15 @@ export class WebGL2Backend extends Backend {
                 texture = this.defaultTexture
             }
 
-            // Check if this is a 3D texture
+            // Select the texture target from the registered texture shape.
             const is3D = texInfo?.is3D
+            const isCube = texInfo?.cube
 
             gl.activeTexture(gl.TEXTURE0 + unit)
-            gl.bindTexture(is3D ? gl.TEXTURE_3D : gl.TEXTURE_2D, texture || null)
+            gl.bindTexture(
+                is3D ? gl.TEXTURE_3D : (isCube ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D),
+                texture || null
+            )
 
             // Bind sampler uniform
             const uniform = program.uniforms[samplerName]
@@ -1650,7 +1775,9 @@ export class WebGL2Backend extends Backend {
                 gl.uniform1i(loc, typeof value === 'boolean' ? (value ? 1 : 0) : value)
                 break
             case gl.FLOAT_VEC2: {
-                const v2 = Array.isArray(value) ? value : [value, value]
+                const v2 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value]
                 const arr2 = this._vec2Buf
                 arr2[0] = v2[0] ?? 0
                 arr2[1] = v2[1] ?? 0
@@ -1658,7 +1785,9 @@ export class WebGL2Backend extends Backend {
                 break
             }
             case gl.FLOAT_VEC3: {
-                const v3 = Array.isArray(value) ? value : [value, value, value]
+                const v3 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value, value]
                 const arr3 = this._vec3Buf
                 arr3[0] = v3[0] ?? 0
                 arr3[1] = v3[1] ?? 0
@@ -1667,7 +1796,9 @@ export class WebGL2Backend extends Backend {
                 break
             }
             case gl.FLOAT_VEC4: {
-                const v4 = Array.isArray(value) ? value : [value, value, value, value]
+                const v4 = Array.isArray(value) || ArrayBuffer.isView(value)
+                    ? value
+                    : [value, value, value, value]
                 const arr4 = this._vec4Buf
                 arr4[0] = v4[0] ?? 0
                 arr4[1] = v4[1] ?? 0
@@ -1702,6 +1833,34 @@ export class WebGL2Backend extends Backend {
         // beginFrame(), so present() still checks on the last armed frame.
         if (this.glErrorCheckFrames > 0) {
             this.glErrorCheckFrames--
+        }
+    }
+
+    /**
+     * Resolve once the GL pipeline has retired all submitted work.
+     *
+     * Polls a fence rather than calling gl.finish(), which would block the
+     * calling thread until the GPU drains.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        const gl = this.gl
+        if (!gl) return
+        const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+        if (!sync) {
+            gl.finish()
+            return
+        }
+        gl.flush()
+        try {
+            for (;;) {
+                const status = gl.clientWaitSync(sync, 0, 0)
+                if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) return
+                if (status === gl.WAIT_FAILED) return
+                await new Promise((resolve) => setTimeout(resolve, 1))
+            }
+        } finally {
+            gl.deleteSync(sync)
         }
     }
 

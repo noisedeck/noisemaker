@@ -165,6 +165,16 @@ await test('backend without the capability is left untouched (headless stubs)', 
     if (vel.format !== 'rgba32f') throw new Error(`expected rgba32f untouched, got ${vel.format}`)
 })
 
+await test('the byte table scores single-channel float formats at 4 bytes', () => {
+    // The scene G-buffer's depth target is r32f; scoring it as an 8-byte
+    // default overstated the pass by 4 bytes per sample.
+    const { pipeline } = buildPipeline(undefined)
+    if (pipeline.mrtFormatBytes('r32f') !== 4) throw new Error(`r32f scored ${pipeline.mrtFormatBytes('r32f')}, expected 4`)
+    if (pipeline.mrtFormatBytes('r32float') !== 4) throw new Error(`r32float scored ${pipeline.mrtFormatBytes('r32float')}, expected 4`)
+    if (pipeline.mrtFormatBytes('rgba16f') !== 8) throw new Error('rgba16f must still score 8')
+    if (pipeline.mrtFormatBytes('rgba32f') !== 16) throw new Error('rgba32f must still score 16')
+})
+
 // ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failed} failed`)

@@ -75,10 +75,21 @@ float hash12(vec2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-vec2 hash22(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.xx + p3.yz) * p3.zy);
+// Jitter hash for the Voronoi grid. Deliberately integer-only: the fract-based
+// hash used elsewhere in this file rounds differently between shader compilers
+// (FMA contraction in its multiply-add chain), and fract() is discontinuous at
+// integers, so a last-bit difference can swing a seed position by a whole cell.
+// That moved dots between Voronoi cells and made pointillize render differently
+// on WebGL2 than WebGPU, and differently again across ANGLE backends. Integer
+// arithmetic is exact, so every compiler agrees bit-for-bit.
+vec2 hash22(ivec2 p, int sd) {
+    uvec2 v = uvec2(p + ivec2(32767)) ^ uvec2(uint(sd) * 2654435761u);
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= (v >> 16u);
+    v.x += v.y * 1664525u; v.y += v.x * 1664525u;
+    v ^= (v >> 16u);
+    return vec2(v) * (1.0 / 4294967296.0);
 }
 
 // luminance - luminance.
@@ -118,7 +129,7 @@ vec4 voronoiCell(vec2 p, float jitter, float seedVal) {
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             vec2 cell = vec2(float(x), float(y));
-            vec2 pt = cell + 0.5 + (hash22(g + cell + seedVal * 101.7) - 0.5) * jitter;
+            vec2 pt = cell + 0.5 + (hash22(ivec2(g + cell), int(seedVal)) - 0.5) * jitter;
             float d = dot(pt - f, pt - f);
             if (d < best) {
                 best = d;

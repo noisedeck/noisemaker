@@ -1,0 +1,12 @@
+{
+  "effects": [
+    "synth3d/noise3d",
+    "render/render3d"
+  ],
+  "dsl": "search synth3d, render\n\nnoise3d(scale: 4)\n  .render3d(threshold: 0.5, filtering: 0)\n  .write(o0)\n\nrender(o0)",
+  "surface": "o0",
+  "resolution": [
+    192,
+    192
+  ]
+}

@@ -45,6 +45,108 @@ function float16ToFloat32(h) {
     return (sign ? -1 : 1) * f * Math.pow(2, exponent - 15)
 }
 
+/**
+ * Translate a pass's cull mode into WebGPU primitive state.
+ *
+ * WebGL2 culls with frontFace(CCW) + cullFace(BACK) on unflipped geometry. The
+ * WGSL mesh vertex shader flips clip-space Y, which reverses triangle winding
+ * in framebuffer space, so 'cw' is the WebGPU spelling of WebGL2's CCW. Every
+ * pipeline path derives its state here so the two backends cannot drift: the
+ * MRT path previously set no cullMode at all (silently double-sided) while the
+ * single-output 3D path hardcoded 'back' and ignored the pass entirely.
+ * @param {string|undefined} cullMode - 'none' | 'front' | 'back' | undefined
+ * @returns {{cullMode: string, frontFace?: string}} WebGPU primitive state
+ */
+/** How many distinct viewport sizes keep a depth texture alive. */
+const DEPTH_TEXTURE_CACHE_LIMIT = 4
+
+/**
+ * Strip WGSL line and block comments so brace/paren scanning is not fooled by
+ * a `{`, `}` or `)` that only exists inside a comment. WGSL has no string
+ * literals, so a plain scan is safe.
+ * @param {string} source
+ * @returns {string}
+ */
+function stripWgslComments(source) {
+    return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, '')
+}
+
+/**
+ * Extract the body text of `struct <name> { ... }` by counting braces.
+ *
+ * The obvious regex — `struct\s+X\s*\{([^}]+)\}` — stops at the FIRST
+ * closing brace, so any struct whose body contains nested braces parses short
+ * (or not at all) and the caller silently falls back to a wrong layout.
+ * @param {string} source - WGSL source to search
+ * @param {string} name - Struct name
+ * @returns {string|null} The body between the outermost braces, or null when
+ *   the struct is absent or unterminated.
+ */
+export function extractWgslStructBody(source, name) {
+    if (!source || !name) return null
+    const cleaned = stripWgslComments(source)
+    const decl = new RegExp(`\\bstruct\\s+${name}\\s*\\{`)
+    const match = decl.exec(cleaned)
+    if (!match) return null
+    const start = match.index + match[0].length
+    let depth = 1
+    for (let i = start; i < cleaned.length; i++) {
+        const c = cleaned[i]
+        if (c === '{') depth++
+        else if (c === '}') {
+            depth--
+            if (depth === 0) return cleaned.slice(start, i)
+        }
+    }
+    return null
+}
+
+/**
+ * Count the `@location` outputs declared by a fragment entry point.
+ *
+ * Handles both return forms: a bare `-> @location(0) vec4f` and a struct
+ * return whose members carry the locations. Vertex-stage varyings also use
+ * `@location`, so this deliberately inspects only the fragment function's
+ * return type rather than counting occurrences across the source.
+ * @param {string} source - WGSL source containing the fragment stage
+ * @param {string} entryPoint - Fragment entry point name
+ * @returns {number} Output count; 1 when the return type cannot be resolved,
+ *   which preserves the historical single-target assumption.
+ */
+export function countFragmentOutputs(source, entryPoint) {
+    if (!source || !entryPoint) return 1
+    const cleaned = stripWgslComments(source)
+    const fnMatch = new RegExp(`@fragment\\s*fn\\s+${entryPoint}\\s*\\(`).exec(cleaned)
+    if (!fnMatch) return 1
+
+    // Skip the parameter list.
+    let depth = 1
+    let i = fnMatch.index + fnMatch[0].length
+    for (; i < cleaned.length && depth > 0; i++) {
+        if (cleaned[i] === '(') depth++
+        else if (cleaned[i] === ')') depth--
+    }
+    const bodyStart = cleaned.indexOf('{', i)
+    if (bodyStart < 0) return 1
+    const returnDecl = cleaned.slice(i, bodyStart)
+    if (!returnDecl.includes('->')) return 1
+
+    const inlineLocations = returnDecl.match(/@location\s*\(/g)
+    if (inlineLocations) return inlineLocations.length
+
+    const typeMatch = /->\s*([A-Za-z_]\w*)/.exec(returnDecl)
+    if (!typeMatch) return 1
+    const structBody = extractWgslStructBody(cleaned, typeMatch[1])
+    if (!structBody) return 1
+    return (structBody.match(/@location\s*\(/g) || []).length || 1
+}
+
+export function resolveCullState(cullMode, fallback = 'none') {
+    const mode = cullMode ?? fallback
+    if (mode === 'none') return { cullMode: 'none' }
+    return { cullMode: mode === 'front' ? 'front' : 'back', frontFace: 'cw' }
+}
+
 export class WebGPUBackend extends Backend {
     constructor(device, context) {
         super(device)
@@ -61,9 +163,11 @@ export class WebGPUBackend extends Backend {
             ? navigator.gpu.getPreferredCanvasFormat()
             : null
 
-        // Depth texture for 3D mesh rendering (created lazily)
-        this.depthTexture = null
-        this.depthTextureSize = { width: 0, height: 0 }
+        // Depth textures for 3D mesh rendering, cached by viewport size.
+        // A frame may encode probe and screen passes at different sizes into
+        // one command buffer; destroying the first depth target while those
+        // commands are pending invalidates the entire submission.
+        this.depthTextures = new Map()
 
         // Uniform buffer pool for efficient buffer reuse
         this.uniformBufferPool = []
@@ -283,52 +387,41 @@ export class WebGPUBackend extends Backend {
     /**
      * Allocate a cube-map texture (6 faces, all same size).
      * @param {string} id - Texture identifier
-     * @param {{ size: number }} options - Cube face edge length in pixels
+     * @param {{ size: number, format?: string, usage?: string[] }} options - Cube face specification
      */
-    createCubeTexture(id, { size }) {
+    createCubeTexture(id, { size, format = 'rgba8', usage: requestedUsage = [] }) {
         const device = this.device
+        const gpuFormat = this.resolveFormat(format)
+        let usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        if (requestedUsage.includes('render')) usage |= GPUTextureUsage.RENDER_ATTACHMENT
         const handle = device.createTexture({
             size: [size, size, 6],
-            format: 'rgba8unorm',
+            format: gpuFormat,
             dimension: '2d',
-            usage: GPUTextureUsage.TEXTURE_BINDING |
-                   GPUTextureUsage.COPY_DST |
-                   GPUTextureUsage.RENDER_ATTACHMENT
+            usage
         })
         const view = handle.createView({ dimension: 'cube' })
-        this.textures.set(id, { handle, view, width: size, height: size, cube: true })
-        return this.textures.get(id)
-    }
-
-    /**
-     * Upload RGBA8 pixel data to one face of a cube-map texture.
-     * Mirrors uploadDataTexture's writeTexture + 256-byte row-alignment pattern.
-     * @param {string} id - Texture identifier (must have been created with createCubeTexture)
-     * @param {number} face - Face index 0..5 (array layer)
-     * @param {{ width: number, height: number, data: Uint8Array }} faceData
-     */
-    uploadCubeFace(id, face, { width, height, data }) {
-        const device = this.device
-        const tex = this.textures.get(id)
-        // RGBA8: 4 bytes per pixel; rows must be aligned to 256 bytes for WebGPU
-        const unalignedBytesPerRow = width * 4
-        const bytesPerRow = Math.ceil(unalignedBytesPerRow / 256) * 256
-
-        let uploadData = data
-        if (bytesPerRow !== unalignedBytesPerRow) {
-            const paddedData = new Uint8Array(bytesPerRow * height)
-            for (let y = 0; y < height; y++) {
-                paddedData.set(data.subarray(y * unalignedBytesPerRow, (y + 1) * unalignedBytesPerRow), y * bytesPerRow)
+        const faceViews = []
+        if (requestedUsage.includes('render')) {
+            for (let face = 0; face < 6; face++) {
+                faceViews.push(handle.createView({
+                    dimension: '2d',
+                    baseArrayLayer: face,
+                    arrayLayerCount: 1
+                }))
             }
-            uploadData = paddedData
         }
-
-        device.queue.writeTexture(
-            { texture: tex.handle, origin: [0, 0, face] },
-            uploadData,
-            { bytesPerRow, rowsPerImage: height },
-            { width, height, depthOrArrayLayers: 1 }
-        )
+        this.textures.set(id, {
+            handle,
+            view,
+            faceViews,
+            width: size,
+            height: size,
+            format,
+            gpuFormat,
+            cube: true
+        })
+        return this.textures.get(id)
     }
 
     /**
@@ -536,6 +629,7 @@ export class WebGPUBackend extends Backend {
 
         return { width, height }
     }
+
 
     /**
      * Copy one texture to another (blit operation).
@@ -882,39 +976,53 @@ export class WebGPUBackend extends Backend {
         const fragmentEntryPoint = spec.fragmentEntryPoint || spec.entryPoint || DEFAULT_FRAGMENT_ENTRY_POINT
         const outputFormat = this.resolveFormat(spec?.outputFormat || 'rgba16float')
 
-        // Create initial pipeline
-        //const _tBeforePipeline = performance.now()
-        const pipeline = this.device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: vertexModule,
-                entryPoint: vertexEntryPoint
-            },
-            fragment: {
-                module: fragmentModule,
-                entryPoint: fragmentEntryPoint,
-                targets: [{
-                    format: outputFormat,
-                    blend: this.resolveBlendState(spec?.blend)
-                }]
-            },
-            primitive: {
-                topology: spec?.topology || 'triangle-list'
-            }
-        })
-        //const _tPipeline = performance.now()
-
-        // Knob 1: per-phase compile timings (logging only — see HANDOFF-shader-compile.md)
-        //console.log(`[compile-wgsl-render ${id}] module=${(_tModule - _t0).toFixed(1)}ms info=${(_tInfo - _tModule).toFixed(1)}ms pipeline=${(_tPipeline - _tBeforePipeline).toFixed(1)}ms total=${(_tPipeline - _t0).toFixed(1)}ms src=${source.length}b`)
+        // A fragment stage with more than one @location output (the scene
+        // G-buffer pass writes four) cannot be described by the single-target
+        // pipeline below: interface matching fails and the device raises an
+        // uncaptured validation error at every program load. Those passes go
+        // through executeMRTRenderPass, which builds a correctly shaped
+        // pipeline via resolveMRTRenderPipeline on first use, so the eager
+        // build is skipped. Single-output programs — every 2D effect — keep
+        // it: it warms the shader before the first frame.
+        const fragmentOutputCount = countFragmentOutputs(source, fragmentEntryPoint)
 
         // Create pipeline cache for different output formats/blend modes
         const pipelineCache = new Map()
-        const initialKey = this.getPipelineKey({
-            topology: spec?.topology,
-            blend: spec?.blend,
-            format: outputFormat
-        })
-        pipelineCache.set(initialKey, pipeline)
+        let pipeline = null
+
+        if (fragmentOutputCount <= 1) {
+            // Create initial pipeline
+            //const _tBeforePipeline = performance.now()
+            pipeline = this.device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: vertexModule,
+                    entryPoint: vertexEntryPoint
+                },
+                fragment: {
+                    module: fragmentModule,
+                    entryPoint: fragmentEntryPoint,
+                    targets: [{
+                        format: outputFormat,
+                        blend: this.resolveBlendState(spec?.blend)
+                    }]
+                },
+                primitive: {
+                    topology: spec?.topology || 'triangle-list'
+                }
+            })
+            //const _tPipeline = performance.now()
+
+            // Knob 1: per-phase compile timings (logging only — see HANDOFF-shader-compile.md)
+            //console.log(`[compile-wgsl-render ${id}] module=${(_tModule - _t0).toFixed(1)}ms info=${(_tInfo - _tModule).toFixed(1)}ms pipeline=${(_tPipeline - _tBeforePipeline).toFixed(1)}ms total=${(_tPipeline - _t0).toFixed(1)}ms src=${source.length}b`)
+
+            const initialKey = this.getPipelineKey({
+                topology: spec?.topology,
+                blend: spec?.blend,
+                format: outputFormat
+            })
+            pipelineCache.set(initialKey, pipeline)
+        }
 
         const programInfo = {
             module: fragmentModule,
@@ -926,7 +1034,20 @@ export class WebGPUBackend extends Backend {
             fragmentEntryPoint,
             outputFormat,
             pipelineCache,
+            // Number of @location outputs the fragment stage declares. > 1
+            // means the program is MRT-only and has no eager `pipeline`.
+            fragmentOutputCount,
             bindings, // Store parsed bindings for bind group creation
+            // Per-binding uniform packing (opt-in via spec.perBindingUniforms).
+            // The default path packs ONE program-wide uniform buffer and binds
+            // it to every struct binding — fine for 2D effects, which declare a
+            // single struct, but wrong for scene programs whose vertex and
+            // fragment stages declare different structs, or whose structs
+            // contain arrays of structs (lights). Scene programs opt in; the
+            // 203 effect programs keep the existing path untouched.
+            perBindingUniforms: spec.perBindingUniforms === true,
+            _wgslSources: [source, spec.vertexWGSL || spec.vertexWgsl || null],
+            _bindingLayoutCache: new Map(),
             // See compileComputeProgram for what this flag is for.
             _sourceHasBindings: sourceHasBindings,
             // Use definition-provided uniformLayout if available, fall back to shader parsing
@@ -961,15 +1082,190 @@ export class WebGPUBackend extends Backend {
         while ((bindingMatch = bindingRegex.exec(source)) !== null) {
             const structName = bindingMatch[1]
             // Find the matching struct declaration.
-            const structRegex = new RegExp(`struct\\s+${structName}\\s*\\{([^}]+)\\}`, 'g')
-            const structMatch = structRegex.exec(source)
-            if (!structMatch) continue
-            const body = structMatch[1]
+            const body = extractWgslStructBody(source, structName)
+            if (body === null) continue
             // Compute the byte size of the struct body.
             const size = this.computeWgslStructSize(body)
             if (size > largestSize) largestSize = size
         }
         return largestSize
+    }
+
+    /**
+     * Build a byte layout for ONE binding's struct type, resolving nested
+     * structs and arrays of structs against the program's own sources.
+     * Returns { entries: [{name, offset, kind: 'f32'|'i32'|'floats', count}],
+     * structSize } or null when the type can't be resolved.
+     *
+     * Array-of-struct fields flatten to `field[i].member` entry names, which
+     * is exactly how scene passes address them (`u_lights[0].position`).
+     * Fields prefixed `_` or `pad` advance the offset but produce no entry.
+     */
+    getBindingStructLayout(program, typeDecl) {
+        if (program._bindingLayoutCache?.has(typeDecl)) {
+            return program._bindingLayoutCache.get(typeDecl)
+        }
+        const sources = (program._wgslSources || []).filter(Boolean)
+        let structBody = null
+        let structSource = null
+        for (const src of sources) {
+            const body = extractWgslStructBody(src, typeDecl)
+            if (body !== null) { structBody = body; structSource = src; break }
+        }
+
+        // A null layout sends createBindGroup to the shared program-wide
+        // uniform buffer, which cannot represent scene structs — so say why
+        // rather than rendering something wrong in silence. The result (null
+        // included) is cached, so this warns once per program, not per frame.
+        let layout = null
+        if (structBody === null) {
+            console.warn(`[webgpu] uniform struct '${typeDecl}' is not declared in this program's WGSL; ` +
+                'falling back to the shared program-wide uniform buffer, which cannot represent scene structs')
+        } else {
+            layout = this._layoutStructBody(structBody, structSource, '')
+            if (!layout) {
+                console.warn(`[webgpu] uniform struct '${typeDecl}' is declared but could not be laid out ` +
+                    '(unresolvable member type); falling back to the shared program-wide uniform buffer, ' +
+                    'which cannot represent scene structs')
+            }
+        }
+        program._bindingLayoutCache?.set(typeDecl, layout)
+        return layout
+    }
+
+    /** @private Recursive worker for getBindingStructLayout. */
+    _layoutStructBody(body, source, prefix) {
+        const cleaned = body.replace(/\/\/[^\n]*/g, '')
+        // Split fields at top-level commas (commas inside <> must not split)
+        const fields = []
+        let depth = 0, start = 0
+        for (let i = 0; i < cleaned.length; i++) {
+            const c = cleaned[i]
+            if (c === '<') depth++
+            else if (c === '>') depth--
+            else if ((c === ',' || c === ';') && depth === 0) {
+                const piece = cleaned.slice(start, i).trim()
+                if (piece) fields.push(piece)
+                start = i + 1
+            }
+        }
+        const tail = cleaned.slice(start).trim()
+        if (tail) fields.push(tail)
+
+        const SCALARS = { f32: ['f32', 4, 4], i32: ['i32', 4, 4], u32: ['i32', 4, 4], bool: ['i32', 4, 4] }
+        const VECS = { vec2: [8, 8, 2], vec3: [12, 16, 3], vec4: [16, 16, 4] }
+        const MATS = { mat3x3: [48, 16, 12], mat4x4: [64, 16, 16] }
+
+        const entries = []
+        let offset = 0
+        let maxAlign = 4
+
+        for (const field of fields) {
+            const colonIdx = field.indexOf(':')
+            if (colonIdx < 0) continue
+            const name = field.slice(0, colonIdx).trim().replace(/^@[^ ]+\s+/, '')
+            const typeExpr = field.slice(colonIdx + 1).trim().replace(/\s+/g, '')
+            const isPad = name.startsWith('_') || name.toLowerCase().startsWith('pad')
+
+            const arrayMatch = /^array<(.+),(\d+)>$/.exec(typeExpr)
+            if (arrayMatch) {
+                const elemType = arrayMatch[1]
+                const count = parseInt(arrayMatch[2], 10)
+                // Resolve element: scalar/vec stride 16, or a nested struct
+                const elemBody = extractWgslStructBody(source, elemType)
+                if (elemBody !== null) {
+                    const elemLayout = this._layoutStructBody(elemBody, source, '')
+                    if (!elemLayout) return null
+                    // Array element stride rounds up to 16
+                    const stride = Math.ceil(elemLayout.structSize / 16) * 16
+                    offset = Math.ceil(offset / 16) * 16
+                    if (!isPad) {
+                        for (let i = 0; i < count; i++) {
+                            for (const e of elemLayout.entries) {
+                                entries.push({
+                                    name: `${prefix}${name}[${i}].${e.name}`,
+                                    offset: offset + i * stride + e.offset,
+                                    kind: e.kind,
+                                    count: e.count
+                                })
+                            }
+                        }
+                    }
+                    offset += stride * count
+                    maxAlign = Math.max(maxAlign, 16)
+                    continue
+                }
+                // Array of scalars/vectors: stride 16 per uniform rules
+                offset = Math.ceil(offset / 16) * 16
+                if (!isPad) {
+                    for (let i = 0; i < count; i++) {
+                        entries.push({ name: `${prefix}${name}[${i}]`, offset: offset + i * 16, kind: 'floats', count: 4 })
+                    }
+                }
+                offset += 16 * count
+                maxAlign = Math.max(maxAlign, 16)
+                continue
+            }
+
+            let size, align, kind, count
+            if (SCALARS[typeExpr]) {
+                ;[kind, size, align] = SCALARS[typeExpr]
+                count = 1
+            } else {
+                const vecMatch = /^(vec[234])(?:<(?:f32|i32|u32)>|f|i|u)$/.exec(typeExpr)
+                const matMatch = /^(mat[34]x[34])(?:<f32>|f)$/.exec(typeExpr)
+                if (vecMatch && VECS[vecMatch[1]]) {
+                    ;[size, align, count] = VECS[vecMatch[1]]
+                    kind = 'floats'
+                } else if (matMatch && MATS[matMatch[1]]) {
+                    ;[size, align, count] = MATS[matMatch[1]]
+                    kind = 'floats'
+                } else {
+                    // Unresolvable member type — bail so callers fall back
+                    return null
+                }
+            }
+
+            offset = Math.ceil(offset / align) * align
+            if (!isPad) {
+                entries.push({ name: `${prefix}${name}`, offset, kind, count })
+            }
+            offset += size
+            maxAlign = Math.max(maxAlign, align)
+        }
+
+        return { entries, structSize: Math.ceil(offset / maxAlign) * maxAlign }
+    }
+
+    /**
+     * Pack pass+global uniforms into a zero-filled buffer per a
+     * getBindingStructLayout result, writing by field name. mat3x3 values
+     * arriving as 9 floats are expanded to WGSL's column-padded 12-float form.
+     */
+    packBindingStruct(layout, uniforms) {
+        const buffer = new ArrayBuffer(Math.max(layout.structSize, 16))
+        const view = new DataView(buffer)
+        for (const entry of layout.entries) {
+            const value = uniforms[entry.name]
+            if (value === undefined || value === null) continue
+            if (entry.kind === 'i32') {
+                view.setInt32(entry.offset, typeof value === 'boolean' ? (value ? 1 : 0) : (value | 0), true)
+            } else if (entry.kind === 'f32') {
+                view.setFloat32(entry.offset, +value, true)
+            } else {
+                let arr = value
+                if (typeof value === 'number') arr = [value]
+                if (entry.count === 12 && arr.length === 9) {
+                    // mat3x3: three vec3 columns, each padded to 16 bytes
+                    arr = [arr[0], arr[1], arr[2], 0, arr[3], arr[4], arr[5], 0, arr[6], arr[7], arr[8], 0]
+                }
+                const n = Math.min(entry.count, arr.length)
+                for (let i = 0; i < n; i++) {
+                    view.setFloat32(entry.offset + i * 4, arr[i], true)
+                }
+            }
+        }
+        return new Uint8Array(buffer)
     }
 
     /**
@@ -1456,7 +1752,11 @@ export class WebGPUBackend extends Backend {
             let bindingType = 'unknown'
             if (typeDecl.includes('texture_storage_2d')) {
                 bindingType = 'storage_texture'
-            } else if (typeDecl.includes('texture_2d') || typeDecl.includes('texture_3d')) {
+            } else if (
+                typeDecl.includes('texture_2d') ||
+                typeDecl.includes('texture_3d') ||
+                typeDecl.includes('texture_cube')
+            ) {
                 bindingType = 'texture'
             } else if (typeDecl === 'sampler') {
                 bindingType = 'sampler'
@@ -1629,6 +1929,19 @@ export class WebGPUBackend extends Backend {
         let outputTex = this.textures.get(outputId) || state.surfaces?.[outputId]
         let targetView = outputTex?.view
 
+        if (outputTex?.cube) {
+            const face = pass.cubeFace
+            if (!Number.isInteger(face) || face < 0 || face > 5 || !outputTex.faceViews?.[face]) {
+                throw {
+                    code: 'ERR_INVALID_CUBE_FACE',
+                    pass: pass.id,
+                    texture: outputId,
+                    face
+                }
+            }
+            targetView = outputTex.faceViews[face]
+        }
+
         // Handle screen output (direct to canvas)
         if (!outputTex && outputId === 'screen' && this.context) {
             const currentTexture = this.context.getCurrentTexture()
@@ -1687,7 +2000,8 @@ export class WebGPUBackend extends Backend {
 
             pipeline = this.resolve3DRenderPipeline(program, {
                 blend: pass.blend,
-                format: resolvedFormat
+                format: resolvedFormat,
+                cullMode: pass.cullMode
             })
         } else {
             // Standard 2D rendering
@@ -1759,6 +2073,18 @@ export class WebGPUBackend extends Backend {
                 continue
             }
 
+            // A cube texture's `view` has dimension 'cube', which is not a
+            // legal colour attachment: attaching it fails render-pass
+            // validation a long way from the cause. The single-output path
+            // picks one face via pass.cubeFace, but an MRT pass has no way to
+            // say which face each attachment writes, so reject it here.
+            if (tex.cube) {
+                throw new Error(
+                    `Pass '${pass.id}' targets cube texture '${outputId}' from a multiple-render-target pass. ` +
+                    'Cube render targets are supported only on single-output passes, which select a face via cubeFace.'
+                )
+            }
+
             if (!viewportTex) viewportTex = tex
 
             const resolvedFormat = tex.gpuFormat || this.resolveFormat(tex.format || 'rgba16float')
@@ -1780,16 +2106,33 @@ export class WebGPUBackend extends Backend {
         }
 
         // Get or create MRT pipeline
+        // 3D mesh MRT passes (scene G-buffer) need a depth test like the
+        // single-output 3D path; without it fragments paint in submission
+        // order and far surfaces overwrite near ones.
+        const isMRT3D = pass.drawMode === 'triangles'
+
         const pipeline = this.resolveMRTRenderPipeline(program, {
             blend: pass.blend,
             topology: (pass.drawMode === 'points') ? 'point-list' : 'triangle-list',
-            formats
+            formats,
+            depth: isMRT3D,
+            cullMode: pass.cullMode
         })
 
         // Begin render pass with multiple color attachments
-        const passEncoder = this.commandEncoder.beginRenderPass({
-            colorAttachments
-        })
+        const mrtDescriptor = { colorAttachments }
+        if (isMRT3D && viewportTex) {
+            const depthTex = this.getDepthTexture(viewportTex.width, viewportTex.height)
+            mrtDescriptor.depthStencilAttachment = {
+                view: depthTex.createView(),
+                depthClearValue: 1.0,
+                // Batched mesh passes set clear:false after the first mesh and
+                // must keep the accumulated depth (mirrors the WebGL2 backend).
+                depthLoadOp: pass.clear !== false ? 'clear' : 'load',
+                depthStoreOp: 'store'
+            }
+        }
+        const passEncoder = this.commandEncoder.beginRenderPass(mrtDescriptor)
 
         // Set viewport from first output texture
         if (viewportTex) {
@@ -1824,8 +2167,8 @@ export class WebGPUBackend extends Backend {
     /**
      * Get or create a render pipeline with multiple render targets
      */
-    resolveMRTRenderPipeline(program, { blend, topology, formats }) {
-        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}`
+    resolveMRTRenderPipeline(program, { blend, topology, formats, depth = false, cullMode }) {
+        const key = `mrt_${topology || 'triangle-list'}_${formats.join('_')}_${blend ? JSON.stringify(blend) : 'noblend'}_${depth ? 'depth' : 'nodepth'}_${cullMode || 'back'}`
 
         if (!program.pipelineCache.has(key)) {
             // Build targets array for all outputs
@@ -1834,7 +2177,7 @@ export class WebGPUBackend extends Backend {
                 blend: this.resolveBlendState(blend)
             }))
 
-            const pipeline = this.device.createRenderPipeline({
+            const descriptor = {
                 layout: 'auto',
                 vertex: {
                     module: program.vertexModule || this.getDefaultVertexModule(),
@@ -1846,9 +2189,28 @@ export class WebGPUBackend extends Backend {
                     targets
                 },
                 primitive: {
-                    topology: topology || 'triangle-list'
+                    topology: topology || 'triangle-list',
+                    // Default 'none': the MRT path also carries the fullscreen
+                    // GPGPU passes that compute-style effects compile down to,
+                    // and WebGL2 only culls when drawMode is 'triangles'. Mesh
+                    // passes ask for 'back' explicitly.
+                    //
+                    // Note the asymmetry if an MRT *triangles* pass is ever
+                    // added: WebGL2 back-culls any triangles pass whose
+                    // cullMode is not 'none', while this default leaves it
+                    // unculled — so such a pass must state its cullMode
+                    // explicitly or the two backends will disagree.
+                    ...resolveCullState(cullMode, 'none')
                 }
-            })
+            }
+            if (depth) {
+                descriptor.depthStencil = {
+                    format: 'depth24plus',
+                    depthWriteEnabled: true,
+                    depthCompare: 'less'
+                }
+            }
+            const pipeline = this.device.createRenderPipeline(descriptor)
 
             program.pipelineCache.set(key, pipeline)
         }
@@ -1863,31 +2225,71 @@ export class WebGPUBackend extends Backend {
      * @returns {GPUTexture} - Depth texture for mesh rendering
      */
     getDepthTexture(width, height) {
-        // Create or resize depth texture if needed
-        if (!this.depthTexture ||
-            this.depthTextureSize.width !== width ||
-            this.depthTextureSize.height !== height) {
-
-            if (this.depthTexture) {
-                this.depthTexture.destroy()
-            }
-
-            this.depthTexture = this.device.createTexture({
-                size: { width, height, depthOrArrayLayers: 1 },
-                format: 'depth24plus',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT
-            })
-            this.depthTextureSize = { width, height }
+        if (!this.depthTextures) this.depthTextures = new Map()
+        const key = `${width}x${height}`
+        let depthTexture = this.depthTextures.get(key)
+        if (depthTexture) {
+            // Refresh recency: Map iterates in insertion order, so re-inserting
+            // moves this size to the young end for eviction purposes.
+            this.depthTextures.delete(key)
+            this.depthTextures.set(key, depthTexture)
+            return depthTexture
         }
+        depthTexture = this.device.createTexture({
+            size: { width, height, depthOrArrayLayers: 1 },
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
+        })
+        this.depthTextures.set(key, depthTexture)
 
-        return this.depthTexture
+        // Bound the cache. Keyed by size and never evicted, a resize drag
+        // allocated one depth24plus texture per distinct viewport size and kept
+        // every one of them until destroy().
+        while (this.depthTextures.size > DEPTH_TEXTURE_CACHE_LIMIT) {
+            const oldestKey = this.depthTextures.keys().next().value
+            const evicted = this.depthTextures.get(oldestKey)
+            this.depthTextures.delete(oldestKey)
+            this.retireDepthTexture(evicted)
+        }
+        return depthTexture
+    }
+
+    /**
+     * Destroy an evicted depth texture once the GPU has finished with it.
+     *
+     * Destroying a texture an in-flight command buffer still references is a
+     * validation error, which is why eviction cannot be immediate.
+     *
+     * Each eviction gets its OWN onSubmittedWorkDone(). That promise covers
+     * exactly the submits outstanding when it was requested, so batching later
+     * retirements behind the first one would release a texture a subsequent
+     * submit can still reference. One promise per eviction is safe because the
+     * victim is the LRU entry — last used in a frame that has already been
+     * submitted — and eviction only happens during a resize drag, so the extra
+     * promises cost nothing.
+     * @param {GPUTexture} texture - Evicted depth texture
+     */
+    retireDepthTexture(texture) {
+        if (!texture) return
+        if (!this._retiredDepthTextures) this._retiredDepthTextures = []
+        this._retiredDepthTextures.push(texture)
+        this.device.queue.onSubmittedWorkDone().then(() => {
+            const pending = this._retiredDepthTextures
+            if (!pending) return
+            const index = pending.indexOf(texture)
+            // destroy() drains the list on teardown; the texture is gone and
+            // the device it belonged to may be too.
+            if (index === -1) return
+            pending.splice(index, 1)
+            texture.destroy()
+        })
     }
 
     /**
      * Get or create a render pipeline for 3D mesh rendering with depth test and back-face culling.
      */
-    resolve3DRenderPipeline(program, { blend, format }) {
-        const key = `3d|${format || 'rgba16float'}|${blend ? JSON.stringify(blend) : 'noblend'}`
+    resolve3DRenderPipeline(program, { blend, format, cullMode }) {
+        const key = `3d|${format || 'rgba16float'}|${blend ? JSON.stringify(blend) : 'noblend'}|${cullMode || 'back'}`
 
         if (!program.pipelineCache.has(key)) {
             const pipeline = this.device.createRenderPipeline({
@@ -1906,9 +2308,9 @@ export class WebGPUBackend extends Backend {
                 },
                 primitive: {
                     topology: 'triangle-list',
-                    cullMode: 'back',
-                    // 'cw' because WGSL shader flips Y which reverses winding order
-                    frontFace: 'cw'
+                    // This path is triangle meshes only, which is exactly where
+                    // WebGL2 enables culling, so 'back' stays the default.
+                    ...resolveCullState(cullMode, 'back')
                 },
                 depthStencil: {
                     format: 'depth24plus',
@@ -2373,9 +2775,35 @@ export class WebGPUBackend extends Backend {
 
 
                 if (isStruct) {
-                    // This looks like a struct - create full uniform buffer
-                    // Pass program to access packedUniformLayout
-                    const uniformBuffer = this.createUniformBuffer(pass, state, program)
+                    // Scene programs opt in to per-binding struct packing: each
+                    // struct binding gets its own buffer laid out from its own
+                    // declaration (the vertex and fragment stages declare
+                    // different structs, and lights are an array of structs —
+                    // neither is representable by the shared program-wide
+                    // buffer below).
+                    let uniformBuffer = null
+                    if (program.perBindingUniforms) {
+                        const layout = this.getBindingStructLayout(program, binding.typeDecl)
+                        if (layout) {
+                            const merged = {}
+                            if (state.globalUniforms) Object.assign(merged, state.globalUniforms)
+                            if (pass.uniforms) Object.assign(merged, pass.uniforms)
+                            const data = this.packBindingStruct(layout, merged)
+                            uniformBuffer = this.getBufferFromPool(data.byteLength)
+                            if (!uniformBuffer) {
+                                uniformBuffer = this.device.createBuffer({
+                                    size: data.byteLength,
+                                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+                                })
+                            }
+                            this.queue.writeBuffer(uniformBuffer, 0, data.buffer, 0, data.byteLength)
+                            this.activeUniformBuffers.push(uniformBuffer)
+                        }
+                    }
+                    // Default: one program-wide uniform buffer (2D effect path)
+                    if (!uniformBuffer) {
+                        uniformBuffer = this.createUniformBuffer(pass, state, program)
+                    }
                     if (uniformBuffer) {
                         entry.resource = { buffer: uniformBuffer }
                         entries.push(entry)
@@ -2790,6 +3218,21 @@ export class WebGPUBackend extends Backend {
      * Legacy bind group creation for shaders that don't have parsed bindings.
      */
     createLegacyBindGroup(pass, program, state) {
+        // A multi-output program has no eager `pipeline`: compileRenderProgram
+        // skips it because a single-target descriptor fails interface matching
+        // against a fragment stage with several @location outputs. Its layout
+        // only exists on the pipeline resolveMRTRenderPipeline builds, which
+        // this path cannot reach — and it would build the wrong entries anyway.
+        if (!program.pipeline) {
+            const outputs = program.fragmentOutputCount ?? 'multiple'
+            throw new Error(
+                `Program '${pass.program}' has no eager pipeline to take a bind group layout from: ` +
+                `its fragment stage declares ${outputs} @location outputs, so it is MRT-only. ` +
+                `The legacy bind group path is for shaders with no @binding declarations at all; ` +
+                `declare them so the parsed-binding path builds the group instead.`
+            )
+        }
+
         const entries = []
         let binding = 0
 
@@ -3282,6 +3725,15 @@ export class WebGPUBackend extends Backend {
         }
     }
 
+    /**
+     * Resolve once the queue has retired all submitted work.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        if (!this.queue) return
+        await this.queue.onSubmittedWorkDone()
+    }
+
     present(textureId) {
         if (!this.context) return
 
@@ -3323,13 +3775,23 @@ export class WebGPUBackend extends Backend {
             this.textures.clear()
         }
 
-        // The depth texture is owned by the backend but lives outside
+        // Depth textures are owned by the backend but live outside
         // this.textures, so free it explicitly regardless of skipTextures —
         // neither teardown path reaches it through the texture registry.
-        if (this.depthTexture) {
-            this.depthTexture.destroy()
-            this.depthTexture = null
-            this.depthTextureSize = { width: 0, height: 0 }
+        if (this.depthTextures) {
+            for (const depthTexture of this.depthTextures.values()) {
+                depthTexture.destroy()
+            }
+            this.depthTextures.clear()
+        }
+
+        // Evictions waiting on onSubmittedWorkDone() would otherwise fire after
+        // teardown, against a device that is on its way out. Release them here
+        // and empty the list, which is also how the deferred callbacks above
+        // learn there is nothing left for them to do.
+        if (this._retiredDepthTextures) {
+            for (const retired of this._retiredDepthTextures) retired.destroy()
+            this._retiredDepthTextures.length = 0
         }
 
         this.programs.clear()
@@ -3670,6 +4132,14 @@ export class WebGPUBackend extends Backend {
     /**
      * Read pixels from a texture for testing purposes.
      * Note: This is async due to WebGPU's buffer mapping requirements.
+     *
+     * Always returns top-down RGBA8 (0-255), whatever the texture's internal
+     * format. Single-channel formats (r32float, r16float — scene_gbuf_depth is
+     * r32f) expand to greyscale: the value in R, G and B with alpha opaque,
+     * rather than R-only, so the same RGB-mean helpers that consume the colour
+     * surfaces read a depth surface as the greyscale image it is. Float values
+     * are scaled by 255 and clamped, matching the existing rgba16float and
+     * rgba32float paths.
      * @param {string} textureId - The texture ID to read from
      * @returns {Promise<{width: number, height: number, data: Uint8Array}>}
      */
@@ -3687,6 +4157,10 @@ export class WebGPUBackend extends Backend {
             bytesPerPixel = 8 // 2 bytes per channel * 4 channels
         } else if (gpuFormat === 'rgba32float') {
             bytesPerPixel = 16 // 4 bytes per channel * 4 channels
+        } else if (gpuFormat === 'r32float') {
+            bytesPerPixel = 4 // 4 bytes per channel * 1 channel
+        } else if (gpuFormat === 'r16float') {
+            bytesPerPixel = 2 // 2 bytes per channel * 1 channel
         }
 
         const bytesPerRow = Math.ceil(width * bytesPerPixel / 256) * 256 // Align to 256 bytes
@@ -3742,6 +4216,27 @@ export class WebGPUBackend extends Backend {
                         const f32 = srcData[srcPixel + c]
                         data[dstPixel + c] = Math.max(0, Math.min(255, Math.round(f32 * 255)))
                     }
+                }
+            }
+        } else if (gpuFormat === 'r32float' || gpuFormat === 'r16float') {
+            // Single-channel float: ONE value per pixel, not four. Falling
+            // through to the rgba8unorm branch below reinterpreted the float's
+            // raw bytes as four unorm channels.
+            const isHalf = gpuFormat === 'r16float'
+            const bytesPerElement = isHalf ? 2 : 4
+            const srcData = isHalf ? new Uint16Array(mappedRange) : new Float32Array(mappedRange)
+            const elementsPerRow = bytesPerRow / bytesPerElement
+            for (let row = 0; row < height; row++) {
+                const srcRowOffset = row * elementsPerRow
+                for (let col = 0; col < width; col++) {
+                    const raw = srcData[srcRowOffset + col]
+                    const f32 = isHalf ? float16ToFloat32(raw) : raw
+                    const v = Math.max(0, Math.min(255, Math.round(f32 * 255)))
+                    const dstPixel = (row * width + col) * 4
+                    data[dstPixel] = v
+                    data[dstPixel + 1] = v
+                    data[dstPixel + 2] = v
+                    data[dstPixel + 3] = 255
                 }
             }
         } else {

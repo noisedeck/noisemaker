@@ -1,3 +1,5 @@
+.. _shader-3d-pipeline:
+
 The 3D Pipeline
 ===============
 
@@ -7,6 +9,18 @@ Generate, filter, and render volumetric fields — a true 3D counterpart to the
 A 3D chain has the same shape as a 2D one: a generator produces a field, zero
 or more filters transform it, and a renderer turns it into pixels. The
 difference is that every intermediate value is a volume rather than an image.
+
+.. note::
+
+   This is volumetric rendering: chains of density fields carried in ``vol``
+   and ``geo`` surfaces. It is a separate subsystem from :ref:`shader-scene`,
+   which describes cameras, meshes and PBR materials and is drawn by the
+   :ref:`deferred renderer <shader-deferred-rendering>`. The two can be
+   composited together, since both terminate in ordinary surfaces.
+
+   Volumetric rendering, described on this page, is stable. The scene graph is
+   a **preview** feature in Noisemaker 1.5, to be finalized in 2.0; unifying
+   the two subsystems is planned work.
 
 .. code-block:: dsl
 
@@ -64,4 +78,5 @@ A renderer consumes the volume and produces the frame:
      - Lit variant of ``render3d``
    * - ``renderCubemapSurface`` / ``renderCubemap3d``
      - Six seamless cube faces for skyboxes and planetary surfaces — see the
-       Cubemaps guide
+       Cubemaps guide. No longer the only route to a cubemap: a
+       :ref:`scene() <shader-scene>` program exports through the same API

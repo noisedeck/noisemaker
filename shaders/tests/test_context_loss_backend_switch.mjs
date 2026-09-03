@@ -22,6 +22,33 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { chromium } from 'playwright'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+})
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = path.resolve(__dirname, '../..')
 const EFFECTS_DIR = path.join(PROJECT_ROOT, 'shaders', 'effects')
@@ -100,6 +127,7 @@ async function main() {
         process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan',
     ]
     const browser = await chromium.launch({ headless: true, args })
+    activeBrowser = browser
     const context = await browser.newContext({ viewport: { width: 512, height: 512 } })
     const page = await context.newPage()
     page.setDefaultTimeout(20000)

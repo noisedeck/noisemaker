@@ -28,6 +28,17 @@ function deepClone(obj) {
 }
 
 /**
+ * Whether an op is a compiler-emitted builtin rather than a user effect.
+ * The validator emits these with a leading underscore (_read, _write, _write3d,
+ * _subchain_begin, ...); no registered effect op can start with one.
+ * @param {string} op - Op name from a chain step
+ * @returns {boolean} True if the op is a builtin chain node
+ */
+function isBuiltinOp(op) {
+    return typeof op === 'string' && op.startsWith('_')
+}
+
+/**
  * Find a step in the compiled program by its temp index
  * @param {object} compiled - Compiled program from compile()
  * @param {number} stepIndex - The temp index of the step to find
@@ -125,6 +136,15 @@ export function replaceEffect(compiled, stepIndex, newEffectName, newArgs = {}, 
 
     const { planIndex, chainIndex, step } = location
     const oldEffectName = step.op
+
+    // Builtin chain nodes (_write, _read, ...) are structural, not user effects.
+    // Replacing one would corrupt the chain's output wiring.
+    if (isBuiltinOp(oldEffectName)) {
+        return {
+            success: false,
+            error: `Cannot replace builtin '${oldEffectName}': it is a structural chain node, not an effect.`
+        }
+    }
 
     // Also check position in chain - first effect in chain is "starter position"
     const isStarterPosition = chainIndex === 0
@@ -238,6 +258,10 @@ export function replaceEffect(compiled, stepIndex, newEffectName, newArgs = {}, 
  *
  * Useful for understanding the structure of a program before calling replaceEffect.
  *
+ * Returns every member of `plan.chain`, including compiler-emitted builtins such
+ * as the terminal `_write`. Use `kind` to tell them apart: builtins report
+ * `kind: 'builtin'` and are never replaceable.
+ *
  * @param {object} compiled - Compiled program from compile()
  * @param {object} [options={}] - Options
  * @param {Array<string>} [options.searchOrder] - Namespace search order
@@ -257,16 +281,18 @@ export function listSteps(compiled, options = {}) {
             const step = plan.chain[chainIndex]
             const isStarterPosition = chainIndex === 0
             const isStarter = checkIsStarter(step.op, searchOrder)
+            const builtin = isBuiltinOp(step.op)
 
             steps.push({
                 stepIndex: step.temp,
                 planIndex,
                 chainIndex,
                 effectName: step.op,
+                kind: builtin ? 'builtin' : 'effect',
                 isStarter,
                 isStarterPosition,
-                canReplaceWithStarter: isStarterPosition,
-                canReplaceWithNonStarter: !isStarterPosition,
+                canReplaceWithStarter: !builtin && isStarterPosition,
+                canReplaceWithNonStarter: !builtin && !isStarterPosition,
                 args: step.args || {}
             })
         }
@@ -298,7 +324,15 @@ export function getCompatibleReplacements(compiled, stepIndex, options = {}) {
         return { success: false, error: `Step with index ${stepIndex} not found` }
     }
 
-    const { chainIndex } = location
+    const { chainIndex, step } = location
+
+    if (isBuiltinOp(step.op)) {
+        return {
+            success: false,
+            error: `Cannot replace builtin '${step.op}': it is a structural chain node, not an effect.`
+        }
+    }
+
     const isStarterPosition = chainIndex === 0
 
     // Collect all registered ops

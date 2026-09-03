@@ -1,8 +1,7 @@
 /**
  * OBJ File Parser
  *
- * Parses Wavefront OBJ format mesh files and returns vertex data
- * suitable for upload to mesh textures.
+ * Parses Wavefront OBJ format mesh files into the canonical Geometry shape.
  *
  * Supports:
  * - Vertices (v)
@@ -11,16 +10,16 @@
  * - Faces (f) with vertex/uv/normal indices
  * - Triangulation of quads and n-gons
  */
+import { Geometry } from '../geometry/geometry.js'
 
 /**
- * Parse OBJ file content into mesh data
+ * Parse OBJ file content into geometry.
+ *
+ * OBJ attributes are indexed per-attribute rather than per-vertex, so faces are
+ * expanded to triangle soup while parsing; the returned Geometry carries the
+ * identity index buffer over that soup.
  * @param {string} objText - Raw OBJ file content
- * @returns {{
- *   positions: Float32Array,  // xyz per vertex, interleaved as triangles
- *   normals: Float32Array,    // xyz per vertex
- *   uvs: Float32Array,        // uv per vertex
- *   vertexCount: number       // Total vertex count (triangles * 3)
- * }}
+ * @returns {Geometry}
  */
 export function parseOBJ(objText) {
     // Raw data arrays (indexed)
@@ -132,12 +131,15 @@ export function parseOBJ(objText) {
         computeFaceNormals(positions, normals)
     }
 
-    return {
+    const indices = new Uint32Array(vertexCount)
+    for (let i = 0; i < vertexCount; i++) indices[i] = i
+
+    return new Geometry({
         positions: new Float32Array(positions),
         normals: new Float32Array(normals),
         uvs: new Float32Array(uvs),
-        vertexCount
-    }
+        indices
+    })
 }
 
 /**
@@ -245,7 +247,7 @@ function computeFaceNormals(positions, normals) {
 /**
  * Load and parse OBJ file from URL
  * @param {string} url - URL to OBJ file
- * @returns {Promise<{positions: Float32Array, normals: Float32Array, uvs: Float32Array, vertexCount: number}>}
+ * @returns {Promise<Geometry>}
  */
 export async function loadOBJ(url) {
     const response = await fetch(url)
@@ -254,74 +256,4 @@ export async function loadOBJ(url) {
     }
     const text = await response.text()
     return parseOBJ(text)
-}
-
-/**
- * Pack mesh data into texture-sized arrays for GPU upload
- * Mesh textures store vertex data in a 2D grid where each pixel is one vertex.
- *
- * @param {Float32Array} positions - xyz per vertex (length = vertexCount * 3)
- * @param {Float32Array} normals - xyz per vertex (length = vertexCount * 3)
- * @param {Float32Array} uvs - uv per vertex (length = vertexCount * 2)
- * @param {number} texWidth - Mesh texture width (e.g., 256)
- * @param {number} texHeight - Mesh texture height (e.g., 256)
- * @returns {{
- *   positionData: Float32Array,  // RGBA32F: xyz, w=1 for valid vertex
- *   normalData: Float32Array,    // RGBA16F: xyz, w=0
- *   uvData: Float32Array,        // RGBA16F: uv, zw=0
- *   vertexCount: number
- * }}
- */
-export function packMeshDataForTextures(positions, normals, uvs, texWidth, texHeight) {
-    const maxVertices = texWidth * texHeight
-    const vertexCount = positions.length / 3
-
-    if (vertexCount > maxVertices) {
-        console.warn(`[OBJ] Mesh has ${vertexCount} vertices, but texture can only hold ${maxVertices}. Truncating.`)
-    }
-
-    const usedVertices = Math.min(vertexCount, maxVertices)
-    const pixelCount = texWidth * texHeight
-
-    // RGBA textures: 4 components per pixel
-    const positionData = new Float32Array(pixelCount * 4)
-    const normalData = new Float32Array(pixelCount * 4)
-    const uvData = new Float32Array(pixelCount * 4)
-
-    for (let i = 0; i < usedVertices; i++) {
-        const pi = i * 4
-        const vi3 = i * 3
-        const vi2 = i * 2
-
-        // Position: xyz, w=1 (valid vertex flag)
-        positionData[pi] = positions[vi3]
-        positionData[pi + 1] = positions[vi3 + 1]
-        positionData[pi + 2] = positions[vi3 + 2]
-        positionData[pi + 3] = 1.0  // Valid vertex
-
-        // Normal: xyz, w=0
-        normalData[pi] = normals[vi3]
-        normalData[pi + 1] = normals[vi3 + 1]
-        normalData[pi + 2] = normals[vi3 + 2]
-        normalData[pi + 3] = 0.0
-
-        // UV: uv, zw=0
-        uvData[pi] = uvs[vi2]
-        uvData[pi + 1] = uvs[vi2 + 1]
-        uvData[pi + 2] = 0.0
-        uvData[pi + 3] = 0.0
-    }
-
-    // Mark remaining vertices as invalid (w=0)
-    for (let i = usedVertices; i < pixelCount; i++) {
-        const pi = i * 4
-        positionData[pi + 3] = 0.0  // Invalid vertex
-    }
-
-    return {
-        positionData,
-        normalData,
-        uvData,
-        vertexCount: usedVertices
-    }
 }

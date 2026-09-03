@@ -5,6 +5,39 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../..')
 const effectsDir = path.join(repoRoot, 'shaders/effects')
@@ -18,6 +51,7 @@ const browser = await chromium.launch({
     args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan',
         process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan'],
 })
+activeBrowser = browser
 
 const newEffects = [
     'chrome', 'craquelure', 'directionalBlur', 'extrude', 'halftone',
@@ -146,7 +180,7 @@ async function install(preferWebGPU) {
     const width = 96
     const height = 80
     const page = await browser.newPage({ viewport: { width, height } })
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     const errors = []
     page.on('console', message => {
         if (message.type() === 'error') errors.push(message.text())

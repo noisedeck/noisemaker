@@ -7,6 +7,39 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '../..')
@@ -25,7 +58,15 @@ const width = 96
 const height = 96
 const defaultPondHash = 'fc7d901982ab7f080faa0770f203b5c0c2846efc2864fa0db4e37921807845a9'
 const defaultPondWebgpuHash = defaultPondHash
-const defaultPlasticHash = 'a2553a928da58a3a8513306d6c2b9420bf31eef4fdb51687e8dc1b9c6e2f3ccc'
+// Rebaselined from 'a2553a928da58a3a8513306d6c2b9420bf31eef4fdb51687e8dc1b9c6e2f3ccc'.
+// Not a regression from this branch: checking the pre-branch tree out clean and
+// running this file unmodified produces the value below too, so no source change
+// here moved these pixels. The old value is simply not reproducible in this
+// environment. Plastic Wrap's default half-vector lighting is last-bit sensitive
+// and the previous hash was recorded against a different ANGLE/driver build.
+// WebGL2 and WebGPU agree on the new value bit-for-bit (parity max=0), and the
+// neighbouring Pond hashes above were unaffected.
+const defaultPlasticHash = 'c2dd9c18ec53919f94c921968dc3af3f0127acb5dd9bf817bb7975aaecccd8c3'
 
 const sourceDsl = `search synth
 
@@ -192,7 +233,7 @@ async function render(page, dsl, expectedBackend, tileRegion = null) {
 async function assertBackend(browser, baseUrl, preferWebGPU, expectedBackend) {
     const page = await browser.newPage({ viewport: { width, height } })
     const diagnostics = []
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     page.on('console', message => {
         if (!['error', 'warning'].includes(message.type())) return
         if (message.type() === 'warning' && message.text().includes('GL Driver Message (OpenGL, Performance')) return
@@ -262,7 +303,7 @@ async function assertTileParity(browser, baseUrl, preferWebGPU, expectedBackend,
     const tileHeight = 64
     const offset = [16, 16]
     const page = await browser.newPage({ viewport: { width: tileWidth, height: tileHeight } })
-    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/manifest.json`, { waitUntil: 'load' })
+    if (preferWebGPU) await page.goto(`${baseUrl}/shaders/effects/manifest.json`, { waitUntil: 'load' })
     await installHarness(page, baseUrl, preferWebGPU, tileWidth, tileHeight)
     const tile = await render(page, plasticDsl(60, 40, 30, [0.4, -0.6, 0.7]), expectedBackend,
         { offset, fullResolution: [width, height] })
@@ -285,6 +326,7 @@ async function main() {
             process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan',
         ],
     })
+    activeBrowser = browser
     try {
         const webgl = await assertBackend(browser, baseUrl, false, 'WebGL2')
         const webgpu = await assertBackend(browser, baseUrl, true, 'WebGPU')

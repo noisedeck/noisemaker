@@ -87,6 +87,17 @@ test('parses midi with all parameters', () => {
     assertEqual(scaleArg.sensitivity.value, 3, 'sensitivity should be 3')
 })
 
+test('parses midi port name and id as keyword-only string fields', () => {
+    const tokens = lex('search synth\nnoise(scale: midi(channel: 5, name: "Launch Control XL", id: "port-2")).write(o0)')
+    const ast = parse(tokens)
+
+    const scaleArg = ast.plans[0].chain[0].kwargs.scale
+    assertEqual(scaleArg.name.type, 'String', 'name should be a String node')
+    assertEqual(scaleArg.name.value, 'Launch Control XL', 'name should preserve the readable port name')
+    assertEqual(scaleArg.id.type, 'String', 'id should be a String node')
+    assertEqual(scaleArg.id.value, 'port-2', 'id should preserve the unique port id')
+})
+
 test('parses midi with positional arguments', () => {
     const tokens = lex('search synth\nnoise(scale: midi(1, midiMode.velocity, 0, 0.8)).write(o0)')
     const ast = parse(tokens)
@@ -110,6 +121,68 @@ test('midi throws on missing channel', () => {
         assert(e.message.includes('channel'), 'should mention channel')
     }
     assert(threw, 'should throw on missing channel')
+})
+
+test('midi rejects id without a readable name', () => {
+    let threw = false
+    try {
+        parse(lex('search synth\nnoise(scale: midi(channel: 1, id: "port-2")).write(o0)'))
+    } catch (e) {
+        threw = true
+        assert(e.message.includes('name'), 'should explain that id requires name')
+    }
+    assert(threw, 'should reject id without name')
+})
+
+test('midi rejects variable-backed device identity strings', () => {
+    let threw = false
+    try {
+        parse(lex(`search synth
+let portName = "Launch Control XL"
+noise(scale: midi(channel: 1, name: portName)).write(o0)`))
+    } catch (e) {
+        threw = true
+        assert(e.message.includes('quoted string'), 'should require a direct quoted string')
+    }
+    assert(threw, 'should reject a variable-backed MIDI name')
+})
+
+test('midi rejects empty device identity strings', () => {
+    for (const source of [
+        'search synth\nnoise(scale: midi(channel: 1, name: "")).write(o0)',
+        'search synth\nnoise(scale: midi(channel: 1, name: "Controller", id: "")).write(o0)'
+    ]) {
+        let threw = false
+        try {
+            parse(lex(source))
+        } catch (e) {
+            threw = true
+            assert(e.message.includes('must not be empty'), 'should explain that identity cannot be empty')
+        }
+        assert(threw, 'should reject empty MIDI identity')
+    }
+})
+
+test('midi keeps name and id keyword-only', () => {
+    let threw = false
+    try {
+        parse(lex('search synth\nnoise(scale: midi(1, midiMode.velocity, 0, 1, 1, "Launch Control XL", "port-2")).write(o0)'))
+    } catch (e) {
+        threw = true
+        assert(e.message.includes('keyword'), 'should explain that name and id are keyword-only')
+    }
+    assert(threw, 'should reject positional name and id')
+})
+
+test('midi rejects mixed keyword and positional overflow', () => {
+    let threw = false
+    try {
+        parse(lex('search synth\nnoise(scale: midi(channel: 1, midiMode.velocity, 0, 1, 1, 99)).write(o0)'))
+    } catch (e) {
+        threw = true
+        assert(e.message.includes('positional'), 'should explain that a positional argument is excess')
+    }
+    assert(threw, 'should not silently discard an unconsumed positional argument')
 })
 
 // ============================================================================
@@ -191,6 +264,46 @@ test('validates midi() and creates runtime config', () => {
     assertEqual(scaleArg.mode, 4, 'should have velocity mode (4)')
 })
 
+test('validates allowlisted midi port strings into the runtime config', () => {
+    const result = compile('search synth\nnoise(scale: midi(channel: 1, name: "Launch Control XL", id: "port-2")).write(o0)')
+    assertEqual(result.diagnostics.length, 0, 'allowlisted midi strings should compile cleanly')
+
+    const scaleArg = result.plans[0].chain[0].args.scale
+    assertEqual(scaleArg.name, 'Launch Control XL', 'runtime config should retain port name')
+    assertEqual(scaleArg.id, 'port-2', 'runtime config should retain port id')
+})
+
+test('midi port identity decodes escaped DSL strings and formats them stably', () => {
+    const name = 'Launch "Control" \\ XL'
+    const id = 'port\\two'
+    const source = `search synth\nnoise(scale: midi(channel: 1, name: ${JSON.stringify(name)}, id: ${JSON.stringify(id)})).write(o0)`
+    const result = compile(source)
+    const config = result.plans[0].chain[0].args.scale
+
+    assertEqual(config.name, name, 'runtime config should decode the device name')
+    assertEqual(config.id, id, 'runtime config should decode the device id')
+
+    const formatted = formatValue(config)
+    assert(formatted.includes(`name: ${JSON.stringify(name)}`), 'formatter should preserve escaped name')
+    assert(formatted.includes(`id: ${JSON.stringify(id)}`), 'formatter should preserve escaped id')
+
+    const reparsed = compile(`search synth\nnoise(scale: ${formatted}).write(o0)`)
+    const reparsedConfig = reparsed.plans[0].chain[0].args.scale
+    assertEqual(reparsedConfig.name, name, 'formatted name should compile back to the same value')
+    assertEqual(reparsedConfig.id, id, 'formatted id should compile back to the same value')
+})
+
+test('rejects non-string midi port identity fields', () => {
+    let threw = false
+    try {
+        compile('search synth\nnoise(scale: midi(channel: 1, name: 2, id: 3)).write(o0)')
+    } catch (e) {
+        threw = true
+        assert(e.message.includes("'name' requires a quoted string"), 'should reject numeric name')
+    }
+    assert(threw, 'non-string MIDI identity should fail during parsing')
+})
+
 test('validates audio() and creates runtime config', () => {
     const result = compile('search synth\nnoise(scale: audio(band: audioBand.low)).write(o0)')
 
@@ -259,6 +372,24 @@ test('formats midi with non-default values', () => {
     assert(result.includes('min: 0.2'), 'should include min')
     assert(result.includes('max: 0.8'), 'should include max')
     assert(result.includes('sensitivity: 3'), 'should include sensitivity')
+})
+
+test('formats midi with readable name and exact id', () => {
+    const config = {
+        type: 'Midi',
+        channel: 1,
+        mode: 4,
+        min: 0,
+        max: 1,
+        sensitivity: 1,
+        name: 'Launch Control XL',
+        id: 'port-2'
+    }
+
+    const result = formatValue(config)
+    assertEqual(result,
+        'midi(channel: 1, name: "Launch Control XL", id: "port-2")',
+        'should retain readable and exact port identity')
 })
 
 test('formats audio runtime config', () => {

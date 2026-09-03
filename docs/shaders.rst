@@ -1,7 +1,7 @@
 Shaders
 =======
 
-Noisemaker's GPU rendering engine. Dual WebGL2 and WebGPU backends, a composable DSL for building effect chains, and a growing library of shader effects.
+Noisemaker's GPU rendering engine. Dual WebGL2 and WebGPU backends, a composable DSL for building effect chains, a growing library of shader effects, and a preview :ref:`3D scene graph <shader-scene>` that renders into the same chains.
 
 .. raw:: html
 

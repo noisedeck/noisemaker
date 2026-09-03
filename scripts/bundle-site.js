@@ -9,6 +9,7 @@
  * - demo/font/Nunito/ (fonts)
  * - demo/js/ (JS demo, pointing at bundled noisemaker.min.js)
  * - demo/shaders/ (Shaders demo, pointing at bundled shader libs with ?bundles=1 default)
+ * - demo/shaders/scenes/ (scene viewer and its scene programs)
  * - lib/ (bundled JS and shader libraries)
  * - effects/ (mini-bundled shader effects)
  *
@@ -429,6 +430,72 @@ function copyMeshFiles() {
 }
 
 /**
+ * Copy the scene viewer and its scene programs
+ *
+ * The viewer is a standalone page under demo/shaders/scenes/, linked from the
+ * shaders demo. It loads a `.dsl` scene named by `?scene=`, so the programs
+ * ship beside it. Screenshots in that directory are visual-test artifacts and
+ * are deliberately left behind.
+ *
+ * Its four source-tree references need the same redirection to the bundled
+ * core that transformShadersDemoHtml() applies to the demo page. That includes
+ * the `../lib/demo-ui.js` import: copyShaderDemoLib() copies demo-ui.js itself,
+ * but not the sibling modules it imports (program-state.js, dsl-utils.js,
+ * emitter.js), so loading it from the site 404s and the viewer never starts.
+ * The bundled core re-exports everything demo-ui.js exports.
+ */
+function copySceneDemos() {
+    const scenesSrcDir = path.join(repoRoot, 'demo', 'shaders', 'scenes')
+    const scenesDestDir = path.join(siteDir, 'demo', 'shaders', 'scenes')
+
+    if (!fs.existsSync(scenesSrcDir)) return
+
+    fs.mkdirSync(scenesDestDir, { recursive: true })
+    const dslFiles = fs.readdirSync(scenesSrcDir).filter(f => f.endsWith('.dsl'))
+    for (const f of dslFiles) {
+        copyFile(path.join(scenesSrcDir, f), path.join(scenesDestDir, f))
+    }
+
+    const viewerSrc = path.join(scenesSrcDir, 'viewer.html')
+    if (fs.existsSync(viewerSrc)) {
+        let html = fs.readFileSync(viewerSrc, 'utf8')
+
+        // gl-matrix is inlined in the bundle, so the source-tree importmap has
+        // nothing left to resolve.
+        html = html.replace(
+            /<script type="importmap">[\s\S]*?<\/script>/,
+            ''
+        )
+
+        html = html.replace(
+            "import { CanvasRenderer } from '../../../shaders/src/renderer/canvas.js'",
+            "import { CanvasRenderer } from '../../../lib/shaders/noisemaker-shaders-core.esm.min.js'"
+        )
+
+        html = html.replace(
+            "basePath: '../../../shaders',",
+            "basePath: '../../../lib/shaders',"
+        )
+
+        html = html.replace(
+            "import { extractEffectNamesFromDsl } from '../lib/demo-ui.js'",
+            "import { extractEffectNamesFromDsl } from '../../../lib/shaders/noisemaker-shaders-core.esm.min.js'"
+        )
+
+        // A reference that survived the rewrites is a 404 on the deployed site.
+        // Fail the build here rather than ship a viewer that cannot start.
+        const leftover = html.match(/(?:\.\.\/)+(?:node_modules|shaders\/src|lib\/demo-ui\.js)[^'"]*/)
+        if (leftover) {
+            throw new Error(`copySceneDemos: viewer.html still references ${leftover[0]} after rewriting`)
+        }
+
+        fs.writeFileSync(path.join(scenesDestDir, 'viewer.html'), html)
+    }
+
+    console.log(`  ✓ demo/shaders/scenes/ (${dslFiles.length} scene programs)`)
+}
+
+/**
  * Main entry point
  */
 async function main() {
@@ -474,6 +541,7 @@ async function main() {
     // Copy shader demo lib and images
     copyShaderDemoLib()
     copyShaderDemoImages()
+    copySceneDemos()
 
     // Copy logo image
     copyLogoImage()

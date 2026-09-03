@@ -105,8 +105,7 @@ export default new Effect({
       program: "renderCubemapSurface",
       drawBuffers: 2,
       inputs: {
-        volumeCache: "inputTex3d",
-        analyticalGeo: "inputGeo"
+        volumeCache: "inputTex3d"
       },
       outputs: {
         color: "outputTex",

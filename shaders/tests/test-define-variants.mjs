@@ -17,6 +17,39 @@ import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeContext = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const context = activeContext
+    activeContext = null
+    try {
+        await context?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeContext?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 // Portable and self-contained: start the repo's own static harness server and
 // drive playwright's bundled Chromium headless with a platform-appropriate
 // ANGLE backend. No machine-specific browser path and no externally-started
@@ -153,6 +186,7 @@ async function main() {
                 : process.platform === 'win32' ? '--use-angle=d3d11'
                     : '--use-angle=vulkan'],
     })
+    activeContext = ctx
     const page = ctx.pages()[0] || (await ctx.newPage())
 
     let totalChecks = 0

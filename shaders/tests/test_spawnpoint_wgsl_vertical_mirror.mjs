@@ -6,6 +6,42 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let activeServer = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    const server = activeServer
+    activeServer = null
+    try {
+        server?.close()
+    } catch {
+        // Server already closed.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { activeServer?.close() } catch { /* already closed */ }
+})
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const repoRoot = path.resolve(__dirname, '../..')
@@ -390,11 +426,32 @@ function mirrorRatio(png, axis) {
     return meanSquaredError(first, mirrored) / meanSquaredError(first, direct)
 }
 
+// A blank frame makes both mean-squared-error terms zero, so every ratio comes
+// out NaN and every `< 0.49` comparison is false -- i.e. a dead render would
+// report "not mirrored" and pass. Carry the variance so the caller can reject
+// that case explicitly.
+function frameVariance(png) {
+    let sum = 0
+    let sumSq = 0
+    let n = 0
+    for (let i = 0; i < png.data.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+            const v = png.data[i + c]
+            sum += v
+            sumSq += v * v
+            n++
+        }
+    }
+    if (n === 0) return 0
+    const mean = sum / n
+    return sumSq / n - mean * mean
+}
+
 function mirrorStats(png) {
     const horizontalRatio = mirrorRatio(png, 'horizontal')
     const verticalRatio = mirrorRatio(png, 'vertical')
     const mirrored = horizontalRatio < 0.49 && (verticalRatio - horizontalRatio) > 0.05
-    return { horizontalRatio, verticalRatio, mirrored }
+    return { horizontalRatio, verticalRatio, mirrored, variance: frameVariance(png) }
 }
 
 function mirrorMessage(stats, source) {
@@ -442,11 +499,17 @@ async function main() {
     const expectedBackend = useWebGL ? 'WebGL2' : 'WebGPU'
 
     const server = await startServer()
+    activeServer = server
     const port = server.address().port
+    // Headed: the headless adapter exposes the default
+    // maxColorAttachmentBytesPerSample of 32, and this pipeline's G-buffer
+    // needs 40 (RGBA32F + RGBA32F + RGBA8). Running headless fails validation
+    // rather than exercising the mirror behaviour under test.
     const browser = await chromium.launch({
         headless: false,
         args: ['--enable-unsafe-webgpu', '--enable-webgpu-developer-features']
     })
+    activeBrowser = browser
 
     try {
         const page = await browser.newPage({
@@ -508,6 +571,14 @@ async function main() {
             }, null, 2))
             return
         }
+
+        // A device-lost or crashed render during the frame loop would otherwise
+        // reach the mirror check as a blank frame and silently pass.
+        assert.deepEqual(errors, [], `browser errors during render: ${errors.join('\n')}`)
+        assert.ok(
+            stats.variance > 1,
+            `render produced a blank frame (variance ${stats.variance.toFixed(4)}); ${file}`
+        )
 
         assert.equal(
             stats.mirrored,

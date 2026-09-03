@@ -269,6 +269,44 @@ noise(scale: scaleOsc).bloom(amount: 0.5).write(o0)`
 })
 
 // ============================================================================
+// Mixed positional/keyword arguments
+//
+// osc()/midi()/audio() resolve parameters by walking the parameter order and
+// indexing the positional list by slot. Positionals are dense — a keyword does
+// not occupy a slot in them — so any positional written after a keyword must
+// bind to the next unfilled parameter, not to args[slot].
+// ============================================================================
+
+function oscFrom(code) {
+    const ast = parse(lex(code))
+    let found = null
+    const walk = (n) => {
+        if (!n || typeof n !== 'object') return
+        if (n.type === 'Oscillator') { found = found || n; return }
+        for (const v of Object.values(n)) {
+            if (Array.isArray(v)) v.forEach(walk)
+            else if (v && typeof v === 'object') walk(v)
+        }
+    }
+    walk(ast)
+    if (!found) throw new Error('no Oscillator node parsed from: ' + code)
+    const num = (v) => (v && typeof v === 'object' && 'value' in v) ? v.value : v
+    return { min: num(found.min), max: num(found.max) }
+}
+
+test('osc() positional after keyword binds to the next unfilled slot', () => {
+    const o = oscFrom('search synth\nnoise(osc(oscKind.saw, min: 0.2, 0.8)).write(o0)')
+    assertEqual(o.min, 0.2, 'min')
+    assertEqual(o.max, 0.8, 'max (positional after keyword was dropped)')
+})
+
+test('osc() all-positional form is unchanged', () => {
+    const o = oscFrom('search synth\nnoise(osc(oscKind.saw, 0.2, 0.8)).write(o0)')
+    assertEqual(o.min, 0.2, 'min')
+    assertEqual(o.max, 0.8, 'max')
+})
+
+// ============================================================================
 // Summary
 // ============================================================================
 

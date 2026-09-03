@@ -76,10 +76,27 @@ export function parse(tokens) {
         return comments
     }
 
+    /**
+     * Discard any pending COMMENT tokens.
+     *
+     * Comments were consumed only between statements and between chain links,
+     * so one written inside a call's parentheses — or an array or object
+     * literal — was `Unexpected token COMMENT`. scene() is the one construct
+     * that routinely runs to forty lines, and annotating its children is the
+     * first thing anyone tries.
+     *
+     * These are DROPPED rather than attached: an argument list is re-emitted on
+     * one line (see formatSceneAst in unparser.js), where a line comment would
+     * swallow everything after it and the text would no longer reparse.
+     */
+    function skipComments() {
+        while (peek()?.type === 'COMMENT') advance()
+    }
+
     const exprStartTokens = new Set([
         'PLUS', 'MINUS', 'NUMBER', 'HEX', 'FUNC', 'STRING',
         'IDENT', 'OUTPUT_REF', 'SOURCE_REF', 'VOL_REF', 'GEO_REF', 'MESH_REF',
-        'XYZ_REF', 'VEL_REF', 'RGBA_REF', 'LPAREN', 'LBRACKET',
+        'XYZ_REF', 'VEL_REF', 'RGBA_REF', 'LPAREN', 'LBRACKET', 'LBRACE',
         'TRUE', 'FALSE'
     ])
 
@@ -115,8 +132,8 @@ export function parse(tokens) {
      * All params except 'type' are optional and support kwargs.
      *
      * type: oscKind enum (sine, tri, saw, sawInv, square, noise)
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      * speed: integer multiplier for animation duration (default 1)
      * offset: phase offset 0..1 (default 0)
      * seed: noise seed (default 1, only used for noise type)
@@ -147,12 +164,18 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
@@ -176,13 +199,15 @@ export function parse(tokens) {
      * Transform a midi() call into a Midi AST node.
      *
      * Midi signature:
-     * midi(channel, mode?, min?, max?, sensitivity?)
+     * midi(channel, mode?, min?, max?, sensitivity?, name:?, id:?)
      *
      * channel: MIDI channel 1-16 (required)
      * mode: midiMode enum (default midiMode.velocity)
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      * sensitivity: trigger falloff rate (default 1)
+     * name: readable MIDIPort.name selector (keyword-only)
+     * id: exact MIDIPort.id selector (keyword-only, requires name)
      */
     function transformMidiInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -190,6 +215,16 @@ export function parse(tokens) {
 
         // Parameter order: channel, mode, min, max, sensitivity
         const paramOrder = ['channel', 'mode', 'min', 'max', 'sensitivity']
+        const keywordOnlyParams = ['name', 'id']
+        const validParams = [...paramOrder, ...keywordOnlyParams]
+        if (args.length > paramOrder.length) {
+            throw new SyntaxError(`midi() name and id are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const key of Object.keys(kwargs)) {
+            if (!validParams.includes(key)) {
+                throw new SyntaxError(`midi() unknown parameter '${key}' at line ${nameToken.line} col ${nameToken.col}. Valid: ${validParams.join(', ')}`)
+            }
+        }
         const defaults = {
             mode: { type: 'Member', path: ['midiMode', 'velocity'] },
             min: { type: 'Number', value: 0 },
@@ -200,19 +235,42 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
         }
 
+        if (posCursor < args.length) {
+            throw new SyntaxError(`midi() has an excess positional argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+
         if (!resolved.channel) {
             throw new SyntaxError(`midi() requires 'channel' argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (kwargs.id !== undefined && kwargs.name === undefined) {
+            throw new SyntaxError(`midi() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const paramName of keywordOnlyParams) {
+            const value = kwargs[paramName]
+            if (value === undefined) continue
+            if (value.type !== 'String') {
+                throw new SyntaxError(`midi() '${paramName}' requires a quoted string at line ${nameToken.line} col ${nameToken.col}`)
+            }
+            if (value.value.length === 0) {
+                throw new SyntaxError(`midi() '${paramName}' must not be empty at line ${nameToken.line} col ${nameToken.col}`)
+            }
         }
 
         return {
@@ -222,6 +280,8 @@ export function parse(tokens) {
             min: resolved.min,
             max: resolved.max,
             sensitivity: resolved.sensitivity,
+            name: kwargs.name,
+            id: kwargs.id,
             loc: { line: nameToken.line, col: nameToken.col }
         }
     }
@@ -233,8 +293,8 @@ export function parse(tokens) {
      * audio(band, min?, max?)
      *
      * band: audioBand enum (required) - low, mid, high, vol
-     * min: minimum output value (default 0)
-     * max: maximum output value (default 1)
+     * min: low end of the normalized [0, 1] output sub-range (default 0)
+     * max: high end of the normalized [0, 1] output sub-range (default 1)
      */
     function transformAudioInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -250,12 +310,18 @@ export function parse(tokens) {
         const resolved = {}
 
         // Resolve each parameter from positional args or kwargs
+        // Positionals are dense — a keyword does not occupy a slot in `args` —
+        // so they are consumed with their own cursor against the parameters a
+        // keyword has not filled. Indexing by slot drops every positional
+        // written after a keyword.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
@@ -818,34 +884,33 @@ export function parse(tokens) {
         const args = []
         const kwargs = {}
         let keyword = false
-        if (peek().type !== 'RPAREN') {
+
+        function parseNextArg() {
+            skipComments()
             if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
                 keyword = true
                 parseKwarg(kwargs)
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (!(peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON')) {
-                        const t = peek()
-                        throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
-                    }
-                    parseKwarg(kwargs)
-                }
             } else {
                 args.push(parseArg())
-                while (peek().type === 'COMMA') {
-                    advance()
-                    if (peek().type === 'RPAREN') break
-                    if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {
-                        const t = peek()
-                        throw new SyntaxError(`Cannot mix positional and keyword arguments at line ${t.line} col ${t.col}`)
-                    }
-                    args.push(parseArg())
-                }
+            }
+            skipComments()
+        }
+
+        skipComments()
+        if (peek().type !== 'RPAREN') {
+            parseNextArg()
+            while (peek().type === 'COMMA') {
+                advance()
+                skipComments()
+                if (peek().type === 'RPAREN') break
+                parseNextArg()
             }
         }
         expect('RPAREN', "Expect ')'")
-        const call = {type: 'Call', name: nameToken.lexeme, args}
+        // Record where the call was written. Scene nodes are handed to the
+        // scene compiler as raw AST and it reports errors from `loc`; without
+        // this every scene diagnostic reads "line 0 col 0".
+        const call = {type: 'Call', name: nameToken.lexeme, args, loc: {line: nameToken.line, col: nameToken.col}}
         if (keyword) call.kwargs = kwargs
         if (nameToken.lexeme === 'from') {
             return transformFromInvocation(call, nameToken)
@@ -908,6 +973,17 @@ export function parse(tokens) {
         return call
     }
 
+    /**
+     * Source position of the token a literal starts at.
+     *
+     * Value nodes carried no `loc`, so every scene diagnostic anchored to one
+     * — an unknown keyword's argument, a mesh type string, a rejected mesh
+     * parameter — reported "line 0 col 0".
+     */
+    function locOf(token) {
+        return { line: token.line, col: token.col }
+    }
+
     function parseArg() {
         return parseAdditive()
     }
@@ -919,7 +995,7 @@ export function parse(tokens) {
             const right = parseMultiplicative()
             const l = toNumber(node)
             const r = toNumber(right)
-            node = {type: 'Number', value: op === 'PLUS' ? l + r : l - r}
+            node = {type: 'Number', value: op === 'PLUS' ? l + r : l - r, loc: node.loc}
         }
         return node
     }
@@ -931,7 +1007,7 @@ export function parse(tokens) {
             const right = parseUnary()
             const l = toNumber(node)
             const r = toNumber(right)
-            node = {type: 'Number', value: op === 'STAR' ? l * r : l / r}
+            node = {type: 'Number', value: op === 'STAR' ? l * r : l / r, loc: node.loc}
         }
         return node
     }
@@ -944,7 +1020,7 @@ export function parse(tokens) {
         if (peek().type === 'MINUS') {
             advance()
             const val = parseUnary()
-            return {type: 'Number', value: -toNumber(val)}
+            return {type: 'Number', value: -toNumber(val), loc: val.loc}
         }
         return parsePrimary()
     }
@@ -954,10 +1030,10 @@ export function parse(tokens) {
         switch (token.type) {
             case 'NUMBER':
                 advance()
-                return {type: 'Number', value: parseFloat(token.lexeme)}
+                return {type: 'Number', value: parseFloat(token.lexeme), loc: locOf(token)}
             case 'STRING':
                 advance()
-                return {type: 'String', value: token.lexeme}
+                return {type: 'String', value: token.lexeme, loc: locOf(token)}
             case 'HEX': {
                 advance()
                 const hex = token.lexeme.slice(1)
@@ -976,7 +1052,7 @@ export function parse(tokens) {
                     b = parseInt(hex.slice(4, 6), 16)
                     a = parseInt(hex.slice(6, 8), 16) / 255
                 }
-                return {type: 'Color', value: [r / 255, g / 255, b / 255, a]}
+                return {type: 'Color', value: [r / 255, g / 255, b / 255, a], loc: locOf(token)}
             }
             case 'LBRACKET': {
                 // Array literal — comma-separated arg expressions, used as
@@ -988,11 +1064,16 @@ export function parse(tokens) {
                 const startCol = token.col
                 advance()
                 const elements = []
+                skipComments()
                 if (peek().type !== 'RBRACKET') {
                     elements.push(parseArg())
+                    skipComments()
                     while (peek().type === 'COMMA') {
                         advance()
+                        skipComments()
+                        if (peek().type === 'RBRACKET') break
                         elements.push(parseArg())
+                        skipComments()
                     }
                 }
                 if (peek().type !== 'RBRACKET') {
@@ -1007,16 +1088,16 @@ export function parse(tokens) {
                 return {type: 'Func', src: token.lexeme}
             case 'TRUE':
                 advance()
-                return {type: 'Boolean', value: true}
+                return {type: 'Boolean', value: true, loc: locOf(token)}
             case 'FALSE':
                 advance()
-                return {type: 'Boolean', value: false}
+                return {type: 'Boolean', value: false, loc: locOf(token)}
             case 'IDENT': {
                 if (token.lexeme === 'Math' && tokens[current + 1]?.type === 'DOT' && tokens[current + 2]?.type === 'IDENT' && tokens[current + 2].lexeme === 'PI') {
                     advance()
                     advance()
                     advance()
-                    return {type: 'Number', value: Math.PI}
+                    return {type: 'Number', value: Math.PI, loc: locOf(token)}
                 }
                 if (tokens[current + 1]?.type === 'LPAREN' || hasCallAfterDot(current)) {
                     const chain = parseChain('expression')
@@ -1076,6 +1157,30 @@ export function parse(tokens) {
                 expect('RPAREN', "Expect ')'")
                 return expr
             }
+            case 'LBRACE': {
+                advance()
+                const properties = {}
+                skipComments()
+                if (peek().type !== 'RBRACE') {
+                    const key = expect('IDENT', 'Expected property name').lexeme
+                    expect('COLON', "Expect ':'")
+                    skipComments()
+                    properties[key] = parseAdditive()
+                    skipComments()
+                    while (peek().type === 'COMMA') {
+                        advance()
+                        skipComments()
+                        if (peek().type === 'RBRACE') break
+                        const nextKey = expect('IDENT', 'Expected property name').lexeme
+                        expect('COLON', "Expect ':'")
+                        skipComments()
+                        properties[nextKey] = parseAdditive()
+                        skipComments()
+                    }
+                }
+                expect('RBRACE', "Expect '}'")
+                return {type: 'Object', properties, loc: locOf(token)}
+            }
             default:
                 throw new SyntaxError(`Unexpected token ${token.type} at line ${token.line} col ${token.col}`)
         }
@@ -1091,6 +1196,7 @@ export function parse(tokens) {
     function parseKwarg(obj) {
         const key = expect('IDENT', 'Expected identifier').lexeme
         expect('COLON', "Expect ':'")
+        skipComments()
         if (!exprStartTokens.has(peek().type)) {
             const t = peek()
             throw new SyntaxError(`Expected expression after '=' at line ${t.line} col ${t.col}`)

@@ -265,7 +265,7 @@ Creates and manages the GPU rendering pipeline.
     await renderer.compile(dsl)            // Compile DSL string into a shader pipeline
     renderer.start()                       // Start the render loop
     renderer.stop()                        // Stop the render loop
-    renderer.render(0.5)                   // Render a single frame (time 0-1)
+    renderer.render(0.5)                   // Render a single frame (time 0-1); await it for a scene program
 
     // Parameters
     renderer.applyStepParameterValues(values)  // Apply parameter values from state
@@ -285,8 +285,56 @@ Creates and manages the GPU rendering pipeline.
     await renderer.loadEffects(['synth/noise', 'filter/bloom'])
     renderer.getEffectsFromManifest('synth')  // List effects in a namespace
 
+    // Scene programs (preview) — after compile of a program containing scene()
+    renderer.isScene                       // true for a scene() program
+    renderer.sceneTree                     // live tree: camera, lights, getById(), ... (null for 2D)
+    renderer.sceneRenderer                 // the deferred renderer (null for 2D)
+    renderer.clock                         // { elapsed, delta, frame } (null for 2D)
+
+    // Loaded models for meshRender() — mesh0..mesh7 surfaces
+    await renderer.loadOBJFromURL(url, 'mesh0')
+    await renderer.loadGLTFFromURL(url, 'mesh0')   // .gltf or .glb; also loadOBJFromString / loadGLTFFromString
+
+    // Frame timing
+    renderer.lastRenderTime                // last pipeline frame, ms
+    renderer.getFrameTimeStats()           // { mean, std, min, max, count } over the last 120 frames
+    renderer.resetFrameTimeStats()
+
 See :doc:`renderer-output` for sink lifecycle, asynchronous frame export, and
-the packed RGBA8 frame contract.
+the packed RGBA8 frame contract, and :ref:`shader-scene` for the scene tree
+and what a scene host needs.
+
+Compile failures
+^^^^^^^^^^^^^^^^
+
+``compile()`` rejects with a plain object, not an ``Error``, when the program
+fails validation:
+
+.. code-block:: javascript
+
+    try {
+        await renderer.compile(dsl)
+    } catch (err) {
+        if (Array.isArray(err.diagnostics)) {
+            // { code: 'ERR_COMPILATION_FAILED', diagnostics: [{ code, message, severity, location: { line, column } }] }
+            for (const d of err.diagnostics) console.error(`${d.code} ${d.message} (line ${d.location?.line})`)
+        } else {
+            // A parse error, or a scene() error, is a SyntaxError whose message ends "at line N col M"
+            console.error(err.message || err)
+        }
+    }
+
+The canvas keeps its last frame (or stays blank on a first compile) until a
+later compile succeeds; nothing is drawn to signal the failure.
+
+Scene programs
+^^^^^^^^^^^^^^
+
+A program containing ``scene()`` is hosted the same way, with two additions:
+the 2D effects after the scene must be loaded before ``compile()`` (the scene
+nodes need nothing), and a page that imports the engine from source must
+provide an import map for ``gl-matrix``. Both are covered in
+:ref:`shader-scene`.
 
 ProgramState
 ^^^^^^^^^^^^
@@ -413,6 +461,8 @@ When the DSL isn't a literal string in your code (user input, saved presets, dyn
     await renderer.compile(userDsl)
 
 Returns ``[{ effectId, namespace, name }, ...]`` for every call site in the DSL that resolves against ``renderer.manifest``. Unknown calls are skipped, so the resulting list is always safe to feed to ``loadEffects()``.
+
+In source mode the helper is not exported by the engine entry points; it lives in ``demo/shaders/lib/demo-ui.js`` (which the bundle re-exports). A page that knows its program can pass the effect ids to ``loadEffects()`` directly instead.
 
 The static-DSL quickstart at the top of this guide loads its single effect by ID directly — reach for ``extractEffectNamesFromDsl`` when the DSL text isn't known at write time.
 

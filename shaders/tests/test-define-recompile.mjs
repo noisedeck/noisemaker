@@ -9,17 +9,29 @@
 // runtime uniform (which the shader doesn't read), and the new variant is
 // never built.
 //
-// Usage (with `npm run dev` running on :8001):
+// Portable and self-contained: starts the repo's own static harness server and
+// drives playwright's bundled Chromium headless with a platform-appropriate
+// ANGLE backend. No machine-specific browser path and no externally-started
+// server -- this runs for any contributor on macOS, Linux, or Windows.
+//
+// Usage:
 //   node shaders/tests/test-define-recompile.mjs
 //   node shaders/tests/test-define-recompile.mjs --backend wgsl
 
 import { chromium } from 'playwright'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-const VIEWER_BASE = 'http://127.0.0.1:8001/demo/shaders/'
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const effectsDir = join(repoRoot, 'shaders/effects')
+process.env.SHADE_EFFECTS_DIR = effectsDir
+process.env.SHADE_PROJECT_ROOT = repoRoot
+const { acquireServer, releaseServer } = await import(join(repoRoot, 'vendor/shade-mcp/harness/index.js'))
+const baseUrl = await acquireServer(undefined, repoRoot, effectsDir)
+const VIEWER_BASE = `${baseUrl}/demo/shaders/`
+
 const NAV_TIMEOUT_MS = 20_000
 const PIPELINE_TIMEOUT_MS = 30_000
 
@@ -31,30 +43,32 @@ function arg(name, def = null) {
 
 const backend = arg('backend', 'glsl')
 
+// Snapshot the backend's compiled program cache keys. Variant compilation is
+// observable here directly; the old [compile-...] console tracing this test
+// used to scrape was removed in 6c1e27cd.
+const programKeys = (page) => page.evaluate(() => {
+    const pipeline = window.__noisemakerRenderingPipeline
+    const programs = pipeline?.backend?.programs
+    return programs ? Array.from(programs.keys()) : []
+})
+
 async function main() {
     const userDataDir = mkdtempSync(join(tmpdir(), 'noisemaker-define-recompile-'))
     console.log(`backend=${backend}  userDataDir=${userDataDir}`)
 
     const ctx = await chromium.launchPersistentContext(userDataDir, {
-        executablePath: CHROME_PATH,
-        headless: false,
+        headless: true,
         viewport: { width: 1280, height: 900 },
-        args: [
-            '--enable-unsafe-webgpu',
-            '--use-angle=d3d11',
-            '--ignore-gpu-blocklist',
-        ],
+        args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--ignore-gpu-blocklist',
+            process.platform === 'darwin' ? '--use-angle=metal'
+                : process.platform === 'win32' ? '--use-angle=d3d11'
+                    : '--use-angle=vulkan'],
     })
 
     const page = ctx.pages()[0] || (await ctx.newPage())
 
-    const compileLines = []
     const errors = []
-    page.on('console', msg => {
-        const text = msg.text()
-        if (text.startsWith('[compile-')) compileLines.push(text)
-        else if (msg.type() === 'error') errors.push(text)
-    })
+    page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()) })
     page.on('pageerror', err => errors.push(`pageerror: ${err.message}`))
 
     const url = `${VIEWER_BASE}?backend=${backend}&effect=${encodeURIComponent('synth.noise')}`
@@ -63,64 +77,70 @@ async function main() {
         () => window.__noisemakerRenderingPipeline != null,
         { timeout: PIPELINE_TIMEOUT_MS, polling: 50 }
     )
+    await page.waitForFunction(
+        () => (window.__noisemakerRenderingPipeline?.backend?.programs?.size ?? 0) > 0,
+        { timeout: PIPELINE_TIMEOUT_MS, polling: 50 }
+    )
 
-    // Wait for the noise type dropdown to appear and check its initial value.
-    // The noise effect's `type` global has default=10 (simplex), so the
-    // initial program key should contain `__NOISE_TYPE_10`.
-    const initialCompiles = compileLines.length
-    const sawInitial = compileLines.some(l => l.includes('__NOISE_TYPE_10'))
-    console.log(`initial compiles=${initialCompiles}  sawInitialNoiseType10=${sawInitial}`)
+    let failed = false
+
+    // The noise effect's `type` global has default=10 (simplex), so the initial
+    // program key should carry `__NOISE_TYPE_10`.
+    const initialKeys = await programKeys(page)
+    console.log(`initial programs=${initialKeys.length}`)
+    for (const k of initialKeys) console.log(`  ${k}`)
+    if (!initialKeys.some(k => k.includes('__NOISE_TYPE_10'))) {
+        console.log('\nFAIL: initial program key does not carry __NOISE_TYPE_10')
+        failed = true
+    }
 
     // Change the noise type via the ProgramState test hook. Going through the
     // state layer (rather than the custom-element dropdown) tests exactly the
     // wiring we care about: setValue on a `define:`-flagged param should
     // trigger a recompile.
-    const beforeChange = compileLines.length
     await page.evaluate(() => {
         const ps = window.__noisemakerProgramState
         if (!ps) throw new Error('window.__noisemakerProgramState not set')
         // Pick a value different from the default 10. constant=0 in the choices.
         ps.setValue('step_0', 'type', 0)
     })
-
-    // Give the recompile a chance to run.
     await page.waitForTimeout(2000)
 
-    const newCompiles = compileLines.slice(beforeChange)
-    const sawNewVariant = newCompiles.some(l => l.includes('__NOISE_TYPE_0'))
-    console.log(`compiles after change=${newCompiles.length}`)
-    for (const l of newCompiles) console.log(`  ${l}`)
-    console.log(`sawNewVariant(__NOISE_TYPE_0)=${sawNewVariant}`)
+    const afterDefine = await programKeys(page)
+    const newVariants = afterDefine.filter(k => !initialKeys.includes(k))
+    console.log(`\nnew programs after define change=${newVariants.length}`)
+    for (const k of newVariants) console.log(`  ${k}`)
 
-    if (errors.length > 0) {
-        console.log(`\nERRORS:`)
-        for (const e of errors) console.log(`  ${e}`)
-    }
-
-    let failed = false
-    if (!sawNewVariant) {
+    if (!newVariants.some(k => k.includes('__NOISE_TYPE_0'))) {
         console.log('\nFAIL: noise type change did not trigger a recompile of the new variant')
         failed = true
     }
 
     // Negative case: changing a regular runtime uniform must NOT trigger a
-    // recompile. We pick `freq`, which is a normal float uniform with no
-    // `define:` flag. After bumping it, no new compile lines should appear.
-    const beforeRuntimeChange = compileLines.length
+    // recompile. `octaves` is a real noise global with no `define:` flag, so
+    // after bumping it no new program key should appear.
     await page.evaluate(() => {
-        const ps = window.__noisemakerProgramState
-        ps.setValue('step_0', 'freq', 7)
+        window.__noisemakerProgramState.setValue('step_0', 'octaves', 5)
     })
     await page.waitForTimeout(1000)
-    const newAfterRuntime = compileLines.slice(beforeRuntimeChange)
-    if (newAfterRuntime.length > 0) {
-        console.log(`\nFAIL: runtime uniform change triggered ${newAfterRuntime.length} unexpected compile(s):`)
-        for (const l of newAfterRuntime) console.log(`  ${l}`)
+
+    const afterRuntime = await programKeys(page)
+    const unexpected = afterRuntime.filter(k => !afterDefine.includes(k))
+    if (unexpected.length > 0) {
+        console.log(`\nFAIL: runtime uniform change triggered ${unexpected.length} unexpected compile(s):`)
+        for (const k of unexpected) console.log(`  ${k}`)
+        failed = true
+    }
+
+    if (errors.length > 0) {
+        console.log('\nERRORS:')
+        for (const e of errors) console.log(`  ${e}`)
         failed = true
     }
 
     await ctx.close()
     rmSync(userDataDir, { recursive: true, force: true })
+    await releaseServer()
 
     if (failed) process.exit(1)
     console.log('\nPASS: noise type change recompiled new __NOISE_TYPE_0 variant')

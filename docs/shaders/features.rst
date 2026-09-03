@@ -4,6 +4,7 @@ Features
 .. toctree::
    :maxdepth: 1
 
+   scene
    cubemaps
    pipeline-3d
    parallax

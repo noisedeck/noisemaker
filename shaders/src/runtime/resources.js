@@ -4,12 +4,99 @@
  */
 
 /**
+ * The two names an effect definition may use for the 2D pipeline colour input.
+ * The expander treats them as one slot (see the `arg.kind === 'pipeline'` and
+ * `defaultVal` branches of expander.js), so this module has to as well.
+ */
+const PIPELINE_COLOR_INPUTS = ['inputTex', 'inputColor']
+
+/** A node's main 2D output, as the expander names it: `node_<step>_out`. */
+const NODE_OUTPUT_PATTERN = /^node_\d+_out$/
+
+/**
+ * Every texture id some pass writes.
+ * @param {Array} passes List of render passes
+ * @returns {Set<string>} Written texture ids
+ */
+function collectWrittenTextures(passes) {
+    const written = new Set()
+    for (const pass of passes) {
+        if (!pass.outputs) continue
+        for (const texId of Object.values(pass.outputs)) {
+            if (typeof texId === 'string') written.add(texId)
+        }
+    }
+    return written
+}
+
+/**
+ * The value flowing down the 2D chain into the pass at `index`: the main output
+ * of the most recent pass that belongs to a different node.
+ * @param {Array} passes List of render passes
+ * @param {number} index Index of the reading pass
+ * @param {string} nodeId Node id of the reading pass
+ * @returns {string|null} Upstream texture id, or null when nothing precedes it
+ */
+function findUpstreamChainTexture(passes, index, nodeId) {
+    const ownOutput = `${nodeId}_out`
+    for (let i = index - 1; i >= 0; i--) {
+        const outputs = passes[i].outputs
+        if (!outputs) continue
+        for (const texId of Object.values(outputs)) {
+            if (typeof texId !== 'string') continue
+            if (texId === ownOutput) continue
+            if (NODE_OUTPUT_PATTERN.test(texId)) return texId
+        }
+    }
+    return null
+}
+
+/**
+ * Maps the expander's per-node input aliases back to the textures they read.
+ *
+ * When an effect declares a pipeline colour input under a name the expander's
+ * input mapping does not bind (`inputColor`), the expander falls through to its
+ * generic node-prefixed form and emits `node_1_inputColor` rather than the
+ * upstream `node_0_out`. No pass ever writes that id, so without this map
+ * liveness sees the upstream texture written and never read: its lifetime ends
+ * where it starts, it is never released, and its slot is never reused.
+ *
+ * Only ids that are (a) scoped to the reading pass's own node, (b) named for
+ * the 2D pipeline colour input, and (c) written by no pass are treated as
+ * aliases. That excludes real node-local textures (which some pass writes) and
+ * CPU-uploaded ones such as `node_3_overlayTex` or `imageTex_step_0`.
+ * @param {Array} passes List of render passes
+ * @returns {Map<string, string>} Map<aliasId, upstreamTextureId>
+ */
+function buildInputAliases(passes) {
+    const aliases = new Map()
+    const written = collectWrittenTextures(passes)
+
+    for (let i = 0; i < passes.length; i++) {
+        const pass = passes[i]
+        if (!pass.inputs || !pass.nodeId) continue
+
+        for (const texId of Object.values(pass.inputs)) {
+            if (typeof texId !== 'string') continue
+            if (written.has(texId) || aliases.has(texId)) continue
+            if (!PIPELINE_COLOR_INPUTS.some(name => texId === `${pass.nodeId}_${name}`)) continue
+
+            const upstream = findUpstreamChainTexture(passes, i, pass.nodeId)
+            if (upstream) aliases.set(texId, upstream)
+        }
+    }
+
+    return aliases
+}
+
+/**
  * Analyzes the lifetime of each virtual texture in the pass list.
  * @param {Array} passes List of render passes
  * @returns {Map} Map<virtualId, {start: number, end: number}>
  */
 export function analyzeLiveness(passes) {
     const lifetime = new Map()
+    const aliases = buildInputAliases(passes)
 
     const touch = (texId, index) => {
         if (!texId) return
@@ -26,9 +113,9 @@ export function analyzeLiveness(passes) {
     }
 
     passes.forEach((pass, index) => {
-        // Inputs are read at this index
+        // Inputs are read at this index, through the texture they actually name
         if (pass.inputs) {
-            Object.values(pass.inputs).forEach(tex => touch(tex, index))
+            Object.values(pass.inputs).forEach(tex => touch(aliases.get(tex) ?? tex, index))
         }
         // Outputs are written at this index
         if (pass.outputs) {
@@ -47,6 +134,7 @@ export function analyzeLiveness(passes) {
  */
 export function allocateResources(passes) {
     const lifetime = analyzeLiveness(passes)
+    const aliases = buildInputAliases(passes)
     const allocations = new Map()
     // freeList: Array of { id: string, availableAfter: number }
     const freeList = []
@@ -81,7 +169,10 @@ export function allocateResources(passes) {
 
         // 2. Release Inputs (Last Uses)
         if (pass.inputs) {
-            Object.values(pass.inputs).forEach(texId => {
+            Object.values(pass.inputs).forEach(inputId => {
+                // Same alias resolution liveness used, so a read through an
+                // alias releases the texture the alias stands for.
+                const texId = aliases.get(inputId) ?? inputId
                 if (texId.startsWith('global_')) return
 
                 const l = lifetime.get(texId)

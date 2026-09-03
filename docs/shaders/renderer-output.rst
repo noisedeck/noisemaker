@@ -6,6 +6,13 @@ its canvas. Output sinks let a host send that same rendered surface to
 additional destinations, while the bounded frame-export queue provides an
 asynchronous GPU-to-CPU path for recording, streaming, or analysis.
 
+A :ref:`scene() <shader-scene>` program presents through the same path: the
+scene is drawn into its own texture ahead of the pipeline's frame, blitted
+into the surface its ``.write(oN)`` names, and whatever ``render(oN)`` selects
+is what sinks and the export queue receive. One difference: a single-frame
+``renderer.render(t)`` must be awaited for a scene program, because the scene
+draw is asynchronous.
+
 Both APIs require an active compiled pipeline. They belong to that concrete
 pipeline. A successful in-place recompile preserves its registered sinks;
 switching backends, disposing the renderer, or any fallback that replaces the

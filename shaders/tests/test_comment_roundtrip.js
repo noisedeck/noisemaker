@@ -41,6 +41,8 @@ function roundTrip(source) {
     return unparse(compiled, {}, { getEffectDef })
 }
 
+let failed = 0
+
 function test(name, fn) {
     try {
         console.log(`Running test: ${name}`)
@@ -49,8 +51,11 @@ function test(name, fn) {
     } catch (e) {
         console.error(`FAIL: ${name}`)
         console.error(e.message)
+        failed++
     }
 }
+
+process.on('exit', () => { if (failed > 0) process.exitCode = 1 })
 
 // ============ Round-Trip Tests ============
 

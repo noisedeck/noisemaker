@@ -17,3 +17,4 @@ test-results/
 .openai
 .anthropic
 **/.superpowers/
+shaders/tests/.artifacts/

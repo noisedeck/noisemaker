@@ -128,6 +128,18 @@ export class Backend {
     }
 
     /**
+     * Resolve once all submitted GPU work has completed.
+     *
+     * Applies backpressure for callers that drive many frames in a row without
+     * a compositor to pace them (offline renders, long-running tests); without
+     * it they queue work faster than the GPU retires it.
+     * @returns {Promise<void>}
+     */
+    async waitForIdle() {
+        // Optional - concrete backends may implement this
+    }
+
+    /**
      * Get backend name
      * @returns {string}
      */

@@ -235,8 +235,7 @@ export default new Effect({
       program: "renderLit3d",
       drawBuffers: 2,
       inputs: {
-        volumeCache: "inputTex3d",
-        analyticalGeo: "inputGeo"
+        volumeCache: "inputTex3d"
       },
       outputs: {
         color: "outputTex",

@@ -6,6 +6,39 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import { PNG } from 'pngjs'
 
+// An interrupted run must not leave the browser process tree behind:
+// Playwright's own SIGTERM handler closes its browsers but never exits, and
+// its SIGINT handler races this test's teardown. These close what this test
+// owns and then exit. The 'exit' listener is the last-resort fallback for the
+// process.exit() paths below, where only synchronous work still runs.
+let activeBrowser = null
+let shuttingDown = false
+
+async function shutdownAndExit(code) {
+    if (shuttingDown) return
+    shuttingDown = true
+    const browser = activeBrowser
+    activeBrowser = null
+    try {
+        await browser?.close()
+    } catch {
+        // Already closed.
+    }
+    try {
+        releaseServer()
+    } catch {
+        // Server already released.
+    }
+    process.exit(code)
+}
+
+process.on('SIGINT', () => { shutdownAndExit(130) })
+process.on('SIGTERM', () => { shutdownAndExit(143) })
+process.on('exit', () => {
+    try { activeBrowser?.close() } catch { /* already closed */ }
+    try { releaseServer() } catch { /* already released */ }
+})
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '../..')
 const effectsDir = path.join(repoRoot, 'shaders/effects')
@@ -16,7 +49,14 @@ const { acquireServer, releaseServer } = await import(path.join(repoRoot, 'vendo
 const width = 160
 const height = 96
 const expectedPatternHashes = {
-    line: 'ca2097ced765d7e77eaf1904c9f2932892115d4b03974cdad92a94ec1129e102',
+    // Rebaselined from 'ca2097ced765d7e77eaf1904c9f2932892115d4b03974cdad92a94ec1129e102'.
+    // Not a regression from this branch: the pre-branch tree, checked out clean and
+    // run unmodified, produces the value below as well, so nothing in this branch
+    // moved these pixels. The mono line pattern rotates by monoAngle=30 before
+    // thresholding, so a last-bit difference in the rotation flips pixels along the
+    // ink edge; the old hash came from a different ANGLE/driver build. Both backends
+    // agree on the new value, and the circle pattern below was unaffected.
+    line: '842b9a9d8176638ead50666b3f97b0756ab403e129fe46ad007f57c4626bd2ce',
     circle: '0c1bb60f6ee1609c725092be1a460432c9f720ac32a34f491a9d0f9134d45892',
 }
 const fixtureGlsl = `
@@ -255,6 +295,7 @@ async function main() {
     const baseUrl = await acquireServer(undefined, repoRoot, effectsDir)
     const browser = await chromium.launch({ headless: true, args: ['--disable-gpu-sandbox', '--enable-unsafe-webgpu',
         '--enable-features=Vulkan', '--enable-webgpu-developer-features', process.platform === 'darwin' ? '--use-angle=metal' : '--use-angle=vulkan'] })
+    activeBrowser = browser
     try {
         const webgl = await backendRenders(browser, baseUrl, false, 'WebGL2')
         const webgpu = await backendRenders(browser, baseUrl, true, 'WebGPU')
