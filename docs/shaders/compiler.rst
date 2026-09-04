@@ -12,15 +12,15 @@ The compilation process occurs in four distinct stages:
 
 
 #. **Parsing:** Source Code → Abstract Syntax Tree (AST)
-#. **Analysis:** AST → Logical Graph (Effect Chain)
-#. **Expansion:** Logical Graph → Render Graph (Passes)
+#. **Analysis:** AST → Planned Chains (Effect Operations)
+#. **Expansion:** Planned Chains → Render Graph (Passes)
 #. **Assembly:** Render Graph → Execution Plan (Linear Pass Schedule)
 
 .. code-block:: text
 
    graph TD
        A[Source Code] -->|Lexer/Parser| B[AST]
-       B -->|Semantic Analyzer| C[Logical Graph]
+       B -->|Semantic Analyzer| C[Planned Chains]
        C -->|Effect Expander| D[Render Graph]
        D -->|Resource Allocator| E[Execution Plan]
 
@@ -32,7 +32,8 @@ Stage 1: Parsing
 The parser converts the raw string input into a structured tree representation.
 
 
-* **Input:** ``string`` (e.g., ``osc(10).write(o0)``)
+* **Input:** ``string`` (e.g., ``search synth`` followed by
+  ``noise(scaleX: 10).write(o0)``)
 * **Output:** ``ProgramNode`` (AST Root)
 
 1.1 Lexical Analysis
@@ -41,7 +42,7 @@ The parser converts the raw string input into a structured tree representation.
 The lexer tokenizes the input, handling:
 
 
-* Identifiers (``osc``, ``o0``)
+* Identifiers (``synth``, ``noise``, ``scaleX``, ``o0``)
 * Literals (``10``, ``#ff0000``, ``"string"``)
 * Operators (``.``, ``(``, ``)``)
 * Comments (``//``, ``/* ... */``)
@@ -53,52 +54,68 @@ The lexer tokenizes the input, handling:
 
 The parser constructs the AST based on the grammar defined in :ref:`Polymorphic DSL <shader-language>`. Unlike traditional ESTree-like structures, the Polymorphic parser produces a specialized AST optimized for the pipeline's needs.
 
-**Example AST for ``osc(10).write(o0)``:**
+**Abridged AST for ``search synth`` followed by
+``noise(scaleX: 10).write(o0)``:**
 
 .. code-block:: json
 
    {
      "type": "Program",
-     "plans": [ // Corresponds to ChainStmt in grammar
+     "plans": [
        {
          "chain": [
            {
              "type": "Call",
-             "name": "osc",
-             "args": [{ "type": "Number", "value": 10 }]
+             "name": "noise",
+             "args": [],
+             "kwargs": {
+               "scaleX": { "type": "Number", "value": 10 }
+             }
+           },
+           {
+             "type": "Write",
+             "surface": { "type": "OutputRef", "name": "o0" }
            }
          ],
-         "out": { "type": "OutputRef", "name": "o0" }
+         "write": { "type": "OutputRef", "name": "o0" },
+         "write3d": null
        }
      ],
-     "vars": [],
-     "render": null
+     "render": null,
+     "namespace": { "searchOrder": ["synth"] }
    }
 
 **Key Structural Differences:**
 
 
-* **Flat Chains:** Chains are represented as a flat array of ``Call`` nodes, not nested ``CallExpression`` objects.
-* **Explicit Output:** The ``.write()`` directive is parsed separately from the chain and stored in the ``out`` property of the statement.
-* **Separated State:** Variable assignments (``vars``) and render instructions (``plans``) are segregated at the root level. ``plans`` is an array of ``ChainStmt`` nodes.
+* **Flat Chains:** Chains are represented as a flat array of operation nodes,
+  not nested ``CallExpression`` objects.
+* **Explicit Output:** A ``.write()`` directive is a ``Write`` node in the
+  chain. A terminal write target is also summarized in the statement's
+  ``write`` property for downstream validation.
+* **Separated State:** Variable assignments, render instructions, and chain
+  plans are tracked separately at the root. ``plans`` is an array of
+  ``ChainStmt`` nodes.
 
 ----
 
-Stage 2: Analysis (AST → Logical Graph)
----------------------------------------
+Stage 2: Analysis (AST → Planned Chains)
+-----------------------------------------
 
-This stage resolves symbols, validates types, and constructs a high-level graph of Effect instances.
+This stage resolves symbols, validates types, and constructs namespaced planned
+chains for expansion.
 
 
 * **Input:** ``ProgramNode``
-* **Output:** ``LogicalGraph`` (Nodes = Effects, Edges = Data Flow)
+* **Output:** validated planned chains (operations linked by temporary values)
 
 2.1 Symbol Resolution
 ^^^^^^^^^^^^^^^^^^^^^
 
 
-* **Search Order Resolution:** The ``search`` directive (if present) defines the namespace search order for the program. If omitted, the default order ``['synth', 'filter']`` is used.
-* **Namespace Lookup:** Resolves function names (e.g., ``osc``) to Effect Definitions by walking the search order until a match is found.
+* **Search Order Resolution:** The required ``search`` directive defines the
+  namespace search order for the program. Programs without it are rejected.
+* **Namespace Lookup:** Resolves function names (e.g., ``noise``) to Effect Definitions by walking the search order until a match is found.
 * **Variable Scope:** Tracks ``let`` assignments and resolves variable references.
 
 2.2 Chain Analysis
@@ -108,45 +125,48 @@ Since the AST already represents chains as flat arrays, the analyzer iterates se
 
 
 #. **Root Identification:** The first element of the ``chain`` array is identified as the generator or source.
-#. **Instance Creation:** Instantiates the ``Effect`` class for each ``Call`` node.
+#. **Operation Creation:** Resolves each ``Call`` node to a namespaced effect
+   operation.
 #. **Parameter Binding:**
 
    * Validates arguments against the Effect's ``globals`` schema.
-   * Resolves named arguments (``freq: 10``) vs positional (``10``).
+   * Resolves named arguments (``scaleX: 10``) vs positional (``10``).
    * Coerces types (e.g., ``int`` → ``float``).
 
-2.3 Logical Graph Construction
+2.3 Planned Chain Construction
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Nodes are created for each effect instance. Edges are created to represent the flow of the ``outputColor`` from one effect to the ``inputColor`` of the next.
+Each effect call becomes a planned step. Its ``from`` and ``temp`` fields
+represent data flow between operations before the expander lowers them to
+render passes.
 
-**Logical Node Structure:**
+**Abridged planned step (defaulted arguments omitted):**
 
 .. code-block:: js
 
    {
-     id: "node_1",
-     effect: "Oscillator", // Reference to Definition
-     params: { freq: 10 },
-     inputs: { inputColor: null }, // Generator has no input
-     outputs: { outputColor: "node_1_out" }
+     op: "synth.noise",
+     args: { scaleX: 10 },
+     from: null, // Generator has no input
+     temp: 0
    }
 
 ----
 
-Stage 3: Expansion (Logical Graph → Render Graph)
--------------------------------------------------
+Stage 3: Expansion (Planned Chains → Render Graph)
+---------------------------------------------------
 
 This stage lowers the high-level Effects into their constituent GPU Passes.
 
 
-* **Input:** ``LogicalGraph``
+* **Input:** validated planned chains
 * **Output:** ``RenderGraph`` (Nodes = Passes, Edges = Texture Dependencies)
 
 3.1 Pass Expansion
 ^^^^^^^^^^^^^^^^^^
 
-For each Logical Node, the compiler looks up the ``passes`` array in the Effect Definition.
+For each planned effect operation, the compiler looks up the ``passes`` array
+in the Effect Definition.
 
 
 #. 
@@ -323,4 +343,3 @@ The following table maps error codes to the compilation stage where they are rai
    * - ``ERR_CONTROL_FLOW_INVALID``
      - Analysis
      - Break/continue in invalid context
-

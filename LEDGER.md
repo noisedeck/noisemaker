@@ -134,7 +134,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `5b0b7aa7` (2026-09-04)
+- **Checkpoint:** noisemaker `8cad384f` (2026-09-04)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -148,9 +148,19 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-09-04 — caught up through `8cad384f`: verified `help.md`
+    file coverage for all 210 effect definitions and ran the existing
+    parameter-table checker across the 200 definitions it recognizes. Audited
+    the documentation-only range: its refreshed AI development contract and
+    corrected oscillator, normalized automation, selected-device, raw-audio,
+    and nested-automation language are already reflected in the existing
+    shader guides. No effect or user-facing feature was added, so no new
+    narrative guide was required. Revalidated the production `dirhtml` Sphinx
+    build and static-document asset checks.
   - 2026-09-04 — caught up through `5b0b7aa7`: verified `help.md`
-    coverage for all 210 effect definitions and exact help-table parameter
-    coverage. Updated the existing CLI, general DSL language, and shader guides
+    file coverage for all 210 effect definitions and ran the existing
+    parameter-table checker across the 200 definitions it recognizes. Updated
+    the existing CLI, general DSL language, and shader guides
     for strobe verdicts, magic-mashup input gating, normalized and nested
     MIDI/audio automation,
     selected external devices, raw audio, external-state exports, device-bound

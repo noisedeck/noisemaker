@@ -12,7 +12,7 @@ Grammar
 
 .. code-block:: none
 
-   Program        ::= SearchDirective? Statement* RenderDirective?
+   Program        ::= SearchDirective Statement* RenderDirective?
    SearchDirective::= 'search' Ident ( ',' Ident )*
    Statement      ::= VarAssign | ChainStmt | IfStmt | Break | Continue | Return
    RenderDirective::= 'render' '(' OutputRef ')'
@@ -78,8 +78,8 @@ Grammar
 A chain must start with a Generator function (an effect with no inputs).
 
 
-* Standard Generators: ``osc``, ``noise``, ``voronoi``, ``solid``, ``image``, ``video``, ``camera``.
-* Custom Generators: Any effect defining ``inputs: {}`` or marked as generator.
+* Generator examples (non-exhaustive): ``noise``, ``solid``, ``media``.
+* Other generators: Any effect whose passes do not consume pipeline input.
 
 **Colors:**
 Hex colors support 3, 6, or 8 digits: ``#RGB``, ``#RRGGBB``, ``#RRGGBBAA``. Alpha defaults to ``FF`` (1.0) if omitted.
@@ -101,7 +101,9 @@ Language Features
 Functions & Arguments
 ^^^^^^^^^^^^^^^^^^^^^
 
-Functions accept arguments either positionally or as named keywords. The two forms are mutually exclusive within a single call.
+Functions accept arguments either positionally or as named keywords. The two
+forms are mutually exclusive within a single call, except for the special
+``midi()`` and ``audio()`` value calls documented under `Live Input`_.
 
 **Positional arguments:**
 
@@ -238,7 +240,7 @@ Both arguments can be omitted, or ``name`` can be passed as a positional argumen
 
 * Subchains cannot be empty—they must contain at least one effect.
 * Subchains cannot be the first element in a chain; they require input from a preceding effect.
-* Effects inside subchains cannot be generators (e.g., ``noise()``, ``voronoi()``).
+* Effects inside subchains cannot be generators (e.g., ``noise()``, ``solid()``).
 * Subchains are chainable—the output flows through to subsequent effects after the closing brace.
 * Effects inside subchains use the same argument syntax as regular chain effects.
 
@@ -489,7 +491,7 @@ Use the ``osc()`` function to create an oscillator:
      - Description
    * - type
      - oscKind
-     - (required)
+     - ``oscKind.sine``
      - Oscillator waveform type
    * - min
      - number or automation
@@ -783,7 +785,7 @@ Common Errors
 ^^^^^^^^^^^^^
 
 
-* **S005 (Illegal chain structure):** Generator functions (like ``osc``, ``noise``) must appear at the start of a chain. They cannot consume an existing chain output.
+* **S005 (Illegal chain structure):** Generator functions (like ``noise`` and ``solid``) must appear at the start of a chain. They cannot consume an existing chain output.
 * **S006 (Starter chain missing write):** Generator-driven chains must end with ``.write()`` to produce a reusable surface.
 * **S007 (Deprecated parameter alias):** A parameter name you used still works but has been renamed. Update to the current name.
 * **S008 (Deprecated effect):** An effect you used still works but has been replaced by a newer effect. Update to the current name.
