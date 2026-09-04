@@ -18,8 +18,8 @@ Once enabled, you can use ``midi()`` and ``audio()`` in your DSL programs:
     search synth
     // React to MIDI velocity and audio bass at the same time
     noise(
-        scale: midi(channel: 1, min: 1, max: 10),
-        speed: audio(band: audioBand.low, min: 0.5, max: 2)
+        scaleX: midi(channel: 1, min: 0.1, max: 1),
+        speed: audio(band: audioBand.low, min: 0.25, max: 0.75)
     ).write(o0)
     render(o0)
 
@@ -34,7 +34,7 @@ Control a parameter with MIDI velocity from channel 1:
 .. code-block:: dsl
 
     search synth
-    noise(scale: midi(channel: 1, min: 1, max: 10)).write(o0)
+    noise(scaleX: midi(channel: 1, min: 0.1, max: 1)).write(o0)
 
 Audio Input
 ~~~~~~~~~~~
@@ -44,7 +44,11 @@ React to bass frequencies in the audio input:
 .. code-block:: dsl
 
     search synth
-    noise(scale: audio(band: audioBand.low, min: 1, max: 5)).write(o0)
+    noise(scaleX: audio(band: audioBand.low, min: 0.1, max: 0.5)).write(o0)
+
+Automation values are normalized percentages. ``min: 0.1, max: 0.5`` maps
+the source across 10%–50% of the receiving effect parameter's range; those
+bounds are not absolute parameter values.
 
 midi() Function
 ---------------
@@ -56,7 +60,7 @@ Syntax
 
 .. code-block:: dsl
 
-    midi(channel, mode?, min?, max?, sensitivity?)
+    midi(channel, mode?, min?, max?, sensitivity?, name: "...", id: "...")
 
 Parameters
 ~~~~~~~~~~
@@ -78,17 +82,25 @@ Parameters
      - ``midiMode.velocity``
      - How to interpret MIDI data
    * - ``min``
-     - number
+     - number or automation
      - 0
-     - Minimum output value
+     - Minimum normalized output (0–1)
    * - ``max``
-     - number
+     - number or automation
      - 1
-     - Maximum output value
+     - Maximum normalized output (0–1)
    * - ``sensitivity``
-     - number
+     - number or automation
      - 1
      - Trigger falloff rate (higher = faster decay)
+   * - ``name``
+     - quoted string
+     - none
+     - Readable MIDI input name; keyword-only
+   * - ``id``
+     - quoted string
+     - none
+     - Exact MIDI input ID; keyword-only and requires ``name``
 
 MIDI Modes
 ~~~~~~~~~~
@@ -119,22 +131,45 @@ The ``triggerNote`` and ``velocity`` modes include automatic decay from the note
 - ``sensitivity: 5`` - Decays over ~200ms
 - ``sensitivity: 0.5`` - Decays over ~2 seconds
 
+Selecting a MIDI input
+~~~~~~~~~~~~~~~~~~~~~~
+
+Without ``name`` or ``id``, ``midi()`` reads the aggregate MIDI state for
+backward compatibility. To bind automation to one input, persist both the
+human-readable name and the browser-provided ID:
+
+.. code-block:: dsl
+
+    midi(
+        channel: 1,
+        mode: midiMode.gateVelocity,
+        name: "Launchkey Mini",
+        id: "browser-port-id"
+    )
+
+An ``id`` match is authoritative. A name-only selector is allowed, but it must
+match exactly one connected input; otherwise the source resolves to its
+minimum. ``name`` and ``id`` are quoted, keyword-only fields, and ``id`` is
+invalid without ``name``.
+
 Examples
 ~~~~~~~~
 
 .. code-block:: dsl
 
-    // Basic velocity response
-    noise(scale: midi(channel: 1)).write(o0)
+    search synth, filter
 
-    // Note pitch controls rotation
-    warp(rotation: midi(channel: 1, mode: midiMode.noteChange, min: 0, max: 360))
+    // Basic velocity response
+    noise(scaleX: midi(channel: 1)).write(o0)
+
+    // Note pitch controls warp strength
+    noise().warp(strength: midi(channel: 1, mode: midiMode.noteChange, min: 0, max: 1)).write(o0)
 
     // Velocity with fast decay for percussive response
-    bloom(strength: midi(channel: 10, mode: midiMode.velocity, sensitivity: 5, min: 0, max: 2))
+    noise().bloom(intensity: midi(channel: 10, mode: midiMode.velocity, sensitivity: 5, min: 0, max: 1)).write(o0)
 
     // Sustained note control
-    noise(scale: midi(channel: 2, mode: midiMode.gateVelocity, min: 1, max: 10))
+    noise(scaleX: midi(channel: 2, mode: midiMode.gateVelocity, min: 0.1, max: 1)).write(o0)
 
 audio() Function
 ----------------
@@ -146,7 +181,7 @@ Syntax
 
 .. code-block:: dsl
 
-    audio(band, min?, max?)
+    audio(band, min?, max?, channel: N, name: "...", id: "...")
 
 Parameters
 ~~~~~~~~~~
@@ -164,13 +199,25 @@ Parameters
      - **required**
      - Frequency band to sample
    * - ``min``
-     - number
+     - number or automation
      - 0
-     - Minimum output value
+     - Minimum normalized output (0–1)
    * - ``max``
-     - number
+     - number or automation
      - 1
-     - Maximum output value
+     - Maximum normalized output (0–1)
+   * - ``channel``
+     - positive integer
+     - none
+     - One-based channel on a selected device; keyword-only and requires ``name``
+   * - ``name``
+     - quoted string
+     - none
+     - Readable audio input name; keyword-only and requires ``channel``
+   * - ``id``
+     - quoted string
+     - none
+     - Exact audio device ID; keyword-only and requires ``name``
 
 Audio Bands
 ~~~~~~~~~~~
@@ -189,36 +236,71 @@ Audio Bands
      - High frequencies (~2000Hz+, hi-hats)
    * - ``audioBand.vol``
      - Overall volume (average of all bands)
+   * - ``audioBand.raw``
+     - Bipolar time-domain signal; maps -1…1 onto the normalized 0…1 range
+
+Selecting an audio input
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``audio()`` reads the legacy aggregate analyser when no selector is present.
+A selected source requires both a device ``name`` and a one-based ``channel``;
+include ``id`` when the browser exposes one so duplicate names remain
+unambiguous:
+
+.. code-block:: dsl
+
+    audio(
+        band: audioBand.raw,
+        channel: 2,
+        name: "USB Audio Interface",
+        id: "browser-device-id"
+    )
+
+The ID is authoritative. Without an ID, the name must match exactly one
+connected device. A disconnected, missing, or ambiguous selected source
+resolves to ``min``. ``audioBand.raw`` also resolves to ``min`` until the host
+has supplied a real time-domain sample.
 
 Examples
 ~~~~~~~~
 
 .. code-block:: dsl
 
+    search synth, filter
+
     // React to bass
-    noise(scale: audio(band: audioBand.low, min: 1, max: 5)).write(o0)
+    noise(scaleX: audio(band: audioBand.low, min: 0.1, max: 0.5)).write(o0)
 
     // Hi-hat triggers brightness
-    bloom(strength: audio(band: audioBand.high, min: 0, max: 2))
+    noise().bloom(intensity: audio(band: audioBand.high, min: 0, max: 1)).write(o0)
 
     // Overall volume controls speed
-    warp(speed: audio(band: audioBand.vol, min: 0.5, max: 3))
+    noise().warp(speed: audio(band: audioBand.vol, min: 0.25, max: 0.75)).write(o0)
 
 Combining with Other Automation
 -------------------------------
 
-``midi()`` and ``audio()`` work alongside ``osc()`` for oscillator-based animation:
+``midi()``, ``audio()``, and ``osc()`` work alongside one another, and an
+automation source can drive a numeric field on another automation descriptor.
+Use ``let`` bindings to keep nested programs readable:
 
 .. code-block:: dsl
 
     search synth
-    // MIDI controls scale, audio controls speed, oscillator controls rotation
-    noise(
-        scale: midi(channel: 1, min: 1, max: 10),
-        speed: audio(band: audioBand.low, min: 0.5, max: 2)
-    ).warp(
-        rotation: osc(type: oscKind.sine, min: 0, max: 360)
-    ).write(o0)
+
+    let floor = audio(band: audioBand.low)
+    let rate = midi(channel: 1, min: floor, max: 1)
+    let carrier = osc(type: oscKind.sine, speed: rate)
+
+    noise(scaleX: carrier).write(o0)
+
+The nestable numeric fields are ``min``, ``max``, ``speed``, ``offset``, and
+``seed`` on ``osc()``; ``min``, ``max``, and ``sensitivity`` on ``midi()``;
+and ``min`` and ``max`` on ``audio()``. Enum selectors, device identity, and
+channel numbers remain literal. The compiler rejects cycles and nesting
+deeper than eight descriptors. Oscillator rate modulation is integrated over
+normalized time, so seeking to the same time remains deterministic rather
+than depending on previously rendered frames.
 
 Host Integration
 ----------------
@@ -257,6 +339,17 @@ Updating MIDI State
     midiState.getChannel(1).gate = 1
     midiState.getChannel(1).time = Date.now()
 
+For per-input selectors, register the browser identity and pass it with each
+message. The root state still receives the message for unselected ``midi()``
+calls, while the registered port keeps isolated channel state:
+
+.. code-block:: javascript
+
+    const port = { id: input.id, name: input.name }
+    midiState.registerPort(port)
+    midiState.handleMessage(message.data, port)
+    const ports = midiState.getPorts()
+
 Updating Audio State
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -278,16 +371,39 @@ Updating Audio State
         requestAnimationFrame(updateAudio)
     }
 
+For selected-device capture, register each device and publish analyzed values
+per channel. Supply ``raw`` for ``audioBand.raw``:
+
+.. code-block:: javascript
+
+    audioState.registerDevice({
+        id: device.deviceId,
+        name: device.label,
+        channelCount: 2
+    })
+    audioState.setChannelValues(device.deviceId, 2, {
+        low: 0.25,
+        mid: 0.1,
+        high: 0.05,
+        vol: 0.14,
+        raw: -0.2
+    })
+    const devices = audioState.getDevices()
+
 MidiState API
 ~~~~~~~~~~~~~
 
 .. code-block:: javascript
 
     class MidiState {
-        channels: MidiChannelState[]  // 16 channels
+        channels: Record<number, MidiChannelState>  // keys 1-16
 
         getChannel(n: number): MidiChannelState  // Get channel 1-16
-        handleMessage(data: number[]): void      // Process raw MIDI message
+        handleMessage(data: Uint8Array, port?: { id, name }): void
+        registerPort({ id, name }): MidiState | null
+        disconnectPort(id: string): void
+        getPortState({ id?, name? }): MidiState | null
+        getPorts(): Array<{ id, name, connected }>
     }
 
     class MidiChannelState {
@@ -307,14 +423,28 @@ AudioState API
         mid: number   // Mid frequency band (0-1)
         high: number  // High frequency band (0-1)
         vol: number   // Overall volume (0-1)
-        fft: Float32Array | null  // Raw FFT data (optional)
-        smoothing: number         // Smoothing factor (0-1)
+        raw: number   // Bipolar time-domain value (-1 to 1)
+        rawReady: boolean
+        fft: Float32Array       // 16 normalized frequency bins
+        spectrum: Float32Array  // 128 normalized frequency bins
+        waveform: Float32Array  // 128 normalized time-domain samples
+
+        setBands(low, mid, high): void
+        setRaw(value): void
+        registerDevice({ id, name, channelCount }): object | null
+        setChannelValues(id, channel, { low?, mid?, high?, vol?, raw? }): boolean
+        disconnectDevice(id: string): void
+        getDeviceChannelState({ id?, name?, channel }): AudioState | null
+        getDevices(): Array<{ id, name, connected, channelCount }>
     }
 
 Technical Notes
 ---------------
 
 - MIDI channels are 1-indexed (1-16) matching standard MIDI conventions
-- Audio values are normalized to 0-1 range before mapping to min/max
+- MIDI and audio ``min``/``max`` values are normalized percentages of the
+  receiving effect parameter's range
+- Audio band values are normalized to 0–1; ``audioBand.raw`` first maps its
+  bipolar -1…1 signal onto that range
 - Trigger decay is calculated in real-time using ``Date.now()`` for frame-independent animation
 - Values are clamped to the min/max range

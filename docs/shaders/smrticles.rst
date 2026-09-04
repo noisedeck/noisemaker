@@ -180,10 +180,10 @@ SMRTicles uses three shared global textures for agent state, created by ``points
      - Format
      - Contents
    * - ``global_xyz``
-     - rgba32f
+     - rgba32f (may fall back to rgba16f)
      - [x, y, z, alive_flag] — Position in normalized [0,1] space, w=1 alive
    * - ``global_vel``
-     - rgba32f
+     - rgba32f (or rgba16f on constrained devices)
      - [vx, vy, vz, seed] — Velocity vector and per-agent random seed
    * - ``global_rgba``
      - rgba8
@@ -418,6 +418,14 @@ Behavior effects use MRT to update all three state textures in a single pass:
        outVel = vel;
        outRGBA = rgba;
    }
+
+At pipeline creation, the runtime compares the combined attachment formats
+with the backend's per-sample color budget. If an MRT group is too wide, it
+demotes trailing ``rgba32f`` attachments to ``rgba16f`` while further
+reductions are available. On a 32-byte device, ``pointsEmit`` keeps position
+data in ``global_xyz`` at full precision and uses half precision for
+``global_vel``. A smaller reported budget can also demote ``global_xyz`` and
+may still be insufficient for the irreducible three-attachment pass.
 
 Point-Sprite Deposit
 ^^^^^^^^^^^^^^^^^^^^

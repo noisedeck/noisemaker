@@ -21,7 +21,12 @@ difference is that every intermediate value is a volume rather than an image.
 
 ``volumeSize`` (on the generator) sets the volume resolution: ``x16``,
 ``x32``, ``x64``, or ``x128`` (16³ … 128³). Downstream effects inherit it
-automatically.
+automatically. The runtime stores a volume in a 2D slice atlas whose dimensions
+are ``volumeSize × volumeSize²``. If the requested atlas exceeds the device's
+maximum texture dimension, the whole chain is stepped down to the largest
+supported power-of-two size. For example, a device limited to 8192-pixel
+textures renders a requested ``x128`` chain at ``x64`` instead of producing an
+incomplete volume.
 
 Generators (synth3d)
 --------------------

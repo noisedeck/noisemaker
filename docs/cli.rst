@@ -128,7 +128,7 @@ Generate an animation (MP4 or GIF) from a preset.
 - ``--save-frames PATH`` - Directory to save individual frames
 - ``--watermark TEXT`` - Add watermark text to frames
 - ``--preview-filename PATH`` - Save a preview image
-- ``--target-duration FLOAT`` - Stretch output to specified duration (seconds) using motion-compensated interpolation
+- ``--target-duration FLOAT`` - Stretch MP4 output to the specified duration (seconds) using motion-compensated interpolation
 
 **Quality Options:**
 
@@ -151,6 +151,23 @@ Generate an animation (MP4 or GIF) from a preset.
 
     # Create animation with specific duration
     noisemaker animate timeworms --target-duration 5.0 -o timed.mp4
+
+Strobe safety verdict
+^^^^^^^^^^^^^^^^^^^^^
+
+After rendering, ``animate`` prints a machine-readable
+``strobe-warning: yes`` or ``strobe-warning: no`` line. The check applies the
+WCAG general flash threshold to an 8×8 sampling grid before any watermark is
+added. ``yes`` means that more than three flashes occur in a one-second window
+either in the whole-frame mean or in at least one quarter of the sampled grid
+cells. The animation is still written, so callers can use the verdict to add a
+photosensitivity warning or hold the output for review.
+
+When ``--target-duration`` is set, the detector uses
+``frame-count / target-duration`` as the playback rate. MP4 encoding applies
+the same requested timing; GIF encoding does not, so omit
+``--target-duration`` for GIFs when the verdict must reflect their actual
+playback rate.
 
 apply
 ~~~~~
@@ -243,6 +260,11 @@ Create an animated collage from multiple directories of image sequences.
 
 - ``--input-dir DIRECTORY`` - Directory containing subdirectories of frames
 
+The input directory must contain at least four usable subdirectories. A usable
+subdirectory contains at least ``--frame-count`` PNG files; shorter directories
+and non-PNG files do not count. The command exits with an error when fewer than
+four usable subdirectories remain.
+
 **Common Options:**
 
 - ``--width INTEGER`` - Output width in pixels (default: 512)
@@ -257,7 +279,11 @@ Create an animated collage from multiple directories of image sequences.
 - ``--save-frames PATH`` - Directory to save individual frames
 - ``--watermark TEXT`` - Add watermark text
 - ``--preview-filename PATH`` - Save a preview image
-- ``--target-duration FLOAT`` - Stretch output to specified duration (seconds)
+- ``--target-duration FLOAT`` - Stretch MP4 output to the specified duration (seconds)
+
+Like ``animate``, this command prints a ``strobe-warning: yes|no`` verdict
+after it has scored the rendered frames against the WCAG general flash
+threshold described above.
 
 **Examples:**
 

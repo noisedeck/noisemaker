@@ -663,7 +663,8 @@ The core bundle (``noisemaker-shaders-core.esm.js``) exports:
    * - **Backends**
      - ``WebGL2Backend``, ``WebGPUBackend``
    * - **External Input**
-     - ``MidiInputManager``, ``AudioInputManager``
+     - ``MidiState``, ``MidiChannelState``, ``AudioState``,
+       ``MidiInputManager``, ``AudioInputManager``, ``ExternalInputManager``
    * - **State**
      - ``ProgramState``, ``Emitter``, ``extractEffectsFromDsl``, ``extractEffectNamesFromDsl``
 
