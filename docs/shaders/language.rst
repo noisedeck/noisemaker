@@ -464,7 +464,10 @@ The ``palette`` enum provides named color palettes for effects like ``palette()`
 Oscillators
 -----------
 
-Oscillators are objects that generate time-varying values for animating effect parameters. They produce looping values synchronized with the animation duration, making them ideal for creating smooth, repeating animations.
+Oscillators are objects that generate deterministic, time-varying values for
+animating effect parameters. When the other fields are literal or
+boundary-matched, a whole-number literal ``speed`` produces a seamless repeat
+at the animation boundary. Fractional or automated speeds do not guarantee one.
 
 Creating Oscillators
 ^^^^^^^^^^^^^^^^^^^^
@@ -473,7 +476,7 @@ Use the ``osc()`` function to create an oscillator:
 
 .. code-block:: none
 
-   osc(type: sine)
+   osc(type: oscKind.sine)
 
 **Parameters:**
 
@@ -489,34 +492,34 @@ Use the ``osc()`` function to create an oscillator:
      - (required)
      - Oscillator waveform type
    * - min
-     - number
+     - number or automation
      - 0
-     - Minimum output value
+     - Minimum normalized output (0–1)
    * - max
-     - number
+     - number or automation
      - 1
-     - Maximum output value
+     - Maximum normalized output (0–1)
    * - speed
-     - int
+     - number or automation
      - 1
-     - Loop speed multiplier (divides evenly into animation duration)
+     - Loop speed multiplier; automated values map to -20..20
    * - offset
-     - number
+     - number or automation
      - 0
-     - Phase offset (0..1)
+     - Phase offset in cycles; automated values map to -1..1
    * - seed
-     - number
+     - number or automation
      - 1
      - Random seed (noise type only)
 
 **Oscillator Types (oscKind):**
 
-* ``sine`` - Smooth sine wave: 0 → 1 → 0
-* ``tri`` - Linear triangle wave: 0 → 1 → 0
-* ``saw`` - Sawtooth wave: 0 → 1
-* ``sawInv`` - Inverted sawtooth: 1 → 0
-* ``square`` - Square wave: 0 or 1
-* ``noise`` - Periodic 2D noise (seamlessly looping)
+* ``oscKind.sine`` - Smooth sine wave: 0 → 1 → 0
+* ``oscKind.tri`` - Linear triangle wave: 0 → 1 → 0
+* ``oscKind.saw`` - Sawtooth wave: 0 → 1
+* ``oscKind.sawInv`` - Inverted sawtooth: 1 → 0
+* ``oscKind.square`` - Square wave: 0 or 1
+* ``oscKind.noise`` - Periodic noise (seamlessly looping)
 
 Usage Examples
 ^^^^^^^^^^^^^^
@@ -526,16 +529,16 @@ Usage Examples
 .. code-block:: none
 
    search synth
-   noise(scale: osc(type: sine, min: 2, max: 8)).write(o0)
+   noise(scaleX: osc(type: oscKind.sine, min: 0.1, max: 0.8)).write(o0)
 
 **Using variables for reusable oscillators:**
 
 .. code-block:: none
 
    search synth
-   let scaleOsc = osc(type: sine, min: 2, max: 8)
-   let rotOsc = osc(type: saw, min: 0, max: 360)
-   noise(scale: scaleOsc, rotation: rotOsc).write(o0)
+   let horizontalScale = osc(type: oscKind.sine, min: 0.1, max: 0.8)
+   let verticalScale = osc(type: oscKind.saw, min: 0.2, max: 1)
+   noise(scaleX: horizontalScale, scaleY: verticalScale).write(o0)
 
 **Speed control for synchronized loops:**
 
@@ -543,60 +546,74 @@ Usage Examples
 
    search synth
    // speed: 2 means the oscillator completes 2 cycles per animation loop
-   noise(scale: osc(type: tri, min: 1, max: 10, speed: 2)).write(o0)
+   noise(scaleX: osc(type: oscKind.tri, min: 0.1, max: 1, speed: 2)).write(o0)
 
 **Phase offset for staggered animations:**
 
 .. code-block:: none
 
    search synth
-   let osc1 = osc(type: sine, offset: 0)
-   let osc2 = osc(type: sine, offset: 0.25)
-   let osc3 = osc(type: sine, offset: 0.5)
-   // Three oscillators at different phases create wave-like patterns
+   let horizontalScale = osc(type: oscKind.sine, offset: 0)
+   let verticalScale = osc(type: oscKind.sine, offset: 0.25)
+   noise(scaleX: horizontalScale, scaleY: verticalScale).write(o0)
 
 **Noise oscillator with seed:**
 
 .. code-block:: none
 
    search synth
-   noise(scale: osc(type: noise, min: 2, max: 8, seed: 42)).write(o0)
+   noise(scaleX: osc(type: oscKind.noise, min: 0.1, max: 0.8, seed: 42)).write(o0)
 
 Runtime Behavior
 ^^^^^^^^^^^^^^^^
 
 Oscillators are evaluated per-frame based on the current animation time. The pipeline normalizes time to a 0..1 range over the animation duration (default 10 seconds), then applies the speed multiplier and offset before computing the waveform value.
 
-The resulting value is mapped from the internal 0..1 range to the specified min..max range, making oscillators suitable for any numeric parameter regardless of its expected range.
+The oscillator's ``min`` and ``max`` are normalized percentages. The receiving
+effect parameter maps that normalized value onto its own declared range. For
+example, ``min: 0.1, max: 0.8`` traverses 10%–80% of that parameter's range; the
+bounds are not absolute parameter values.
 
 Live Input
 ----------
 
-Use ``midi()`` and ``audio()`` to drive parameters from external signals. Both map incoming data to a numeric range and can be mixed with oscillators or constants.
+Use ``midi()`` and ``audio()`` to drive parameters from external signals. Like
+``osc()``, both return normalized values that the receiving effect parameter
+maps onto its own range. Their numeric fields can also contain other automation
+descriptors.
 
-``midi(channel, mode?, min?, max?, sensitivity?)``
+``midi(channel, mode?, min?, max?, sensitivity?, name: "...", id: "...")``
 
 * ``channel`` (required): MIDI channel 1-16
-* ``mode``: midiMode value (default ``velocity``)
-* ``min`` / ``max``: Output range (default 0..1)
-* ``sensitivity``: Decay rate for trigger modes (default 1)
+* ``mode``: ``midiMode.*`` value (default ``midiMode.velocity``)
+* ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
+* ``sensitivity``: Number or automation setting trigger falloff (default 1)
+* ``name`` / ``id``: Optional keyword-only input selector; ``id`` requires ``name``
 
-``audio(band, min?, max?)``
+``audio(band, min?, max?, channel: N, name: "...", id: "...")``
 
-* ``band`` (required): ``low | mid | high | vol``
-* ``min`` / ``max``: Output range (default 0..1)
+* ``band`` (required): ``audioBand.low``, ``audioBand.mid``, ``audioBand.high``,
+  ``audioBand.vol``, or ``audioBand.raw``
+* ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
+* ``channel`` / ``name`` / ``id``: Optional keyword-only device selector; a
+  selected source requires ``channel`` and ``name``, while ``id`` requires
+  ``name``
 
 Example:
 
 .. code-block:: none
 
    search synth
-   noise(
-     scale: midi(channel: 1, min: 1, max: 10),
-     speed: audio(band: low, min: 0.5, max: 2)
-   ).write(o0)
+   let floor = audio(band: audioBand.low)
+   let rate = midi(channel: 1, min: floor, max: 1)
+   noise(scaleX: osc(type: oscKind.sine, speed: rate)).write(o0)
 
-For detailed behavior and host integration, see :doc:`midi-audio`.
+The nestable fields are ``min``, ``max``, ``speed``, ``offset``, and ``seed``
+on ``osc()``; ``min``, ``max``, and ``sensitivity`` on ``midi()``; and ``min``
+and ``max`` on ``audio()``. Enum values, device identity, and channel numbers
+remain literal. Up to eight nested levels beneath the outer descriptor are
+supported. For selected-device examples, raw audio behavior, and host
+integration, see :doc:`midi-audio`.
 
 Pipeline Integration
 --------------------

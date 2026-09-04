@@ -150,8 +150,9 @@ work, verify it, then update the checkpoint and append a log line.
 - **Log:**
   - 2026-09-04 — caught up through `5b0b7aa7`: verified `help.md`
     coverage for all 210 effect definitions and exact help-table parameter
-    coverage. Updated the existing CLI and shader guides for strobe verdicts,
-    magic-mashup input gating, normalized and nested MIDI/audio automation,
+    coverage. Updated the existing CLI, general DSL language, and shader guides
+    for strobe verdicts, magic-mashup input gating, normalized and nested
+    MIDI/audio automation,
     selected external devices, raw audio, external-state exports, device-bound
     3D volume sizing, and MRT precision fallback. The remaining dependency,
     ledger, localization, and tiled-text changes did not require another
