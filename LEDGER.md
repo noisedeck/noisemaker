@@ -134,7 +134,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Documentation
 
-- **Checkpoint:** noisemaker `8cad384f` (2026-09-04)
+- **Checkpoint:** noisemaker `acb26f80` (2026-09-04)
 - **Scope:** the Sphinx docs under `docs/` (published to docs.noisemaker.app
   by `.github/workflows/docs-site.yml`) and the per-effect
   `shaders/effects/*/*/help.md` files rendered by the live Effect Reference.
@@ -148,6 +148,18 @@ work, verify it, then update the checkpoint and append a log line.
   3. Narrative statements invalidated by recent commits (grep the affected
      terms in `docs/`).
 - **Log:**
+  - 2026-09-04 — caught up through `acb26f80`: verified `help.md`
+    file coverage for all 210 effect definitions and ran the existing
+    parameter-table checker across the 200 definitions it recognizes. Corrected
+    the affected shader-language narrative for mandatory namespace search,
+    built-in I/O, current generators and namespaces, and schema-valid argument
+    and partial-application examples. Aligned the compiler guide with its actual
+    parse, validate, expand, allocate, graph-assembly, backend-compilation, and
+    error contracts, and removed the same obsolete DAG, synthetic-texture,
+    pass-field, and runtime-shape claims from the pipeline and effect-authoring
+    guides. No effect or user-facing feature was added, so no new narrative
+    guide was required. Revalidated the production `dirhtml` Sphinx build and
+    static-document asset checks.
   - 2026-09-04 — caught up through `8cad384f`: verified `help.md`
     file coverage for all 210 effect definitions and ran the existing
     parameter-table checker across the 200 definitions it recognizes. Audited

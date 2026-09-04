@@ -5,7 +5,10 @@ Polymorphic DSL
 
 Polymorphic is the high level language powering the Noisemaker Rendering Pipeline, enabling live-coding visuals by chaining functions that evaluate to native shader graphs. The Polymorphic DSL serves as the high-level builder for the pipeline, allowing users to define complex, multi-pass effects declaratively.
 
-The language evaluates to a Directed Acyclic Graph (DAG) of render passes executed on the GPU. Each valid program must materialize its generator chains into explicit outputs so that the pipeline can schedule and double-buffer them deterministically.
+The language compiles to an ordered array of render passes executed on the GPU.
+Each valid program must materialize its generator chains into explicit outputs
+so the pipeline can connect passes and manage double-buffered surfaces
+deterministically.
 
 Grammar
 -------
@@ -75,11 +78,16 @@ Grammar
 * Example: ``noise().write(o0).blur().write(o1)`` writes the noise to ``o0``, then blurs and writes the result to ``o1``.
 
 **Generators:**
-A chain must start with a Generator function (an effect with no inputs).
+An effect chain that creates new content starts with a generator. Generators
+are effects whose passes consume none of the pipeline inputs recognized by
+``isStarterEffect()``: ``inputTex``, ``inputTex3d``, or the direct surface
+references ``o0`` through ``o7``. ``read()`` and ``read3d()`` are separate
+built-in ways to start from existing surfaces.
 
 
 * Generator examples (non-exhaustive): ``noise``, ``solid``, ``media``.
-* Other generators: Any effect whose passes do not consume pipeline input.
+* The generator classification is derived from pass inputs; an effect may
+  declare explicit non-pipeline inputs and still be a generator.
 
 **Colors:**
 Hex colors support 3, 6, or 8 digits: ``#RGB``, ``#RRGGBB``, ``#RRGGBBAA``. Alpha defaults to ``FF`` (1.0) if omitted.
@@ -109,13 +117,13 @@ forms are mutually exclusive within a single call, except for the special
 
 .. code-block:: none
 
-  noise(10, 0.1, 1)
+  noise(10, 2, 50)
 
 **Keyword arguments:**
 
 .. code-block:: none
 
-  noise(freq: 10, sync: 0.1, amp: 1)
+  noise(type: 10, octaves: 2, scaleX: 50)
 
 Numeric arguments support inline arithmetic (``+``, ``-``, ``*``, ``/``) and constants like ``Math.PI``. Color arguments accept unquoted ``#RGB`` or ``#RRGGBB`` hex codes.
 
@@ -158,14 +166,17 @@ Programs may declare variables with ``let`` and reuse them. Variables can alias 
 .. code-block:: none
 
   let pattern = noise
-  pattern(20).write(o0)
+  pattern(10).write(o0)
 
 **Semantics:**
 
 
 * ``let x = noise``: ``x`` becomes an alias for the ``noise`` function.
-* ``let y = noise(10)``: ``y`` stores a **partial application** (Effect Instance with some parameters bound). It does *not* execute the effect.
-* ``y(0.5)``: Creates a new Effect Instance, merging the stored parameters (``freq: 10``) with the new arguments (``sync: 0.5``). The original ``y`` remains unchanged (immutable).
+* ``let y = noise(10)``: ``y`` stores a **partial application** with ``type``
+  set to ``10``. It does *not* execute the effect.
+* ``y(2)``: Creates a new Effect Instance by appending ``octaves: 2`` to the
+  stored positional arguments. The original ``y`` remains unchanged
+  (immutable).
 
 Partials
 ^^^^^^^^
@@ -174,8 +185,8 @@ Invoking variables that store function calls merges stored arguments with call-s
 
 .. code-block:: none
 
-  let tuned = noise(5)
-  tuned(amp:0.5).write(o0)
+  let tuned = noise(type: 10, scaleX: 25)
+  tuned(scaleX: 50).write(o0)
 
 **Merge Rules:**
 
@@ -256,19 +267,21 @@ Namespaces
 
 Polymorphic supports a namespace system to organize effects and ensure compatibility.
 
-Built-in Namespace
-^^^^^^^^^^^^^^^^^^
+Built-in I/O
+^^^^^^^^^^^^
 
-The ``io`` namespace contains pipeline-level I/O functions that are always available without requiring a ``search`` directive. These are not effects per se, but fundamental pipeline operations:
+Pipeline-level I/O operations are globally available. A program still requires
+a ``search`` directive, but these operations do not require an ``io`` entry in
+its search order:
 
 * ``read(surface)``: Read from a 2D surface (e.g., ``read(o0)``)
 * ``write(surface)``: Write to a 2D surface (e.g., ``.write(o0)``)
 * ``read3d(vol, geo)``: Read from 3D volume and geometry buffers
 * ``write3d(vol, geo)``: Write to 3D volume and geometry buffers
 * ``render(surface)``: Set the final render output (program directive)
-* ``render3d()``: Render 3D volume to 2D output
 
-The ``io`` namespace is implicitly included in all programs. You never need to add ``io`` to your ``search`` directive—these functions are always accessible.
+``render3d()`` is an effect in the ``render`` namespace, not a built-in I/O
+operation.
 
 New Namespaces
 ^^^^^^^^^^^^^^
@@ -278,10 +291,10 @@ These namespaces are actively developed and maintained:
 * ``synth``: 2D generator effects that create patterns from scratch (noise, shapes, fractals)
 * ``filter``: 2D single-input effects that transform images (blur, color adjustment, distortion)
 * ``mixer``: Two-input effects that combine images (blend modes, compositing)
-* ``render``: Rendering utilities and feedback loops (pointsEmit, pointsRender, loopBegin/End)
+* ``render``: Rendering utilities and feedback loops (render3d, pointsEmit, pointsRender, loopBegin/End)
 * ``points``: Particle and agent-based simulations (physarum, life, flock, flow)
-* ``synth3d``: 3D volumetric generator effects (noise3d, ca3d, rd3d)
-* ``filter3d``: 3D volumetric processor effects (flow3d, render3d)
+* ``synth3d``: 3D volumetric generators (noise3d, cell3d, cellularAutomata3d, reactionDiffusion3d)
+* ``filter3d``: 3D volumetric processors (flow3d, palette3d)
 
 Classic Namespaces
 ^^^^^^^^^^^^^^^^^^
@@ -305,9 +318,10 @@ Every program **must** begin with a ``search`` directive that defines the namesp
 .. code-block:: none
 
   search synth, filter
-  noise3d(seed: 1).translate(x: 0, y: 0).write(o0)
+  noise().translate().write(o0)
 
-When a function like ``noise3d()`` is called, the runtime walks the search order (``synth``, then ``filter``) until a matching effect is found.
+When a function like ``noise()`` is called, the compiler walks the search order
+(``synth``, then ``filter``) until a matching effect is found.
 
 **Resolution Rules:**
 
@@ -657,15 +671,15 @@ The DSL provides symmetric operations for reading and writing textures:
 
 * **write3d(vol, geo):** Writes to both a 3D volume and its geometry buffer.
   
-  - Example: ``noise3d(10).write3d(vol0, geo0)``
+  - Example: ``noise3d().write3d(vol0, geo0)``
 
 * **read3d(vol, geo):** Reads from both a 3D volume and its geometry buffer (starter form).
   
   - Example: ``read3d(vol0, geo0).render3d().write(o0)``
 
-* **read3d(vol):** Single-arg form for passing volume references to effect parameters.
+* **read3d(vol):** Single-arg form for passing volume or geometry references to effect parameters.
   
-  - Example: ``ca3d(source: read3d(vol0), geoSource: read3d(geo0))``
+  - Example: ``cellularAutomata3d(source: read3d(vol0), geoSource: read3d(geo0))``
   - This mirrors the 2D ``read(o0)`` pattern for surface parameters.
 
 Surfaces and Outputs
@@ -687,7 +701,7 @@ The DSL allows writing to named outputs (Surfaces) and reading from them.
 * **Output:** ``.write3d(vol0, geo0)`` writes 3D volume data and geometry to the specified surfaces.
 * **Input (starter):** ``read3d(vol0, geo0)`` reads from a volume and its geometry buffer to start a chain.
 * **Input (param):** ``read3d(vol0)`` or ``read3d(geo0)`` passes a reference to an effect parameter.
-* **None:** ``none`` disables a volume/geometry parameter (e.g., ``ca3d(source: none)``).
+* **None:** ``none`` disables a volume/geometry parameter (e.g., ``cellularAutomata3d(source: none)``).
 
 The geometry buffers store precomputed raymarching results (xyz=surface normal, w=depth), enabling downstream post-processing effects without re-raymarching.
 

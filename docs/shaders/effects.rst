@@ -43,7 +43,6 @@ Effect definitions are created using the ``Effect`` constructor with a configura
      passes: [
        {
          name: "downsample",
-         type: "render",
          program: "downsample",
          inputs: {
            scene: "inputTex"
@@ -54,14 +53,13 @@ Effect definitions are created using the ``Effect`` constructor with a configura
        },
        {
          name: "composite",
-         type: "render",
          program: "composite",
          inputs: {
            scene: "inputTex",
            bloom: "downsampled"
          },
          outputs: {
-           color: "outputColor"
+           color: "outputTex"
          }
        }
      ]
@@ -75,12 +73,14 @@ Effect definitions are created using the ``Effect`` constructor with a configura
 * ``textures``: Defines the internal render targets. Dimensions can be absolute, relative to screen (``"screen"``, ``"50%"``), or fixed.
 * ``passes``:
 
-  * ``type``: ``render`` (fragment shader) or ``compute`` (compute shader).
   * ``program``: Key to look up the shader code (GLSL/WGSL).
   * ``inputs``: Maps shader uniform samplers to texture names.
   * ``outputs``: Maps shader output locations (or write buffers) to texture names.
-  * ``iterations``: Number of times to run this pass.
-  * ``pingpong``: Array of two texture names to swap input/output roles during iterations.
+  * ``uniforms``: Maps shader uniform names to effect-global parameter names.
+  * ``repeat``: A fixed repeat count or the name of a uniform that supplies it.
+  * Backend fields include ``entryPoint``, ``drawMode``, ``drawBuffers``,
+    ``count``, ``countUniform``, ``blend``, ``workgroups``, ``storageBuffers``,
+    and ``storageTextures``.
 
 2b. Tags and Namespaces
 -----------------------
@@ -98,7 +98,7 @@ Namespace is the primary categorization and acts as an implicit tag. Each effect
    * - Namespace
      - Description
    * - ``io``
-     - Pipeline I/O functions (built-in, no search required)
+     - Pipeline I/O operations (built-in; no ``io`` entry in the required search directive)
    * - ``classicNoisedeck``
      - Complex shaders ported from the original noisedeck.app pipeline
    * - ``synth``
@@ -551,7 +551,9 @@ The runtime invokes these methods at specific stages:
 6. Effect Constructor Reference
 -------------------------------
 
-The ``Effect`` constructor accepts a configuration object with the following properties:
+The ``Effect`` constructor accepts a configuration object. Common properties
+are listed below; Section 7 summarizes the remaining fields copied by the
+current constructor.
 
 **Required:**
 
@@ -561,7 +563,7 @@ The ``Effect`` constructor accepts a configuration object with the following pro
 **Optional:**
 
 - ``namespace`` (string): Logical grouping (e.g., ``"filter"``, ``"synth"``, ``"mixer"``)
-- ``func`` (string): DSL function name (defaults to lowercase ``name``)
+- ``func`` (string): DSL function name used by runtime registration
 - ``tags`` (array): Curated tags for categorization (see section 2b)
 - ``globals`` (object): Uniform parameters exposed to shaders and UI
 - ``textures`` (object): Internal render targets
@@ -606,7 +608,7 @@ The ``Effect`` constructor accepts a configuration object with the following pro
      },
 
      textures: {
-       _blurTemp: { width: "input", height: "input", format: "rgba8unorm" }
+       _blurTemp: { width: "screen", height: "screen", format: "rgba8unorm" }
      },
 
      passes: [
@@ -625,42 +627,50 @@ The ``Effect`` constructor accepts a configuration object with the following pro
      ]
    });
 
-7. Formal JSON Schema (Informative)
------------------------------------
+7. Configuration Shape (Informative)
+-------------------------------------
 
-The following normative shape defines the Effect configuration object. Validation MUST apply before graph compilation. Regular expressions shown in ``/.../`` form.
+The following pseudocode summarizes the authoring shape consumed by the current
+runtime. It is not an enforced JSON Schema: the structure harness's
+``validateEffectDefinition()`` performs only the limited checks described in
+the pipeline guide. Regular expressions are shown in ``/.../`` form.
 
 .. code-block:: javascript
 
-   // Pseudocode JSON Schema (non exhaustive formatting for brevity)
+   // Deliberately abridged shape; validation is described above.
    {
-     "$id": "noisemaker.shader-effect.v1",
      "type": "object",
      "required": ["name", "passes"],
      "properties": {
-       "name": { "type": "string", "pattern": "^[A-Za-z0-9_\-]{1,64}$" },
-       "namespace": { "type": "string", "pattern": "^[a-zA-Z0-9]+$", "default": "synth" },
+       "name": { "type": "string", "description": "Non-empty display name; spaces are allowed" },
+       "namespace": { "type": "string", "description": "Logical namespace" },
        "func": { "type": "string", "description": "DSL function name for this effect" },
-       "tags": { 
-         "type": "array", 
-         "items": { "type": "string", "enum": ["color", "distort", "geometric", "math", "noise", "transform", "util"] },
-         "description": "Curated tags for effect categorization"
-       },
-       "version": { "type": "string", "pattern": "^\d+\.\d+\.\d+$", "default": "1.0.0" },
+       "description": { "type": "string" },
+       "tags": { "type": "array", "items": { "type": "string" } },
        "globals": { "type": "object", "additionalProperties": { "$ref": "#/definitions/uniformSpec" } },
        "textures": { "type": "object", "additionalProperties": { "$ref": "#/definitions/textureSpec" } },
        "passes": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/passSpec" } },
        "outputTex3d": { "type": "string", "description": "Internal texture name to expose as 3D volume output" },
        "outputGeo": { "type": "string", "description": "Internal texture name to expose as geometry buffer output" },
-       "meta": { "type": "object" }
+       "uniformLayout": { "type": "object" },
+       "uniformLayouts": { "type": "object" },
+       "paramAliases": { "type": "object" },
+       "openCategories": { "type": "array", "items": { "type": "string" } },
+       "defaultProgram": { "type": "string" },
+       "hidden": { "type": "boolean" },
+       "deprecatedBy": { "type": "string" },
+       "onInit": { "type": "function" },
+       "onUpdate": { "type": "function" },
+       "onDestroy": { "type": "function" },
+       "asyncInit": { "type": "function" }
      },
      "definitions": {
        "uniformSpec": {
          "type": "object",
          "required": ["type"],
          "properties": {
-           "type": { "type": "string", "enum": ["float","int","uint","bool","vec2","vec3","vec4","mat3","mat4"] },
-           "default": { "description": "Optional. Fallback: 0, false, or identity matrix." },
+           "type": { "type": "string", "enum": ["boolean","color","float","geometry","int","mat3","member","palette","string","surface","vec2","vec3","vec4","volume"] },
+           "default": { "description": "Optional effect-defined default." },
            "min": { "type": "number" },
            "max": { "type": "number" },
            "step": { "type": "number" },
@@ -674,7 +684,7 @@ The following normative shape defines the Effect configuration object. Validatio
              "type": "object",
              "properties": {
                "label": { "type": "string" },
-               "control": { "type": "string", "enum": ["slider", "dropdown", "color", "checkbox"] },
+               "control": { "type": ["string", "boolean"] },
                "category": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]*$", "description": "UI grouping category (MUST be camelCase)" },
                "hint": { "type": "string", "description": "Tooltip text for the control" },
                "enabledBy": { 
@@ -694,11 +704,11 @@ The following normative shape defines the Effect configuration object. Validatio
        },
        "dimensionSpec": {
          "oneOf": [
-           {"type": "number", "minimum": 1},
-           {"type": "string", "enum": ["screen","auto","input"]},
-           {"type": "string", "pattern": "^(?:100|[1-9]?[0-9])%$"},
+           {"type": "number"},
+           {"type": "string", "description": "screen, auto, or a percentage parsed with parseFloat"},
            {"type": "object", "required": ["scale"], "properties": {"scale": {"type":"number"}, "clamp": {"type":"object", "properties": {"min": {"type":"number"}, "max": {"type":"number"}}}}},
-           {"type": "object", "required": ["param"], "properties": {"param": {"type":"string"}, "default": {"type":"number"}, "multiply": {"type":"number"}, "power": {"type":"number"}, "inputOverride": {"type":"string"}}}
+           {"type": "object", "required": ["param"], "properties": {"param": {"type":"string"}, "paramDefault": {"type":"number"}, "default": {"type":"number"}, "multiply": {"type":"number"}, "power": {"type":"number"}}},
+           {"type": "object", "required": ["screenDivide"], "properties": {"screenDivide": {"type":"string"}, "default": {"type":"number"}}}
          ]
        },
        "textureSpec": {
@@ -706,14 +716,10 @@ The following normative shape defines the Effect configuration object. Validatio
          "properties": {
            "width": { "$ref": "#/definitions/dimensionSpec" },
            "height": { "$ref": "#/definitions/dimensionSpec" },
-           "format": { "type": "string" },
-           "usage": { "type": "array", "items": {"type":"string", "enum":["sample","storage","render","copySrc","copyDst"]} },
-           "clear": { "type": "array", "minItems": 4, "maxItems": 4 },
-           "persistent": { "type": "boolean", "default": false }
+           "depth": { "$ref": "#/definitions/dimensionSpec" },
+           "format": { "type": "string" }
          },
-         "required": ["format"],
-         "additionalProperties": false,
-         "description": "User-defined textures. Reserved names (inputTex, outputTex, inputTex3d, inputGeo) are synthesized by the runtime."
+         "description": "User-defined textures. Width and height default to screen; format defaults to rgba16f."
        },
        "enableCondition": {
          "type": "object",
@@ -735,65 +741,33 @@ The following normative shape defines the Effect configuration object. Validatio
        },
        "passSpec": {
          "type": "object",
-         "required": ["name","program"],
+         "required": ["program"],
          "properties": {
-           "name": { "type": "string", "pattern": "^[A-Za-z0-9_\-]{1,64}$" },
-           "type": { "type": "string", "enum": ["render","compute","transfer"], "default": "render" },
+           "name": { "type": "string" },
            "program": { "type": "string" },
            "inputs": { "type": "object", "additionalProperties": {"type":"string"} },
            "outputs": { "type": "object", "additionalProperties": {"type":"string"} },
-           "iterations": { "type": "integer", "minimum": 1, "default": 1 },
-           "pingpong": { "type": "array", "items": {"type":"string"}, "minItems": 2, "maxItems": 2 },
-           "defines": { "type": "object", "additionalProperties": {"type":["string","number","boolean"]} },
+           "entryPoint": { "type": "string" },
+           "drawMode": { "type": "string" },
+           "drawBuffers": { "type": "integer", "minimum": 1 },
+           "count": { "type": ["integer", "string"] },
+           "countUniform": { "type": "string" },
+           "repeat": { "type": ["integer", "string"] },
+           "blend": {},
            "uniforms": { 
              "type": "object", 
-             "additionalProperties": { "$ref": "#/definitions/uniformSpec" },
-             "description": "Pass-specific uniforms. Merged with globals; pass-specific values take precedence."
+             "additionalProperties": { "type": "string" },
+             "description": "Shader uniform name to effect-global parameter name."
            },
            "workgroups": { "type": "array", "items": {"type":"integer","minimum":1}, "minItems":1, "maxItems":3 },
-           "viewport": { "type": "object", "properties": {"x":{"type":"integer"},"y":{"type":"integer"},"w":{"type":"integer"},"h":{"type":"integer"}} },
-           "conditions": { 
-             "type": "object", 
-             "properties": { 
-               "skipIf": { 
-                 "type": "array",
-                 "items": {
-                   "type": "object",
-                   "required": ["uniform", "equals"],
-                   "properties": { "uniform": {"type":"string"}, "equals": {} }
-                 }
-               }, 
-               "runIf": { 
-                 "type": "array",
-                 "items": {
-                   "type": "object",
-                   "required": ["uniform", "equals"],
-                   "properties": { "uniform": {"type":"string"}, "equals": {} }
-                 }
-               } 
-             } 
-           },
-           "barriers": { 
-             "type": "array",
-             "items": { "type": "string", "pattern": "^texture:[a-zA-Z0-9_]+:(fragment|compute)->(fragment|compute)$" },
-             "description": "Explicit memory barriers. Format: 'texture:<name>:<stage>-><stage>'"
-           },
-           "readAfterWriteHazards": { 
-             "type": "string", 
-             "enum": ["allow","forbid"], 
-             "default": "forbid",
-             "description": "If 'allow', the runtime inserts a barrier between write and read within the same pass (if supported) or developer guarantees safety."
-           }
+           "storageBuffers": { "type": "object" },
+           "storageTextures": { "type": "object" }
          }
        }
      }
    }
 
-Formats MUST map to backend-supported subsets:
-
-
-* WebGL required: ``rgba8``, ``rgba16f``, ``rgba32f (if EXT_color_buffer_float)``, ``r8``.
-* WebGPU required subset: ``rgba8unorm``, ``rgba16float``, ``rgba32float``, ``bgra8unorm``, depth formats as available.
+Backend format-name handling is described in Section 7.3.
 
 7.1 Reserved Texture Names
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -841,7 +815,6 @@ For each texture dimension (``width`` or ``height``), resolve to integer pixels:
    function resolveDimension(spec, screenSize, uniforms = {}) {
      if (typeof spec === 'number') return Math.max(1, Math.floor(spec))
      if (spec === 'screen' || spec === 'auto') return screenSize
-     if (spec === 'input') return screenSize  // Match input texture dimensions
 
      if (typeof spec === 'string' && spec.endsWith('%')) {
        const percent = parseFloat(spec)
@@ -849,12 +822,23 @@ For each texture dimension (``width`` or ``height``), resolve to integer pixels:
      }
 
      if (typeof spec === 'object') {
-       // Param-based: { param: 'volumeSize', default: 64, multiply: 2, power: 2 }
+       // Param-based; `default` is the final fallback after transforms.
        if (spec.param !== undefined) {
-         let value = uniforms[spec.param] ?? spec.default ?? 64
+         const hasTransform = spec.power !== undefined || spec.multiply !== undefined
+         const paramDefault = spec.paramDefault ?? 64
+         let value = uniforms[spec.param] ?? paramDefault
          if (spec.multiply !== undefined) value *= spec.multiply
          if (spec.power !== undefined) value = Math.pow(value, spec.power)
+         if (hasTransform && uniforms[spec.param] === undefined && spec.default !== undefined) {
+           value = spec.default
+         }
          return Math.max(1, Math.floor(value))
+       }
+
+       // Screen-divide: { screenDivide: 'zoom', default: 1 }
+       if (spec.screenDivide !== undefined) {
+         const divisor = uniforms[spec.screenDivide] ?? spec.default ?? 1
+         return Math.max(1, Math.round(screenSize / divisor))
        }
 
        // Scale-based: { scale: 0.5, clamp: { min: 64, max: 512 } }
@@ -871,26 +855,22 @@ For each texture dimension (``width`` or ``height``), resolve to integer pixels:
      return screenSize  // Fallback
    }
 
-All dimensions MUST be positive integers. Fractional results round down; minimum 1px enforced.
+All dimensions MUST be positive integers. Numeric, percentage, parameter, and
+scale results round down; ``screenDivide`` rounds to the nearest integer. A
+minimum of 1px is enforced.
 
-7.3 Format Negotiation
-^^^^^^^^^^^^^^^^^^^^^^
+7.3 Backend Format Resolution
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When an effect requests a format unsupported by the active backend:
+Format names are resolved independently by each backend; there is no
+capability negotiation or precision-downgrade policy.
 
+* WebGL recognizes ``rgba8``, ``rgba16f``, ``rgba32f``, ``r8``, ``r16f``,
+  and ``r32f``. Any other name falls back to the ``rgba8`` descriptor.
+* WebGPU maps those compact names to their WebGPU equivalents, also recognizes
+  the corresponding WebGPU-format spellings plus ``bgra8unorm``, and passes
+  any other non-empty format string through unchanged. An omitted format
+  resolves to ``rgba8unorm``.
 
-#. **Exact Match:** Use if available.
-#. **Fallback Table:** Apply backend-specific mapping:
-
-  .. code-block:: js
-
-      const webglFallbacks = {
-        'rgba16float': 'rgba16f',
-        'rgba32float': hasExtension('EXT_color_buffer_float') ? 'rgba32f' : 'rgba16f',
-        'rgba8unorm': 'rgba8'
-      }
-
-#. **Precision Downgrade:** If no mapping exists, select highest precision supported format with same channel count.
-#. **Fail:** If no compatible format, emit ``ERR_FORMAT_UNSUPPORTED``.
-
-Format selection MUST be deterministic and cached per backend context.
+Unsupported resolved formats or usages fail when the backend creates or uses
+the texture; the resolver does not preflight device capabilities.

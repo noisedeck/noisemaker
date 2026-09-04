@@ -3,7 +3,9 @@
 Compiler Spec
 =============
 
-The Noisemaker Rendering Pipeline compiler is responsible for transforming high-level Polymorphic DSL code into an executable GPU Render Graph. It bridges the gap between the user's intent (DSL) and the machine's execution model (Pipeline).
+The Noisemaker Rendering Pipeline compiler transforms high-level Polymorphic
+DSL code into a compiled render graph. The runtime then creates a Pipeline from
+that graph and asks the selected backend to compile its shader programs.
 
 Compilation Pipeline
 --------------------
@@ -12,17 +14,17 @@ The compilation process occurs in four distinct stages:
 
 
 #. **Parsing:** Source Code → Abstract Syntax Tree (AST)
-#. **Analysis:** AST → Planned Chains (Effect Operations)
-#. **Expansion:** Planned Chains → Render Graph (Passes)
-#. **Assembly:** Render Graph → Execution Plan (Linear Pass Schedule)
+#. **Analysis:** AST → Validated Planned Chains
+#. **Expansion:** Planned Chains → Ordered Render Passes and Program Specs
+#. **Allocation and Assembly:** Passes → Compiled Render Graph
 
 .. code-block:: text
 
    graph TD
        A[Source Code] -->|Lexer/Parser| B[AST]
        B -->|Semantic Analyzer| C[Planned Chains]
-       C -->|Effect Expander| D[Render Graph]
-       D -->|Resource Allocator| E[Execution Plan]
+       C -->|Effect Expander| D[Passes and Program Specs]
+       D -->|Resource Allocator| E[Compiled Render Graph]
 
 ----
 
@@ -47,7 +49,8 @@ The lexer tokenizes the input, handling:
 * Operators (``.``, ``(``, ``)``)
 * Comments (``//``, ``/* ... */``)
 * **Special Tokens:** ``OUTPUT_REF`` (``o0``), ``HEX`` (``#ff0000``).
-* **Keywords:** ``out``, ``render``, ``let``, ``if``, etc.
+* **Keywords:** ``render``, ``write``, ``write3d``, ``let``, ``if``,
+  ``search``, ``subchain``, etc.
 
 1.2 Syntax Analysis
 ^^^^^^^^^^^^^^^^^^^
@@ -131,7 +134,7 @@ Since the AST already represents chains as flat arrays, the analyzer iterates se
 
    * Validates arguments against the Effect's ``globals`` schema.
    * Resolves named arguments (``scaleX: 10``) vs positional (``10``).
-   * Coerces types (e.g., ``int`` → ``float``).
+   * Resolves numeric and boolean literal values and clamps declared ranges.
 
 2.3 Planned Chain Construction
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -153,14 +156,14 @@ render passes.
 
 ----
 
-Stage 3: Expansion (Planned Chains → Render Graph)
----------------------------------------------------
+Stage 3: Expansion (Planned Chains → Ordered Passes)
+-----------------------------------------------------
 
 This stage lowers the high-level Effects into their constituent GPU Passes.
 
 
 * **Input:** validated planned chains
-* **Output:** ``RenderGraph`` (Nodes = Passes, Edges = Texture Dependencies)
+* **Output:** ordered passes, program specs, texture specs, and render surface
 
 3.1 Pass Expansion
 ^^^^^^^^^^^^^^^^^^
@@ -170,97 +173,82 @@ in the Effect Definition.
 
 
 #. 
-   **Texture Allocation:**
+   **Texture Mapping:**
 
 
-   * Resolves internal textures (e.g., ``downsampled``).
-   * Creates implicit ``inputColor`` and ``outputColor`` textures if not explicitly defined.
-   * Calculates dimensions based on screen size and relative specifiers (e.g., ``50%``).
+   * Maps pipeline references such as ``inputTex`` and ``outputTex`` to virtual
+     texture IDs.
+   * Prefixes node-local texture names and scopes shared state textures to the
+     relevant chain or particle pipeline.
+   * Preserves effect texture specifications for runtime dimension resolution.
 
 #. 
    **Pass Generation:**
 
 
-   * Creates a Render Pass Node for each entry in ``passes``.
-   * Maps logical texture names to unique resource IDs (e.g., ``tex_node1_downsampled``).
-   * Injects ``defines`` based on static parameters.
+   * Creates an expanded pass for each entry in ``passes``.
+   * Adds passes in planned-chain order and records their virtual texture
+     dependencies.
+   * Attaches uniforms and compile-time ``defines`` derived from effect globals.
 
-3.2 Shader Program Compilation
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-This is where the "Single Effect → GPU Program" transformation happens.
-
-
-#. **Source Resolution:** Locates the shader file (``.glsl`` or ``.wgsl``) based on the ``program`` key.
-#. **Define Injection:** Prepend ``#define`` statements for static configuration.
-#. **Backend Transpilation (WebGL only):**
-
-   * For Compute passes, wraps the logic in a full-screen quad vertex shader.
-   * Generates the fragment shader boilerplate (uniform declarations).
-
-**Example: Compute Pass Expansion (WebGL)**
-
-
-* **Input:** User GLSL snippet.
-* **Output:** Full Fragment Shader.
-
-  .. code-block:: glsl
-
-     #version 300 es
-     precision highp float;
-     uniform float u_time;
-     // ... injected uniforms ...
-     out vec4 fragColor;
-     void main() {
-       // ... user code ...
-     }
-
-----
-
-Stage 4: Assembly (Render Graph → Executable Pipeline)
-------------------------------------------------------
-
-The final stage prepares the graph for execution by the runtime.
-
-
-* **Input:** ``RenderGraph``
-* **Output:** ``ExecutionPlan`` (Sorted List of Commands)
-
-4.1 Topological Sort
-^^^^^^^^^^^^^^^^^^^^
-
-Orders the passes so that all dependencies are satisfied before a pass is executed.
-
-
-* **Algorithm:** Kahn's Algorithm.
-* **Cycle Detection:** Identifies feedback loops. If a loop is found, it must be broken by a ``persistent`` texture (reading from the previous frame).
-
-4.2 Resource Optimization
-^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Performs liveness analysis to minimize VRAM usage.
-
-
-* **Liveness Interval:** Calculates ``[first_write, last_read]`` for each texture.
-* **Pooling:** Assigns physical GPU textures from a shared pool to virtual texture IDs. Two virtual textures with non-overlapping intervals can share the same physical texture.
-
-4.3 Command Generation
+3.2 Program Collection
 ^^^^^^^^^^^^^^^^^^^^^^
 
-Generates the linear list of commands for the GPU driver.
+Expansion also collects the GLSL or WGSL source specifications referenced by
+each pass. Program names are scoped to the effect instance, and compile-time
+define values form part of the program key so distinct variants do not collide.
 
-
-* ``SetGlobal(time)``
-* ``BindTexture(unit=0, tex=pool_A)``
-* ``BindProgram(prog_Bloom)``
-* ``Draw()``
+The compiler does not compile GPU programs. During Pipeline initialization,
+the runtime walks the graph's pass list, resolves each program specification,
+and calls the selected backend's ``compileProgram()`` implementation.
 
 ----
 
-Error Codes & Stages
---------------------
+Stage 4: Allocation and Graph Assembly
+--------------------------------------
 
-The following table maps error codes to the compilation stage where they are raised.
+The final compiler stage assigns reusable logical texture-slot IDs and packages
+the ordered pass data for the runtime.
+
+
+* **Input:** ordered render passes, program specs, and texture specs
+* **Output:** compiled render graph
+
+4.1 Resource Allocation
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The resource allocator computes each virtual texture's first and last use, then
+applies linear-scan allocation to assign ``phys_N`` identifiers. A logical slot
+ID can be reused when its prior virtual texture's lifetime ended in an earlier
+pass. This produces only a virtual-to-slot map; it does not create GPU textures
+or a runtime texture pool.
+
+Texture IDs beginning with ``global_`` are omitted from the allocation map.
+
+4.2 Graph Assembly
+^^^^^^^^^^^^^^^^^^
+
+``compileGraph()`` returns an object containing the source hash, original
+source, ordered ``passes``, collected ``programs``, virtual-to-physical
+``allocations``, resolved texture specs, selected render surface, and
+compilation timestamp. It does not topologically sort passes or generate a
+separate GPU command list; the Pipeline executes the compiler-produced pass
+order.
+
+----
+
+Failures and Diagnostics
+------------------------
+
+The front end reports semantic issues with the ``S001``–``S008`` diagnostics
+documented in :ref:`Polymorphic DSL <shader-language>`. Lexer and parser
+failures are JavaScript ``SyntaxError`` instances, and a missing mandatory
+``search`` directive is rejected during parsing (with a defensive validation
+check as well).
+
+The following structured codes cross the compiler/runtime boundary. This is a
+focused list rather than an inventory of every backend-specific capability
+error.
 
 .. list-table::
    :header-rows: 1
@@ -268,78 +256,18 @@ The following table maps error codes to the compilation stage where they are rai
    * - Code
      - Stage
      - Description
-   * - ``ERR_SYNTAX``
-     - Parser
-     - Malformed DSL syntax (unexpected token, missing brace)
-   * - ``ERR_UNKNOWN_IDENT``
-     - Analysis
-     - Identifier not found in scope
-   * - ``ERR_ARG_TYPE``
-     - Analysis
-     - Argument type mismatch (e.g. string passed to float)
-   * - ``ERR_SCHEMA``
+   * - ``ERR_COMPILATION_FAILED``
      - Validation
-     - Effect definition violates JSON schema
-   * - ``ERR_DUP_PASS_NAME``
-     - Validation
-     - Duplicate pass name in Effect definition
-   * - ``ERR_BAD_TEX_REF``
-     - Validation
-     - Input/output references unknown texture/surface
-   * - ``ERR_PINGPONG_UNDECL``
-     - Validation
-     - Ping-pong texture undeclared
-   * - ``ERR_ITER_NO_PINGPONG``
-     - Validation
-     - Iterative pass missing pingpong or self-read unsafe
-   * - ``ERR_CYCLE``
-     - Assembly
-     - Cyclic dependency detected in Render Graph
-   * - ``ERR_COMPUTE_UNSUPPORTED_FEATURE``
-     - Validation
-     - Compute feature not emulatable on WebGL
-   * - ``ERR_VIEWPORT_BOUNDS``
-     - Assembly
-     - Viewport out of target bounds
-   * - ``ERR_WORKGROUP_LIMIT``
-     - Assembly
-     - Workgroup size exceeds device limits
-   * - ``ERR_UNIFORM_COERCE``
-     - Assembly
-     - Uniform value invalid/coercion failed
-   * - ``ERR_SURFACE_MULTIWRITE``
-     - Assembly
-     - Multiple writes to same surface without extension
-   * - ``ERR_COMPUTE_MRT_UNSUPPORTED``
-     - Validation
-     - Multi-render-target compute emulation unsupported
-   * - ``ERR_READBACK_FORBIDDEN``
-     - Runtime
-     - Attempted GPU-to-CPU readback within frame
-   * - ``ERR_TOO_MANY_TEXTURES``
-     - Assembly
-     - Exceeded maximum texture units for backend
-   * - ``ERR_DIMENSION_INVALID``
-     - Assembly
-     - Texture dimension spec invalid
-   * - ``ERR_FORMAT_UNSUPPORTED``
-     - Assembly
-     - Texture format not supported by backend
+     - One or more semantic diagnostics have error severity
+   * - ``ERR_EXPANSION_FAILED``
+     - Expansion
+     - Planned chains could not be lowered into passes
+   * - ``ERR_PROGRAM_SPEC_MISSING``
+     - Pipeline initialization
+     - A pass references a program absent from the compiled graph
    * - ``ERR_SHADER_COMPILE``
      - Backend
-     - Shader compilation failed (driver error)
+     - A WebGL or WebGPU shader failed to compile
    * - ``ERR_SHADER_LINK``
-     - Backend
-     - Shader program linking failed (driver error)
-   * - ``ERR_NO_INPUT``
-     - Expansion
-     - Non-generator effect missing input
-   * - ``ERR_ENUM_INVALID``
-     - Validation
-     - Unknown enum string provided
-   * - ``ERR_CONDITION_SYNTAX``
-     - Validation
-     - Invalid pass condition entry
-   * - ``ERR_CONTROL_FLOW_INVALID``
-     - Analysis
-     - Break/continue in invalid context
+     - WebGL backend
+     - Compiled WebGL shaders failed to link into a program
