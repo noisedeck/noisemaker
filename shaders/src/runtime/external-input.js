@@ -259,7 +259,7 @@ function _avgBins(buf, from, to) {
  * Provides frequency band data extracted from an AnalyserNode.
  */
 export class AudioState {
-    constructor() {
+    constructor({ deviceRegistry = true } = {}) {
         /** @type {number} Low frequency band level (0-1) */
         this.low = 0
         /** @type {number} Mid frequency band level (0-1) */
@@ -268,6 +268,10 @@ export class AudioState {
         this.high = 0
         /** @type {number} Overall volume level (0-1) */
         this.vol = 0
+        /** @type {number} Bipolar time-domain/DC signal (-1 to 1) */
+        this.raw = 0
+        /** True only after the raw capture path has supplied a real sample. */
+        this.rawReady = false
         /** @type {Float32Array} Raw FFT bins (16 bins, normalized 0-1) */
         this.fft = new Float32Array(16)
         /** @type {Float32Array} Full-resolution FFT spectrum (128 bins, normalized 0-1) */
@@ -282,7 +286,12 @@ export class AudioState {
             mid: [],
             high: []
         }
+        this._frequencyData = null
         this._maxBufferLength = 5
+        /** @type {Map<string, {id: string, name: string, connected: boolean, channelCount: number, channels: Map<number, AudioState>}>|null} */
+        this._devices = deviceRegistry ? new Map() : null
+        /** @type {Map<string, object|null>|null} Connected name lookup; null means ambiguous. */
+        this._devicesByName = deviceRegistry ? new Map() : null
     }
 
     /**
@@ -297,7 +306,10 @@ export class AudioState {
 
         this._maxBufferLength = Math.max(1, Math.min(10, smoothing))
 
-        const buf = new Uint8Array(analyser.frequencyBinCount)
+        if (!this._frequencyData || this._frequencyData.length !== analyser.frequencyBinCount) {
+            this._frequencyData = new Uint8Array(analyser.frequencyBinCount)
+        }
+        const buf = this._frequencyData
         analyser.getByteFrequencyData(buf)
 
         // Extract frequency bands by averaging across bin ranges.
@@ -338,6 +350,143 @@ export class AudioState {
         this.mid = Math.max(0, Math.min(1, mid))
         this.high = Math.max(0, Math.min(1, high))
         this.vol = (this.low + this.mid + this.high) / 3
+    }
+
+    /**
+     * Store one signed time-domain control value.
+     * @param {number} value - Bipolar input sample mean (-1 to 1)
+     */
+    setRaw(value) {
+        this.raw = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0
+        this.rawReady = true
+    }
+
+    /** Mark raw input unavailable without representing it as a real zero sample. */
+    setRawUnavailable() {
+        this.raw = 0
+        this.rawReady = false
+    }
+
+    /**
+     * Register or reconnect one browser audio input device.
+     * @param {{id: string, name: string, channelCount: number}} device
+     * @returns {object|null}
+     */
+    registerDevice(device) {
+        if (!this._devices || !device || typeof device.id !== 'string' || !device.id) return null
+        const name = typeof device.name === 'string' ? device.name : ''
+        const channelCount = Number.isInteger(device.channelCount) && device.channelCount >= 1
+            ? device.channelCount
+            : 1
+        let entry = this._devices.get(device.id)
+        let topologyChanged = false
+        if (!entry) {
+            entry = {
+                id: device.id,
+                name,
+                connected: true,
+                channelCount,
+                channels: new Map()
+            }
+            this._devices.set(device.id, entry)
+            topologyChanged = true
+        } else {
+            topologyChanged = entry.name !== name || !entry.connected || entry.channelCount !== channelCount
+            entry.name = name
+            entry.connected = true
+            entry.channelCount = channelCount
+        }
+        for (let channel = 1; channel <= channelCount; channel++) {
+            if (!entry.channels.has(channel)) {
+                entry.channels.set(channel, new AudioState({ deviceRegistry: false }))
+            }
+        }
+        for (const [channel, state] of entry.channels) {
+            if (channel > channelCount) {
+                state.reset()
+                entry.channels.delete(channel)
+            }
+        }
+        if (topologyChanged) this._rebuildDeviceNameIndex()
+        return entry
+    }
+
+    /**
+     * Update analyzed values for one selected device channel.
+     * @param {string} id
+     * @param {number} channel - One-based channel number
+     * @param {{low?: number, mid?: number, high?: number, vol?: number, raw?: number}} values
+     * @returns {boolean}
+     */
+    setChannelValues(id, channel, values = {}) {
+        const entry = this._devices?.get(id)
+        const state = entry?.connected ? entry.channels.get(channel) : null
+        if (!state) return false
+        for (const key of ['low', 'mid', 'high', 'vol']) {
+            if (Number.isFinite(values[key])) {
+                state[key] = Math.max(0, Math.min(1, values[key]))
+            }
+        }
+        if (Number.isFinite(values.raw)) state.setRaw(values.raw)
+        return true
+    }
+
+    /** Mark raw samples unavailable for every channel on one device. */
+    setDeviceRawUnavailable(id) {
+        const entry = this._devices?.get(id)
+        if (!entry) return
+        for (const state of entry.channels.values()) state.setRawUnavailable()
+    }
+
+    /**
+     * Resolve a selected device and one-based channel. Exact id is
+     * authoritative; a name-only selector must match one connected device.
+     * @param {{name?: string, id?: string, channel?: number}} selector
+     * @returns {AudioState|null}
+     */
+    getDeviceChannelState(selector = {}) {
+        if (!selector.name && !selector.id && selector.channel === undefined) return this
+        if (!Number.isInteger(selector.channel) || selector.channel < 1) return null
+        let entry
+        if (selector.id) {
+            entry = this._devices?.get(selector.id)
+        } else if (selector.name) {
+            entry = this._devicesByName?.get(selector.name)
+        }
+        if (!entry?.connected) return null
+        return entry.channels.get(selector.channel) || null
+    }
+
+    /** Mark one audio device unavailable while retaining its identity. */
+    disconnectDevice(id) {
+        const entry = this._devices?.get(id)
+        if (!entry) return
+        entry.connected = false
+        for (const state of entry.channels.values()) state.reset()
+        this._rebuildDeviceNameIndex()
+    }
+
+    _rebuildDeviceNameIndex() {
+        if (!this._devices || !this._devicesByName) return
+        this._devicesByName.clear()
+        for (const entry of this._devices.values()) {
+            if (!entry.connected || !entry.name) continue
+            if (this._devicesByName.has(entry.name)) {
+                this._devicesByName.set(entry.name, null)
+            } else {
+                this._devicesByName.set(entry.name, entry)
+            }
+        }
+    }
+
+    /** Return structured device identity, connection state, and channel count. */
+    getDevices() {
+        return [...(this._devices?.values() || [])].map(({ id, name, connected, channelCount }) => ({
+            id,
+            name,
+            connected,
+            channelCount
+        }))
     }
 
     /**
@@ -383,12 +532,19 @@ export class AudioState {
         this.mid = 0
         this.high = 0
         this.vol = 0
+        this.raw = 0
+        this.rawReady = false
         this.fft.fill(0)
         this.spectrum.fill(0)
         this.waveform.fill(0.5)
         this._smoothingBuffers.low = []
         this._smoothingBuffers.mid = []
         this._smoothingBuffers.high = []
+        if (this._devices) {
+            for (const entry of this._devices.values()) {
+                for (const state of entry.channels.values()) state.reset()
+            }
+        }
     }
 }
 
@@ -754,6 +910,7 @@ export class AudioInputManager {
             this._audioState.mid = 0
             this._audioState.high = 0
             this._audioState.vol = 0
+            this._audioState.raw = 0
             this._audioState.spectrum.fill(0)
             this._audioState.waveform.fill(0.5)
         }

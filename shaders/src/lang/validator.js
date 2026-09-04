@@ -30,6 +30,10 @@ const ALLOWED_STRING_PARAMS = new Set([
     // every accepted free-form string has one auditable allowlist.
     'midi.name',
     'midi.id',
+    // Audio input identity mirrors MediaDeviceInfo. As with MIDI, these are
+    // descriptor fields and the only audio strings permitted through the DSL.
+    'audio.name',
+    'audio.id',
 ])
 
 const stateSurfaces = new Set(['time','frame','mouse','resolution','seed','a'])
@@ -1206,8 +1210,10 @@ export function validate(ast) {
                             // Audio node - resolve the band enum value and pass through
                             // The audio value will be evaluated at runtime by the pipeline
                             const bandNode = node.band
-                            let bandValue = 0 // default: low
-                            if (bandNode && bandNode.type === 'Member') {
+                            let bandValue
+                            if (bandNode && bandNode.type === 'Number') {
+                                bandValue = bandNode.value
+                            } else if (bandNode && bandNode.type === 'Member') {
                                 const resolved = resolveEnum(bandNode.path)
                                 if (typeof resolved === 'number') {
                                     bandValue = resolved
@@ -1223,23 +1229,85 @@ export function validate(ast) {
                                     bandValue = resolved.value
                                 }
                             }
-                            // Resolve min, max from the Audio node
-                            const resolveAudioParam = (param) => {
+                            const validBand = Number.isInteger(bandValue) && bandValue >= 0 && bandValue <= 4
+                            if (!validBand) {
+                                if (bandNode?.type === 'String') {
+                                    pushDiag('S001', bandNode,
+                                        "String literal not allowed for audio() band; strings are only valid for audio.name and audio.id")
+                                } else {
+                                    pushDiag('S002', bandNode,
+                                        `audio() band must resolve to an integer from 0 to 4 (got ${bandValue})`)
+                                }
+                            }
+                            // Audio's numeric fields accept only numeric DSL values.
+                            // In particular, booleans must not become channel 1 and
+                            // strings must not bypass the narrow name/id allowlist.
+                            const resolveAudioNumber = (param, paramName) => {
                                 if (!param) return undefined
                                 if (param.type === 'Number') return param.value
-                                if (param.type === 'Boolean') return param.value ? 1 : 0
-                                if (param.type === 'Member') {
-                                    const r = resolveEnum(param.path)
-                                    if (typeof r === 'number') return r
-                                    if (r && r.type === 'Number') return r.value
+                                if (param.type === 'String') {
+                                    pushDiag('S001', param,
+                                        `String literal not allowed for audio() ${paramName}; strings are only valid for audio.name and audio.id`)
+                                } else {
+                                    pushDiag('S002', param, `audio() ${paramName} must be a number`)
                                 }
                                 return undefined
                             }
+                            const resolveAudioStringParam = (param, paramName) => {
+                                if (!param) return undefined
+                                const allowlistKey = `audio.${paramName}`
+                                if (!ALLOWED_STRING_PARAMS.has(allowlistKey)) {
+                                    pushDiag('S001', param, `String parameter '${allowlistKey}' is not allowlisted`)
+                                    return undefined
+                                }
+                                if (param.type !== 'String') {
+                                    pushDiag('S001', param, `audio() ${paramName} requires a quoted string`)
+                                    return undefined
+                                }
+                                if (param.value.length === 0) {
+                                    pushDiag('S001', param, `audio() ${paramName} must not be empty`)
+                                    return undefined
+                                }
+                                return decodeJsonStringLiteralContent(param.value)
+                            }
+                            const minValue = resolveAudioNumber(node.min, 'min')
+                            const maxValue = resolveAudioNumber(node.max, 'max')
+                            const validMin = node.min === undefined || minValue !== undefined
+                            const validMax = node.max === undefined || maxValue !== undefined
+                            let channelValue
+                            let validChannel = true
+                            if (node.channel !== undefined) {
+                                if (node.channel.type === 'Number') {
+                                    channelValue = node.channel.value
+                                    validChannel = Number.isInteger(channelValue) && channelValue >= 1
+                                    if (!validChannel) {
+                                        pushDiag('S002', node.channel,
+                                            `audio() channel must be a positive integer (got ${channelValue})`)
+                                    }
+                                } else {
+                                    validChannel = false
+                                    if (node.channel.type === 'String') {
+                                        pushDiag('S001', node.channel,
+                                            'String literal not allowed for audio() channel; strings are only valid for audio.name and audio.id')
+                                    } else {
+                                        pushDiag('S002', node.channel,
+                                            'audio() channel must be a positive integer')
+                                    }
+                                }
+                            }
+                            const nameValue = resolveAudioStringParam(node.name, 'name')
+                            const idValue = resolveAudioStringParam(node.id, 'id')
+                            const validName = node.name === undefined || nameValue !== undefined
+                            const validId = node.id === undefined || idValue !== undefined
                             value = {
                                 type: 'Audio',
-                                band: bandValue,
-                                min: Math.max(0, Math.min(1, resolveAudioParam(node.min) ?? 0)),
-                                max: Math.max(0, Math.min(1, resolveAudioParam(node.max) ?? 1)),
+                                band: validBand ? bandValue : undefined,
+                                min: Math.max(0, Math.min(1, minValue ?? 0)),
+                                max: Math.max(0, Math.min(1, maxValue ?? 1)),
+                                channel: validChannel ? channelValue : undefined,
+                                name: nameValue,
+                                id: idValue,
+                                _invalid: !(validBand && validMin && validMax && validChannel && validName && validId),
                                 // Keep original AST for unparsing
                                 _ast: node,
                                 // Preserve variable reference marker for unparser round-trip

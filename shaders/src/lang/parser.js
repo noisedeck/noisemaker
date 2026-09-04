@@ -264,11 +264,14 @@ export function parse(tokens) {
      * Transform an audio() call into an Audio AST node.
      *
      * Audio signature:
-     * audio(band, min?, max?)
+     * audio(band, min?, max?, channel:?, name:?, id:?)
      *
-     * band: audioBand enum (required) - low, mid, high, vol
+     * band: audioBand enum (required) - low, mid, high, vol, raw
      * min: minimum output value (default 0)
      * max: maximum output value (default 1)
+     * channel: one-based channel on the selected device (keyword-only)
+     * name: readable MediaDeviceInfo.label selector (keyword-only)
+     * id: exact MediaDeviceInfo.deviceId selector (keyword-only, requires name)
      */
     function transformAudioInvocation(call, nameToken) {
         const args = Array.isArray(call.args) ? call.args : []
@@ -276,6 +279,16 @@ export function parse(tokens) {
 
         // Parameter order: band, min, max
         const paramOrder = ['band', 'min', 'max']
+        const keywordOnlyParams = ['channel', 'name', 'id']
+        const validParams = [...paramOrder, ...keywordOnlyParams]
+        if (args.length > paramOrder.length) {
+            throw new SyntaxError(`audio() channel, name and id are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const key of Object.keys(kwargs)) {
+            if (!validParams.includes(key)) {
+                throw new SyntaxError(`audio() unknown parameter '${key}' at line ${nameToken.line} col ${nameToken.col}. Valid: ${validParams.join(', ')}`)
+            }
+        }
         const defaults = {
             min: { type: 'Number', value: 0 },
             max: { type: 'Number', value: 1 }
@@ -283,20 +296,43 @@ export function parse(tokens) {
 
         const resolved = {}
 
-        // Resolve each parameter from positional args or kwargs
+        // Resolve each parameter from positional args or kwargs. Positionals
+        // are dense, so keyword arguments do not consume their slots.
+        let posCursor = 0
         for (let i = 0; i < paramOrder.length; i++) {
             const paramName = paramOrder[i]
             if (kwargs[paramName] !== undefined) {
                 resolved[paramName] = kwargs[paramName]
-            } else if (i < args.length) {
-                resolved[paramName] = args[i]
+            } else if (posCursor < args.length) {
+                resolved[paramName] = args[posCursor]
+                posCursor++
             } else if (defaults[paramName] !== undefined) {
                 resolved[paramName] = defaults[paramName]
             }
         }
 
+        if (posCursor < args.length) {
+            throw new SyntaxError(`audio() has an excess positional argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+
         if (!resolved.band) {
             throw new SyntaxError(`audio() requires 'band' argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (kwargs.id !== undefined && kwargs.name === undefined) {
+            throw new SyntaxError(`audio() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if ((kwargs.channel === undefined) !== (kwargs.name === undefined)) {
+            throw new SyntaxError(`audio() selected device requires both 'name' and 'channel' at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        for (const paramName of ['name', 'id']) {
+            const value = kwargs[paramName]
+            if (value === undefined) continue
+            if (value.type !== 'String') {
+                throw new SyntaxError(`audio() '${paramName}' requires a quoted string at line ${nameToken.line} col ${nameToken.col}`)
+            }
+            if (value.value.length === 0) {
+                throw new SyntaxError(`audio() '${paramName}' must not be empty at line ${nameToken.line} col ${nameToken.col}`)
+            }
         }
 
         return {
@@ -304,6 +340,9 @@ export function parse(tokens) {
             band: resolved.band,
             min: resolved.min,
             max: resolved.max,
+            channel: kwargs.channel,
+            name: kwargs.name,
+            id: kwargs.id,
             loc: { line: nameToken.line, col: nameToken.col }
         }
     }
@@ -853,7 +892,7 @@ export function parse(tokens) {
         const kwargs = {}
         let keyword = false
         let positional = false
-        const allowMixed = nameToken.lexeme === 'midi'
+        const allowMixed = nameToken.lexeme === 'midi' || nameToken.lexeme === 'audio'
         if (peek().type !== 'RPAREN') {
             while (true) {
                 if (peek().type === 'IDENT' && tokens[current + 1]?.type === 'COLON') {

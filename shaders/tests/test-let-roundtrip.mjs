@@ -217,6 +217,26 @@ render(o0)`;
     assertIncludes(result, 'scale: bass', 'Should reference variable');
 });
 
+test('let with selected raw audio device and channel round-trips stably', () => {
+    const name = 'Expert "Sleepers" \\ ES-9';
+    const id = 'audio\\port';
+    const src = `search synth
+
+let cv = audio(band: audioBand.raw, channel: 4, name: ${JSON.stringify(name)}, id: ${JSON.stringify(id)})
+
+noise(scale: cv)
+  .write(o0)
+
+render(o0)`;
+    const once = unparse(compile(src));
+    const twice = unparse(compile(once));
+    assertEqual(twice, once, 'Selected raw audio identity must stay stable');
+    assertIncludes(once, 'band: audioBand.raw', 'Should preserve raw mode');
+    assertIncludes(once, 'channel: 4', 'Should preserve one-based channel');
+    assertIncludes(once, `name: ${JSON.stringify(name)}`, 'Should preserve readable audio device name');
+    assertIncludes(once, `id: ${JSON.stringify(id)}`, 'Should preserve exact audio device id');
+});
+
 // Test 8: Double round-trip stability
 test('double round-trip produces identical output', () => {
     const src = `search synth

@@ -21,7 +21,7 @@ const midiModeNames = ['noteChange', 'gateNote', 'gateVelocity', 'triggerNote', 
 /**
  * Map audio band number to audioBand enum name
  */
-const audioBandNames = ['low', 'mid', 'high', 'vol']
+const audioBandNames = ['low', 'mid', 'high', 'vol', 'raw']
 
 /**
  * Format an AST expression node back to DSL
@@ -121,6 +121,9 @@ function formatMidi(midi) {
  * @returns {string} DSL representation of the audio() call
  */
 function formatAudio(audio) {
+    if (audio._invalid && audio._ast?.type === 'Audio') {
+        return formatLetExpr(audio._ast)
+    }
     const bandName = audioBandNames[audio.band] || 'low'
     const parts = [`band: audioBand.${bandName}`]
 
@@ -130,6 +133,15 @@ function formatAudio(audio) {
     }
     if (audio.max !== 1) {
         parts.push(`max: ${audio.max}`)
+    }
+    if (Number.isInteger(audio.channel) && audio.channel >= 1) {
+        parts.push(`channel: ${audio.channel}`)
+    }
+    if (typeof audio.name === 'string' && audio.name.length > 0) {
+        parts.push(`name: ${JSON.stringify(audio.name)}`)
+    }
+    if (typeof audio.id === 'string' && audio.id.length > 0) {
+        parts.push(`id: ${JSON.stringify(audio.id)}`)
     }
 
     return `audio(${parts.join(', ')})`
@@ -491,18 +503,27 @@ function formatValue(value, spec, options = {}, sourceForm) {
         // Handle raw Audio AST node
         if (value.type === 'Audio') {
             const bandPath = value.band
-            let bandName = 'low'
+            let bandStr = 'audioBand.low'
             if (bandPath && bandPath.type === 'Member' && bandPath.path) {
-                bandName = bandPath.path[bandPath.path.length - 1]
+                bandStr = `audioBand.${bandPath.path[bandPath.path.length - 1]}`
             } else if (bandPath && bandPath.type === 'Ident') {
-                bandName = bandPath.name
+                bandStr = bandPath.name
+            } else if (bandPath && bandPath.type === 'Number') {
+                bandStr = String(bandPath.value)
             }
-            const parts = [`band: audioBand.${bandName}`]
+            const parts = [`band: ${bandStr}`]
             if (value.min && value.min.type === 'Number' && value.min.value !== 0) {
                 parts.push(`min: ${value.min.value}`)
             }
             if (value.max && value.max.type === 'Number' && value.max.value !== 1) {
                 parts.push(`max: ${value.max.value}`)
+            }
+            if (value.channel?.type === 'Number') parts.push(`channel: ${value.channel.value}`)
+            if (value.name?.type === 'String') {
+                parts.push(`name: ${JSON.stringify(decodeJsonStringLiteralContent(value.name.value))}`)
+            }
+            if (value.id?.type === 'String') {
+                parts.push(`id: ${JSON.stringify(decodeJsonStringLiteralContent(value.id.value))}`)
             }
             return `audio(${parts.join(', ')})`
         }
@@ -731,16 +752,26 @@ function formatLetExpr(expr, options = {}) {
         }
         case 'Audio': {
             // Raw AST Audio: sub-fields are AST nodes
-            let bandStr = 'audioBand.low'
-            if (expr.band?.type === 'Member' && expr.band.path) {
-                bandStr = `audioBand.${expr.band.path[expr.band.path.length - 1]}`
-            } else if (expr.band?.type === 'Ident') {
-                bandStr = expr.band.name  // variable reference, no prefix
-            }
+            const formatAudioField = (node) => node?.type === 'String'
+                ? JSON.stringify(decodeJsonStringLiteralContent(node.value))
+                : formatLetExpr(node, options)
+            const bandStr = expr.band ? formatAudioField(expr.band) : 'audioBand.low'
             const parts = [`band: ${bandStr}`]
-            const minVal = numVal(expr.min), maxVal = numVal(expr.max)
-            if (minVal !== undefined && minVal !== 0) parts.push(`min: ${minVal}`)
-            if (maxVal !== undefined && maxVal !== 1) parts.push(`max: ${maxVal}`)
+            const pushAudioField = (name, node, defaultValue) => {
+                if (!node) return
+                const numeric = numVal(node)
+                if (numeric !== undefined && numeric === defaultValue) return
+                parts.push(`${name}: ${formatAudioField(node)}`)
+            }
+            pushAudioField('min', expr.min, 0)
+            pushAudioField('max', expr.max, 1)
+            pushAudioField('channel', expr.channel, undefined)
+            if (expr.name?.type === 'String') {
+                parts.push(`name: ${formatAudioField(expr.name)}`)
+            }
+            if (expr.id?.type === 'String') {
+                parts.push(`id: ${formatAudioField(expr.id)}`)
+            }
             return `audio(${parts.join(', ')})`
         }
         case 'Call':

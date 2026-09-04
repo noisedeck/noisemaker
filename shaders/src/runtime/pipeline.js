@@ -203,34 +203,47 @@ function evaluateMidi(config, midiState, currentTime) {
  * 1: mid - Mid frequency band
  * 2: high - High frequency band
  * 3: vol - Overall volume
+ * 4: raw - Bipolar time-domain/DC signal
  *
  * @param {object} config - Audio configuration
- * @param {number} config.band - Audio band (0-3)
+ * @param {number} config.band - Audio band or raw signal mode (0-4)
  * @param {number} config.min - Minimum output value
  * @param {number} config.max - Maximum output value
  * @param {import('./external-input.js').AudioState} audioState - Current audio state
  * @returns {number} The evaluated value in min..max range
  */
 function evaluateAudio(config, audioState) {
+    if (config._invalid) return config.min
     if (!audioState) return config.min
 
     const { band, min, max } = config
+    const hasDeviceSelector = !!(config.name || config.id || config.channel !== undefined)
+    const selectedState = hasDeviceSelector
+        ? audioState.getDeviceChannelState?.(config)
+        : audioState
+    if (!selectedState) return min
 
     let rawValue = 0
 
     switch (band) {
         case 0: // low
-            rawValue = audioState.low
+            rawValue = selectedState.low
             break
         case 1: // mid
-            rawValue = audioState.mid
+            rawValue = selectedState.mid
             break
         case 2: // high
-            rawValue = audioState.high
+            rawValue = selectedState.high
+            break
+        case 4: // raw bipolar signal
+            if (selectedState.rawReady !== true) return min
+            rawValue = (Math.max(-1, Math.min(1, selectedState.raw || 0)) + 1) * 0.5
             break
         case 3: // vol
+            rawValue = selectedState.vol
+            break
         default:
-            rawValue = audioState.vol
+            rawValue = 0
             break
     }
 
@@ -569,6 +582,76 @@ export class Pipeline {
             }
         }
         return uniforms
+    }
+
+    /**
+     * Describe the browser audio captures required by the compiled graph.
+     * Hosts use this runtime view so inline and multiline DSL forms behave the
+     * same as let-bound automation sources.
+     *
+     * @returns {{needsLegacy: boolean, needsLegacyRaw: boolean, selected: Array<{id: string|null, name: string, channel: number, needsRaw: boolean}>}}
+     */
+    getAudioInputRequirements() {
+        let needsLegacy = false
+        let needsLegacyRaw = false
+        const selected = []
+        const selectedKeys = new Set()
+        const visited = new Set()
+
+        const visit = (value) => {
+            if (!value || typeof value !== 'object' || visited.has(value)) return
+            visited.add(value)
+
+            if (value.type === 'Audio' || value._ast?.type === 'Audio') {
+                const source = value._ast?.type === 'Audio' ? value._ast : value
+                const hasSelectorIntent = value.name !== undefined || value.id !== undefined ||
+                    value.channel !== undefined || source.name !== undefined ||
+                    source.id !== undefined || source.channel !== undefined
+                const hasValidBand = value._invalid !== true &&
+                    Number.isInteger(value.band) && value.band >= 0 && value.band <= 4
+                if (!hasValidBand) return
+
+                if (typeof value.name === 'string' && value.name.length > 0 &&
+                    Number.isInteger(value.channel) && value.channel >= 1) {
+                    const requirement = {
+                        id: typeof value.id === 'string' && value.id.length > 0 ? value.id : null,
+                        name: value.name,
+                        channel: value.channel,
+                        needsRaw: value.band === 4
+                    }
+                    const key = JSON.stringify([requirement.id, requirement.name, requirement.channel])
+                    if (selectedKeys.has(key)) {
+                        const existing = selected.find(candidate => (
+                            candidate.id === requirement.id &&
+                            candidate.name === requirement.name &&
+                            candidate.channel === requirement.channel
+                        ))
+                        if (existing && requirement.needsRaw) existing.needsRaw = true
+                    } else {
+                        selectedKeys.add(key)
+                        selected.push(requirement)
+                    }
+                } else if (!hasSelectorIntent) {
+                    needsLegacy = true
+                    if (value.band === 4) needsLegacyRaw = true
+                }
+                return
+            }
+
+            if (Array.isArray(value)) {
+                for (const item of value) visit(item)
+                return
+            }
+            if (ArrayBuffer.isView(value)) return
+            for (const item of Object.values(value)) visit(item)
+        }
+
+        for (const pass of this.graph?.passes || []) {
+            const effectDef = pass.effectKey ? getEffect(pass.effectKey) : null
+            if (effectDef?.tags?.includes('audio')) needsLegacy = true
+            visit(pass.uniforms)
+        }
+        return { needsLegacy, needsLegacyRaw, selected }
     }
 
     /**

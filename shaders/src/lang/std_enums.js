@@ -32,7 +32,8 @@ const audioBandEnum = {
     low: { type: 'Number', value: 0 },    // Low frequency band (~0-200Hz)
     mid: { type: 'Number', value: 1 },    // Mid frequency band (~200-2000Hz)
     high: { type: 'Number', value: 2 },   // High frequency band (~2000Hz+)
-    vol: { type: 'Number', value: 3 }     // Overall volume (average)
+    vol: { type: 'Number', value: 3 },    // Overall volume (average)
+    raw: { type: 'Number', value: 4 }     // Bipolar time-domain/DC signal (-1 to 1)
 }
 
 export const stdEnums = {

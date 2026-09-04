@@ -52,6 +52,24 @@ function assertApprox(actual, expected, tolerance = 0.001, message) {
     }
 }
 
+test('AudioState reuses its analyser frequency buffer between frames', () => {
+    const audio = new AudioState({ deviceRegistry: false })
+    const buffers = []
+    const analyser = {
+        frequencyBinCount: 128,
+        getByteFrequencyData(buffer) {
+            buffers.push(buffer)
+            buffer.fill(0)
+        }
+    }
+
+    audio.updateFromAnalyser(analyser)
+    audio.updateFromAnalyser(analyser)
+
+    assertEqual(buffers.length, 2, 'both frames should be analyzed')
+    assert(buffers[0] === buffers[1], 'unchanged FFT size should reuse one typed array')
+})
+
 // ============================================================================
 // MidiChannelState Tests
 // ============================================================================
@@ -611,6 +629,67 @@ test('AudioState.reset clears all values', () => {
     assertEqual(audio.mid, 0, 'mid should be 0')
     assertEqual(audio.high, 0, 'high should be 0')
     assertEqual(audio.vol, 0, 'vol should be 0')
+    assertEqual(audio.raw, 0, 'raw signal should be centered at zero')
+})
+
+test('AudioState stores bipolar raw signal without losing its sign', () => {
+    const audio = new AudioState()
+    audio.setRaw(-0.75)
+    assertEqual(audio.raw, -0.75, 'negative CV should stay negative')
+    audio.setRaw(2)
+    assertEqual(audio.raw, 1, 'raw signal should clamp at positive full scale')
+    audio.setRaw(-2)
+    assertEqual(audio.raw, -1, 'raw signal should clamp at negative full scale')
+})
+
+test('AudioState can invalidate raw readiness without inventing a zero sample', () => {
+    const audio = new AudioState()
+    audio.registerDevice({ id: 'interface-a', name: 'Interface', channelCount: 2 })
+    audio.setChannelValues('interface-a', 1, { raw: 0 })
+    audio.setChannelValues('interface-a', 2, { raw: -0.5 })
+
+    assertEqual(audio.getDeviceChannelState({ id: 'interface-a', channel: 1 }).rawReady, true,
+        'real zero should be marked ready')
+    audio.setDeviceRawUnavailable('interface-a')
+    assertEqual(audio.getDeviceChannelState({ id: 'interface-a', channel: 1 }).rawReady, false,
+        'device invalidation should clear zero readiness')
+    assertEqual(audio.getDeviceChannelState({ id: 'interface-a', channel: 2 }).rawReady, false,
+        'device invalidation should clear every channel')
+})
+
+test('AudioState isolates analysis by input device and one-based channel', () => {
+    const audio = new AudioState()
+    audio.registerDevice({ id: 'left', name: 'Interface', channelCount: 2 })
+    audio.registerDevice({ id: 'right', name: 'Interface', channelCount: 4 })
+    audio.setChannelValues('left', 2, { low: 0.2, mid: 0.3, high: 0.4, vol: 0.5, raw: -0.6 })
+    audio.setChannelValues('right', 2, { low: 0.8, mid: 0.7, high: 0.6, vol: 0.5, raw: 0.4 })
+
+    const selected = audio.getDeviceChannelState({ name: 'Interface', id: 'right', channel: 2 })
+    assertEqual(selected.low, 0.8, 'exact id should select the right device')
+    assertEqual(selected.raw, 0.4, 'selected channel should retain bipolar raw signal')
+    assertEqual(audio.getDeviceChannelState({ name: 'Interface', channel: 2 }), null,
+        'duplicate readable names should be ambiguous')
+})
+
+test('AudioState resolves a unique readable device name and disconnects inertly', () => {
+    const audio = new AudioState()
+    audio.registerDevice({ id: 'solo', name: 'Unique Interface', channelCount: 2 })
+    audio.setChannelValues('solo', 1, { low: 0.9, raw: 0.25 })
+
+    assertEqual(audio.getDeviceChannelState({ name: 'Unique Interface', channel: 1 }).low, 0.9,
+        'unique readable name should resolve')
+    audio.disconnectDevice('solo')
+    assertEqual(audio.getDeviceChannelState({ name: 'Unique Interface', id: 'solo', channel: 1 }), null,
+        'disconnected exact device should not resolve')
+    assertEqual(audio.getDevices()[0].connected, false,
+        'device inventory should retain disconnected identity')
+})
+
+test('AudioState rejects unavailable channels without falling back', () => {
+    const audio = new AudioState()
+    audio.registerDevice({ id: 'stereo', name: 'Stereo', channelCount: 2 })
+    assertEqual(audio.getDeviceChannelState({ name: 'Stereo', id: 'stereo', channel: 3 }), null,
+        'channel 3 must not fall back to channel 1')
 })
 
 test('AudioState smoothing accumulates over multiple updates', () => {
