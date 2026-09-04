@@ -193,14 +193,14 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## AI development contract (llms-full.txt)
 
-- **Checkpoint:** noisemaker `a4701daf` / shade-mcp `ba407982`, 2026-08-31
+- **Checkpoint:** noisemaker `691eea16` / shade-mcp `23258ca3`, 2026-09-04
 - **Scope:** the hand-authored agent contract `llms-full.txt` — the
   executable-source companion served at the site root that describes
   *current* runtime behavior across nine surfaces (DSL, effect definition,
   parameters/globals, passes/graph, textures, compatibility/mutation,
   rendered output, cross-backend parity, Shade MCP tool contracts), a fully
   worked validated effect, the surface × capability traceability matrix, and
-  the 29-entry gap register (GAP-001..024 and GAP-026..030). The file pins its
+  the 31-entry gap register (GAP-001..024 and GAP-026..032). The file pins its
   own audited SHAs in the "Source snapshots used for this contract" block at
   its head; that block and this checkpoint are the same two SHAs and must be
   advanced together. There is no generator — every update is a hand edit
@@ -212,7 +212,7 @@ work, verify it, then update the checkpoint and append a log line.
      primary source roots the contract reads:
 
      ```
-     git log --oneline a4701daf..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
+     git log --oneline 691eea16..HEAD -- shaders/src/lang/ shaders/src/runtime/ shaders/src/renderer/canvas.js shaders/tests/test-harness.js
      ```
 
      Each can invalidate a behavior statement, typed grammar, or validator
@@ -225,6 +225,22 @@ work, verify it, then update the checkpoint and append a log line.
      triple, then re-audit the "Shade MCP tool contracts" section and the
      MCP-side gaps.
 - **Log:**
+  - 2026-09-04 — caught up through noisemaker `691eea16` / shade-mcp
+    `23258ca3`: re-audited selected MIDI ports, selected audio device/channels,
+    bipolar raw audio, recursive capture requirements, and eight-level nested
+    automation across the changed parser, validator, unparser, external-input,
+    and pipeline sources. Added the exact mixed-argument exception, selector
+    validation/round-trip contract, runtime state resolution, nested-field
+    ranges and deterministic phase integration, and host capture requirements.
+    Opened GAP-031 for the unenforced MIDI channel range and GAP-032 because the
+    built-in audio manager cannot populate selected-device or raw-ready state;
+    rechecked the other changed-source gaps without closing them. Re-resolved
+    the configured GitHub runtime to `23258ca3`, whose drift is README-only,
+    and recaptured the `shade-mcp`/`0.2.2`/`2025-11-25` handshake and all 18
+    unchanged tool schemas in one fresh session. Recaptured all eight worked
+    calls and reproduced the exact two-pass source graph. The returned
+    responsiveness fields do not belong to `synth/testPattern`, strengthening
+    GAP-024's stale-graph finding rather than validating that response.
   - 2026-08-31 — caught up through noisemaker `a4701daf` / shade-mcp
     `ba407982`: verified that Noisemaker's watched source roots are unchanged
     from the prior checkpoint, re-resolved the unpinned GitHub package to the

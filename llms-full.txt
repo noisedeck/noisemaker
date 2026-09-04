@@ -17,10 +17,10 @@ and WebGPU backends and must not be cited as evidence for an external port.
 
 Source snapshots used for this contract:
 
-- Noisemaker: `a4701daf8d102fb1ff86f9f7d9a7e4e59517aa5b`.
-- Shade MCP: `ba407982a78766f28fd4238d0a7f2e5f69bd8f7e`.
+- Noisemaker: `691eea1664b4359bba06141d0a489c795950f38d`.
+- Shade MCP: `23258ca3bbbec335abf0337b8fc85a2f21be950c`.
 - Shade MCP protocol: server name `shade-mcp`, server version `0.2.2`, protocol
-  `2025-06-18`, with 18 tools returned by `tools/list`.
+  `2025-11-25`, with 18 tools returned by `tools/list`.
 - The repository config runs `npx -y github:noisedeck/shade-mcp`; it does not pin
   that commit. Re-resolve and re-capture tool contracts before relying on this
   snapshot after dependency installation changes. See GAP-013.
@@ -33,7 +33,7 @@ Primary source roots:
 - backend behavior: `shaders/src/runtime/backends/webgl2.js` and `webgpu.js`.
 - repository validation policy: `shaders/tests/test-harness.js`.
 - Shade MCP source for the pinned snapshot:
-  `https://github.com/noisefactorllc/shade-mcp/tree/ba407982a78766f28fd4238d0a7f2e5f69bd8f7e/src`.
+  `https://github.com/noisefactorllc/shade-mcp/tree/23258ca3bbbec335abf0337b8fc85a2f21be950c/src`.
 
 ## Freshness and maintenance
 
@@ -80,6 +80,7 @@ Common structural types:
 ```ts
 type BackendName = "webgl2" | "webgpu"
 type NonNegativeInteger = number // semantic predicate: integer && value >= 0
+type PositiveInteger = number    // semantic predicate: integer && value >= 1
 type FiniteNumber = number       // semantic predicate: Number.isFinite(value)
 type Vec2 = [number, number]
 type Vec3 = [number, number, number]
@@ -267,10 +268,12 @@ ChainStmt        ::= Chain               (* validator requires terminal write *)
 Chain            ::= Call { Comments "." Comments ChainElement }
 ChainElement     ::= Call | WriteCall | Write3DCall | Subchain
 Call             ::= Identifier "(" [ ArgList ] ")"
-ArgList          ::= PositionalArgs | KeywordArgs
+ArgList          ::= PositionalArgs | KeywordArgs | ExternalInputArgs
 PositionalArgs   ::= Expr { "," Expr } [ "," ]
 KeywordArgs      ::= Identifier ":" Expr
                      { "," Identifier ":" Expr } [ "," ]
+ExternalInputArgs ::= ExternalInputArg { "," ExternalInputArg } [ "," ]
+ExternalInputArg ::= Expr | Identifier ":" Expr
 WriteCall        ::= "write" "(" WriteTarget ")"
 WriteTarget      ::= OutputRef | XyzRef | VelRef | RgbaRef | MeshRef | "none"
 Write3DCall      ::= "write3d" "(" (Identifier | OutputRef | VolRef) ","
@@ -358,7 +361,11 @@ See GAP-027.
 `Namespace` must already be registered and valid. Inline call namespaces such
 as `synth.noise()` are rejected; put the namespace in `search`, or use
 `from(namespace, call())` to override resolution for one call. Positional and
-keyword arguments cannot be mixed.
+keyword arguments cannot be mixed except inside the special `midi()` and
+`audio()` value calls. In those two calls they can appear in either order;
+positionals fill the still-unset positional fields densely, so a keyword does
+not consume its positional slot. `ExternalInputArgs` exists only for those two
+call names, not for registered effects or other special calls.
 
 `read(oN)` has two different legal roles:
 
@@ -382,27 +389,56 @@ Special value calls are transformed by the parser:
 
 ```ts
 osc(type = oscKind.sine, min = 0, max = 1, speed = 1, offset = 0, seed = 1)
-midi(channel, mode = midiMode.velocity, min = 0, max = 1, sensitivity = 1)
-audio(band, min = 0, max = 1)
+midi(channel, mode = midiMode.velocity, min = 0, max = 1, sensitivity = 1,
+     name?: string, id?: string)
+audio(band, min = 0, max = 1,
+      channel?: PositiveInteger, name?: string, id?: string)
 from(namespaceIdentifier, callExpression)
 ```
 
-For oscillators, MIDI, and audio, `min` and `max` are clamped to `[0, 1]` in the
-compiled automation object. `midi` requires `channel`; `audio` requires `band`.
-Only `osc` rejects unknown keyword names explicitly.
+`midi` requires `channel`; its `name` and `id` selectors are keyword-only,
+quoted, and nonempty, and `id` requires `name`. The parser accepts at most five
+MIDI positionals. `audio` requires `band`; `channel`, `name`, and `id` are
+keyword-only, a selected device requires both `name` and `channel`, and `id`
+requires `name`. The parser accepts at most three audio positionals. Both calls
+reject unknown keywords. Identity strings use JSON decoding so values emitted
+by `JSON.stringify()` round-trip; the decoder preserves unknown legacy escapes.
+
+`audioBand` values are `low=0`, `mid=1`, `high=2`, `vol=3`, and `raw=4`.
+`midiMode` values are `noteChange=0`, `gateNote=1`, `gateVelocity=2`,
+`triggerNote=3`, and `velocity=4`. `osc` has no nested `type`; `midi` has no
+nested `channel` or `mode`; and `audio` has no nested `band`, `channel`, or
+identity field. The automatable fields are `osc.min/max/speed/offset/seed`,
+`midi.min/max/sensitivity`, and `audio.min/max`. Literal `min` and `max` values
+are silently clamped to `[0,1]`. Nested automation is limited to eight levels;
+variable cycles and a ninth nested level produce `S001`. The compiled object
+retains named nested references so parse/compile/unparse preserves `let` uses.
+For the remaining scalar forms, oscillator numeric fields and MIDI
+`channel/min/max/sensitivity` also normalize booleans and resolvable numeric
+enum members; audio `min/max` accept only numbers or automation, and audio
+`channel` accepts only a numeric positive integer. `midiMode` and `audioBand`
+accept the named members or implemented numeric values listed above.
+`oscKind` accepts `sine=0`, `tri=1`, `saw=2`, `sawInv=3`, `square=4`, and
+`noise`/`noise1d=5`, or numeric values 0 through 5. Although the shared enum
+also declares `noise2d=6`, automation validation emits `S002` and falls back to
+`sine=0` for that member.
 
 Disallowed forms include: no `search`; multiple/late `search`; multiple
 `render`; non-output `render`; namespaced call syntax; mixed positional/keyword
-arguments; `.write()` inside an expression; missing/invalid write targets;
-empty subchains; a starter in a non-head position; a non-starter at a chain
-head; inline `.read`/`.read3d`; unquoted strings for most value types; and
-unknown registered-effect arguments. Unknown subchain metadata keys are the
-silent exception described above and in GAP-027.
+arguments outside `midi()`/`audio()`; `.write()` inside an expression;
+missing/invalid write targets; empty subchains; a starter in a non-head
+position; a non-starter at a chain head; inline `.read`/`.read3d`; unquoted
+strings for most value types; and unknown registered-effect arguments. Unknown
+subchain metadata keys are the silent exception described above and in
+GAP-027.
 
 Sources: `shaders/src/lang/lexer.js` - `lex()`;
 `shaders/src/lang/parser.js` - `parseProgram()`, `parseCall()`,
-`parseSubchainCall()`, `parsePrimary()`; `shaders/src/lang/validator.js` -
-`compileChainStatement()`, `processChain()`.
+`transformMidiInvocation()`, `transformAudioInvocation()`,
+`parseSubchainCall()`, `parsePrimary()`; `shaders/src/lang/stringLiterals.js` -
+`decodeJsonStringLiteralContent()`; `shaders/src/lang/validator.js` -
+`compileAutomationDescriptor()`, `compileChainStatement()`, `processChain()`;
+`shaders/src/lang/unparser.js` - automation formatters.
 
 ### Validate
 
@@ -825,14 +861,116 @@ Formal value contracts:
 | `string` | quoted string only for `text.text`, `text.font`, `text.justify`, `text.style`; matching choice identifier also accepted |
 | `palette` | numeric/general argument; expander additionally writes dependent palette uniforms already present on the pass |
 
+Numeric/global arguments can contain these compiled automation descriptors:
+
+```ts
+type AutomationValue = OscillatorValue | MidiValue | AudioValue
+
+type OscillatorValue = {
+  type: "Oscillator"
+  oscType: 0 | 1 | 2 | 3 | 4 | 5
+  min: number | AutomationValue
+  max: number | AutomationValue
+  speed: number | AutomationValue
+  offset: number | AutomationValue
+  seed: number | AutomationValue
+  _ast: object
+  _varRef?: string
+}
+
+type MidiValue = {
+  type: "Midi"
+  channel: number
+  mode: 0 | 1 | 2 | 3 | 4
+  min: number | AutomationValue
+  max: number | AutomationValue
+  sensitivity: number | AutomationValue
+  name?: string
+  id?: string
+  _ast: object
+  _varRef?: string
+}
+
+type AudioValue = {
+  type: "Audio"
+  band: 0 | 1 | 2 | 3 | 4 | undefined
+  min: number | AutomationValue
+  max: number | AutomationValue
+  channel?: PositiveInteger
+  name?: string
+  id?: string
+  _invalid: boolean
+  _ast: object
+  _varRef?: string
+}
+```
+
+Ordinary nested fields are evaluated at the parent's current normalized render
+time. Automation nested into oscillator `speed` is the exception: it is
+integrated across the interval from zero to that time, using an exact integral,
+a constant external snapshot, or quadrature according to its shape. In either
+case, a nested source's normalized result is mapped to the receiving field's
+runtime range: `min/max` use `[0,1]`, oscillator `speed` uses
+`[-20,20]`, oscillator `offset` uses `[-1,1]`, oscillator `seed` uses
+`[1,9999]`, and MIDI `sensitivity` uses `[0,10]`. Literal values for `speed`,
+`offset`, `seed`, and `sensitivity` are only required to be finite and are not
+clamped to those nested-source ranges. The outer automation result is finally
+mapped through the consuming uniform's finite `{min,max}` range when present.
+
+A nested oscillator `speed` is frequency modulation: runtime integrates the
+rate from zero to the requested normalized time so seeking and export do not
+depend on preceding frames. Literal oscillator fields use an exact closed-form
+integral where available. External MIDI/audio snapshots with literal fields are
+treated as constant across the interval; dynamic nested fields use bounded
+Gauss-Legendre quadrature. Runtime also guards cycles and depth, returning zero
+without a consuming range or the range's lower endpoint if an invalid recursive
+object bypasses the validator.
+
+`Pipeline.setMidiState()` and `setAudioState()` install the live state used by
+automation. `MidiState` keeps an aggregate 16-channel state plus isolated
+per-port states. Exact `id` selection is authoritative; a name-only selector
+must uniquely match a connected port; missing, disconnected, or ambiguous
+selection returns `min` rather than falling back to aggregate state. Incoming
+messages update both the originating port and aggregate state. Disconnect
+resets the isolated state but retains its disconnected identity for host UI.
+The validator currently finite-checks `midi.channel` but does not enforce an
+integer or the documented 1-16 range; `MidiState.getChannel()` silently falls
+back to channel 1 for an invalid value. See GAP-031.
+
+`AudioState` likewise holds aggregate analysis and a registry of device/channel
+states. Exact `id` is authoritative; name-only selection must be unique and
+must include a positive-integer channel. `setChannelValues()` clamps
+`low/mid/high/vol` to `[0,1]` and `raw` to `[-1,1]`. `audioBand.raw` returns
+`min` until `rawReady`, then maps the bipolar value to `[0,1]` before applying
+`min/max`. Missing, disconnected, ambiguous, out-of-range, or malformed
+selection returns `min`, with no aggregate fallback. `registerDevice()` creates
+one isolated state per declared channel. `disconnectDevice()` resets those
+states while preserving a disconnected inventory entry for host UI.
+
+`Pipeline.getAudioInputRequirements()` recursively inspects pass uniforms and
+returns `{needsLegacy,needsLegacyRaw,selected}`. Each selected entry is
+`{id:string|null,name:string,channel:number,needsRaw:boolean}`; duplicate
+identity/channel tuples are merged and `needsRaw` is ORed. Aggregate audio is
+reported by the two legacy flags. An invalid outer audio descriptor suppresses
+both its own request and traversal into nested fields. Effects tagged `audio`
+force `needsLegacy:true` for backward compatibility. The built-in
+`AudioInputManager`, however, populates only aggregate bands, spectrum, and
+waveform: it does not register selected devices or mark any aggregate/selected
+raw sample ready. A host must consume the requirements and populate `AudioState`
+itself for those authored forms. See GAP-032.
+
 `defaultFrom` exists in validator operator specs but is not copied by
 `registerEffectWithRuntime()` from `GlobalSpec`; effect definitions cannot use it
 through the normal loader without separate operator registration.
 
 Sources: `shaders/src/renderer/canvas.js` -
 `registerEffectWithRuntime()`; `shaders/src/lang/validator.js` - argument
-resolution; `shaders/src/runtime/expander.js` - compile-time defines and uniform
-mapping; `shaders/src/lang/enums.js` - `mergeIntoEnums()`;
+resolution and `compileAutomationDescriptor()`;
+`shaders/src/lang/unparser.js` - automation round-trip;
+`shaders/src/runtime/expander.js` - compile-time defines and uniform mapping;
+`shaders/src/runtime/pipeline.js` - `evaluateAutomation()`, external state, and
+`getAudioInputRequirements()`; `shaders/src/runtime/external-input.js` - state
+and input managers; `shaders/src/lang/enums.js` - `mergeIntoEnums()`;
 `demo/shaders/lib/demo-ui.js` - `_evaluateEnableCondition()`.
 
 ### Validate
@@ -848,6 +986,17 @@ Numeric input pass/fail is measurable:
   treating clamping as success.
 - An `int` test value in `testUniformResponsiveness` is rounded; normal DSL
   numeric validation does not round `int` arguments.
+
+For automation, require zero semantic errors, stable compile/unparse/recompile,
+and a finite resolved value at representative normalized times. Selected MIDI
+and audio tests must register at least two same-name inputs to exercise the
+ambiguous-name failure, verify exact IDs remain authoritative, disconnect the
+selected input, and assert the result returns to `min`. Raw audio tests must
+distinguish unavailable raw data from a real zero sample: both store `raw=0`,
+but only the latter has `rawReady===true` and therefore maps to the midpoint of
+`min/max`. Nesting tests must cover eight accepted levels, a rejected ninth
+level, a variable cycle, deterministic repeated seeks, and recursive audio
+capture requirements.
 
 Runtime responsiveness uses two rendered mean-RGB vectors. Define:
 
@@ -870,8 +1019,12 @@ Important: the tool's overall status is `ok` when **any** tested uniform passes,
 even if other entries are `name:fail`. A strict effect gate must require every
 `tested_uniforms` entry to end in `:pass`. See GAP-010.
 
-Sources: `shaders/src/lang/validator.js` - `clamp()` and numeric argument
-branch; Shade MCP `src/tools/browser/uniforms.ts` -
+Sources: `shaders/src/lang/validator.js` - `clamp()`, numeric arguments, and
+automation compilation; `shaders/src/runtime/external-input.js` - selected
+state; `shaders/src/runtime/pipeline.js` - automation evaluation and capture
+requirements; `shaders/tests/test_midi_audio_parser.js`,
+`test_external_input.js`, and `test_nested_automation.js`; Shade MCP
+`src/tools/browser/uniforms.ts` -
 `testUniformResponsiveness()`.
 
 ### Diagnose
@@ -879,9 +1032,10 @@ branch; Shade MCP `src/tools/browser/uniforms.ts` -
 Parameter-related semantic failures use `Diagnostic`:
 
 - `S001`: quoted string for a non-string type, invalid surface/volume/geometry,
-  unknown argument, unresolved enum, illegal string parameter, invalid function.
+  unknown argument, unresolved enum, illegal string parameter, invalid function,
+  automation cycle, or automation depth overflow.
 - `S002`: out-of-range value with `(got <v>, clamped to <c>)`, wrong value form,
-  or nonnumeric array element.
+  nonnumeric array element, or invalid audio channel.
 - `S003`: undefined variable, enum identifier, or inline choice.
 - `S007`: a deprecated parameter alias was rewritten.
 
@@ -903,7 +1057,13 @@ The output does not report the selected test value, baseline means, test means,
 or deltas, so a failing global cannot be quantitatively diagnosed from this
 tool alone. See GAP-011.
 
+MIDI's unenforced channel range emits no diagnostic; invalid values silently
+select channel 1 at runtime. The missing validation is GAP-031. Audio selected
+input and raw capture that the built-in manager cannot supply likewise has no
+runtime diagnostic; it simply evaluates to `min` under GAP-032.
+
 Sources: `shaders/src/lang/validator.js` - argument diagnostics;
+`shaders/src/runtime/external-input.js` - channel fallback and input manager;
 Shade MCP `src/tools/browser/uniforms.ts` - output paths.
 
 <!-- SURFACE:GRAPH -->
@@ -2762,13 +2922,14 @@ Sources: Shade MCP `src/tools/resolve-effects.ts`; all tool registration files;
 
 This instance is the repository's `synth/testPattern` effect. The three source
 blocks below are complete, not excerpts, and were re-audited at Noisemaker
-commit `a4701daf8d102fb1ff86f9f7d9a7e4e59517aa5b`. The MCP evidence below was
+commit `691eea1664b4359bba06141d0a489c795950f38d`. The MCP evidence below was
 freshly captured against that Noisemaker commit and Shade MCP commit
-`ba407982a78766f28fd4238d0a7f2e5f69bd8f7e`. Noisemaker's watched source roots
-did not change after the prior audit. Shade MCP's production SDK dependency
-bumps and version-packaging changes leave the cited handlers and browser
-harness byte-identical; they do not alter this single-output 2D effect or
-resolve GAP-024.
+`23258ca3bbbec335abf0337b8fc85a2f21be950c`. Noisemaker's watched source roots
+added selected MIDI/audio input and nested automation behavior, but did not
+change this effect, its shaders, compiler, or expander. Shade MCP changed only
+its README hero and image after the prior snapshot; the cited tool handlers and
+browser harness remain byte-identical. Those changes do not alter this
+single-output 2D effect or resolve GAP-024.
 MCP request JSON is shown in wire order. Each response is the JSON value decoded
 from the server's `content[0].text` field.
 
@@ -3282,22 +3443,22 @@ program expansion.
 
 <!-- WORKED:MCP-REQUESTS -->
 
-Initialization used protocol `2025-06-18`; the following eight calls then ran
-in a single server session. The response block is preserved literally. The two
-`compileEffect` responses are evidence of GAP-024, not accepted validation:
+Initialization negotiated protocol `2025-11-25`; the following eight calls
+then ran in a single server session. The response block is preserved literally.
+The two `compileEffect` responses are evidence of GAP-024, not accepted validation:
 WebGL2 returned three fallback-named passes and WebGPU returned one pass named
 `main`, while the exact DSL above compiles to two. None of these eight
 successful MCP results set `isError`.
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"checkEffectStructure","arguments":{"effect_id":"synth/testPattern"}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"compileEffect","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"compileEffect","arguments":{"effect_id":"synth/testPattern","backend":"webgpu"}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"renderEffectFrame","arguments":{"effect_id":"synth/testPattern","backend":"webgl2","warmup_frames":10,"capture_image":false,"resolution":[256,256]}}}
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"testUniformResponsiveness","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"testNoPassthrough","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"testPixelParity","arguments":{"effect_id":"synth/testPattern","epsilon":1,"seed":42}}}
-{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"benchmarkEffectFPS","arguments":{"effect_id":"synth/testPattern","backend":"webgl2","duration_seconds":1,"target_fps":30,"resolution":[256,256]}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"checkEffectStructure","arguments":{"effect_id":"synth/testPattern"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"compileEffect","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"compileEffect","arguments":{"effect_id":"synth/testPattern","backend":"webgpu"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"renderEffectFrame","arguments":{"effect_id":"synth/testPattern","backend":"webgl2","warmup_frames":10,"capture_image":false,"resolution":[256,256]}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"testUniformResponsiveness","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"testNoPassthrough","arguments":{"effect_id":"synth/testPattern","backend":"webgl2"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"testPixelParity","arguments":{"effect_id":"synth/testPattern","epsilon":1,"seed":42}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"benchmarkEffectFPS","arguments":{"effect_id":"synth/testPattern","backend":"webgl2","duration_seconds":1,"target_fps":30,"resolution":[256,256]}}}
 ```
 
 <!-- WORKED:MCP-RESPONSES -->
@@ -3309,10 +3470,10 @@ Responses, in the same order:
 {"effect_id":"synth/testPattern","status":"ok","passes":[{"id":"pass_0","status":"ok"},{"id":"pass_1","status":"ok"},{"id":"pass_2","status":"ok"}],"message":"Compiled successfully","backend":"webgl2"}
 {"effect_id":"synth/testPattern","status":"ok","passes":[{"id":"main","status":"ok"}],"message":"Compiled successfully","backend":"webgpu"}
 {"effect_id":"synth/testPattern","status":"ok","backend":"WebGL2","frame":{"image_uri":null,"width":90,"height":90},"metrics":{"mean_rgb":[0.49851924975320827,0.49851924975320827,0.49851924975320827],"mean_alpha":1,"std_rgb":[0.49999780737389904,0.49999780737389904,0.49999780737389904],"luma_variance":0.2499978073787063,"unique_sampled_colors":2,"is_all_zero":false,"is_all_transparent":false,"is_essentially_blank":false,"is_monochrome":false}}
-{"effect_id":"synth/testPattern","status":"ok","tested_uniforms":["gridSize:pass"],"details":"Uniforms affect output"}
+{"effect_id":"synth/testPattern","status":"ok","tested_uniforms":["rotation:pass","hueRange:pass","saturation:pass","brightness:pass","contrast:pass"],"details":"Uniforms affect output"}
 {"effect_id":"synth/testPattern","status":"skipped","isFilterEffect":false,"similarity":null,"details":"Not a filter effect"}
 {"effect_id":"synth/testPattern","status":"ok","maxDiff":0,"meanDiff":0,"mismatchCount":0,"mismatchPercent":0,"resolution":[1024,1024],"glslSolid":false,"wgslSolid":false,"glslVariance":[16256,16256,16256],"wgslVariance":[16256,16256,16256],"yFlipDetected":false,"yFlipCleanFlip":false,"yFlipMismatchPercent":70.9,"yFlipMeanDiff":180.79,"yFlipRatio":1,"issues":[],"details":"Pixel parity OK (maxDiff=0, meanDiff=0.00)"}
-{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":60.33,"meets_target":true,"stats":{"frame_count":60,"avg_frame_time_ms":16.58,"jitter_ms":2.67,"min_frame_time_ms":3.2,"max_frame_time_ms":29.8}}
+{"effect_id":"synth/testPattern","status":"ok","backend":"webgl2","achieved_fps":60.9,"meets_target":true,"stats":{"frame_count":61,"avg_frame_time_ms":16.42,"jitter_ms":3.52,"min_frame_time_ms":1.7,"max_frame_time_ms":32.6}}
 ```
 
 Falsifiable interpretation:
@@ -3329,10 +3490,12 @@ Falsifiable interpretation:
   machine-identify, the selected effect. There is no generic `>5` rendered-
   output requirement; that separate predicate belongs only to the filter
   modification tool.
-- Uniform report: threshold pass because the only tested mutable uniform is
-  `gridSize:pass`. `pattern` is a `choices` global and the tool intentionally
-  excludes choices. Effect and backend freshness remain indeterminate under
-  GAP-024.
+- Uniform report: **indeterminate and rejected**. The response claims
+  `rotation`, `hueRange`, `saturation`, `brightness`, and `contrast`, none of
+  which is a global in the source-complete `synth/testPattern` definition
+  above. Its apparent `ok` status is direct evidence that the browser tool
+  measured a stale or different graph under GAP-024; it does not validate any
+  worked-effect uniform.
 - Passthrough report: expected skip because the definition has no `inputTex`
   input and therefore is not a filter. Effect and backend freshness remain
   indeterminate under GAP-024.
@@ -3345,7 +3508,7 @@ Falsifiable interpretation:
   This call does not establish that either buffer came from the worked effect or
   its named backend. See GAP-024.
 - Performance report: threshold pass because
-  `achieved_fps = 60.33 >= target_fps = 30` and the returned `meets_target`
+  `achieved_fps = 60.9 >= target_fps = 30` and the returned `meets_target`
   agrees. The `backend` field is the configured session value; effect and
   actual-backend freshness remain indeterminate under GAP-024.
 
@@ -3363,7 +3526,7 @@ The requested frame resolution was `[256,256]`, but the captured canvas was
 
 Sources: Shade MCP tool implementations and harness helpers cited in the tool
 contract surface; the literal transcript above was produced by that server
-against the pinned pair Noisemaker `a4701daf` and Shade MCP `ba407982` named at
+against the pinned pair Noisemaker `691eea16` and Shade MCP `23258ca3` named at
 the start of this section.
 
 ## Surfaces x capabilities traceability matrix
@@ -3374,9 +3537,9 @@ Every cell points to an executable contract or an explicitly identified gap.
 
 | Surface | Introspect | Act | Validate | Diagnose |
 |---|---|---|---|---|
-| DSL program | `Token`, `ParsedProgram`, `CompiledProgram`, registry keys, `CompiledGraph` | Complete EBNF plus call/read/write/render contracts | parse/unparse/compile and render metric predicates | `SyntaxError`, `Diagnostic`, `CompilationFailure`; GAP-001/002/023/027 |
+| DSL program | `Token`, `ParsedProgram`, `CompiledProgram`, registry keys, `CompiledGraph` | Complete EBNF plus call/read/write/render and nested-automation contracts | parse/unparse/compile and render metric predicates | `SyntaxError`, `Diagnostic`, `CompilationFailure`; GAP-001/002/023/027/031 |
 | Effect definition | `Effect` fields, registry/manifest, `checkEffectStructure` | `EffectDefinition` typed grammar | validator and structure scan; browser backend identity is GAP-024 | exact validator messages, structural arrays, backend errors; GAP-003/007/024/026 |
-| Parameters and globals | `effect.globals`, transformed `uniforms`, registry params | `GlobalSpec` typed grammar and enum/binding rules | compile reflection and numeric response deltas | transform errors, type/range/identity blind spots; GAP-010/011/024 |
+| Parameters and globals | `effect.globals`, transformed `uniforms`, registry params, MIDI/audio state and capture requirements | `GlobalSpec`, nested automation, and selected-input contracts | compile reflection, state-selection predicates, and numeric response deltas | transform errors, type/range/identity/capture blind spots; GAP-010/011/024/031/032 |
 | Passes and render graph | `Effect.passes`, `CompiledGraph.passes`, `CompiledGraph.textures`, `CompiledGraph.allocations` | `PassSpec` typed grammar, sampler/output binding rules, and MRT byte adaptation | graph analysis and per-pass compile | unresolved inputs and backend compile/resource failures; GAP-005/006/030 |
 | Textures and surface resources | texture specs, `DeviceCapabilities`, and runtime surface dimensions/formats | `TextureSpec` typed grammar, exact accepted policies, and volume atlas clamp | allocation existence, size/format/limit inspection, render metrics | unsupported/missing surface failures, silent fields, and stale reused formats; GAP-004/030 |
 | Compatibility and mutation | compiled AST, `listSteps`, `getCompatibleReplacements` | typed `replaceEffect` contract | candidate precheck; post-mutation browser identity is GAP-024 | compatibility and transform errors; GAP-008/022/024 |
@@ -3428,7 +3591,9 @@ contract without an engine/tool change.
 | GAP-028 | Frame export has no terminal result or cancellation counter for accepted frames discarded by reconfigure or close | `shaders/src/runtime/frame-export.js` - `configure()`, `close()`, `_destroySlots()`, `_release()` | accepted work can lose its callback without incrementing `completed`, `failed`, or `dropped`, so a host cannot reconcile or selectively retry canceled frames |
 | GAP-029 | Effect-index invalidation does not supersede an in-flight rebuild | Shade `src/knowledge/shared-instances.ts` leaves `building` intact in `invalidateSharedEffectIndex()` and shares it with the next reader | a list/search immediately after a library change or `generateManifest` can retain a pre-change index for the next five-second TTL; retry after that TTL when freshness matters |
 | GAP-030 | MRT budget adaptation does not invalidate same-size backend textures whose format no longer matches the graph | `shaders/src/runtime/pipeline.js` - `applyMrtFormatBudget()` mutates `graph.textures`, while `createSurfaces()` and `recreateTextures()` reuse global and regular textures by dimensions (plus depth for 3D) without comparing format | after resize or hot recompilation the graph can report `rgba16f` while the backend still allocates `rgba32f`; byte-budget validation must inspect backend records and an unsupported FBO can still be created |
+| GAP-031 | MIDI automation does not enforce the documented integer channel range 1-16 | `shaders/src/lang/validator.js` - `compileAutomationDescriptor()` finite-checks `midi.channel` without integer/min/max predicates; `shaders/src/runtime/external-input.js` - `MidiState.getChannel()` falls back to channel 1 | a fractional, zero, or out-of-range MIDI channel compiles without a diagnostic and reads channel 1, so a caller cannot distinguish invalid authoring from an intentional channel-1 binding |
+| GAP-032 | The built-in browser audio manager cannot populate selected-device channels or any `rawReady` value | `shaders/src/runtime/external-input.js` - `AudioInputManager.enable()` opens one default stream and `_updateLoop()` updates only aggregate spectrum, waveform, bands, and volume; selected/raw setters exist only on `AudioState` | `audio(...,name:,channel:)` and `audioBand.raw` evaluate to `min` under the shipped manager unless the host separately consumes `getAudioInputRequirements()` and populates `AudioState`, with no runtime warning when that integration is absent |
 
 The matrix has 9 surfaces x 4 capabilities = 36 filled cells. Cells that rely
-on behavior absent from code link to the 29 gaps above rather than substituting
+on behavior absent from code link to the 31 gaps above rather than substituting
 an invented contract.
