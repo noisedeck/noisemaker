@@ -29,11 +29,11 @@ void main() {
     // in the corner whenever the canvas size lagged the render size, and made
     // every tile of a large-format export repeat the text.
     //
-    // Untiled, `st` is gl_FragCoord.xy / resolution, which is what the WGSL
-    // variant computes from textureDimensions(inputTex) — so the two agree.
+    // Untiled, `st` is gl_FragCoord.xy / resolution, matching the WGSL
+    // variant's global output-space coordinate.
     // Tiled, this places the text once across the whole image rather than once
     // per tile; the host still rasterizes the canvas at tile size, so its scale
-    // is approximate there. WGSL has no tile uniforms and still repeats.
+    // is approximate there.
     vec4 text = texture(textTex, st);
 
     // Text presence from canvas alpha

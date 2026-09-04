@@ -12,8 +12,13 @@
  * program — reverted the text to the family's first cut.
  */
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { unparse } from '../src/lang/unparser.js'
 import Text from '../effects/filter/text/definition.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const textDef = new Text()
 
@@ -58,5 +63,19 @@ const withUnknown = unparse(compiled, { 1: { style: STYLE, notAParam: 'x' } }, {
 assert.ok(withUnknown.includes(STYLE), 'style should survive alongside an unknown key')
 assert.ok(!withUnknown.includes('notAParam'), 'undeclared keys must still be dropped')
 console.log('✓ undeclared keys are still dropped, so the guard is real')
+
+const textShaderDir = path.resolve(__dirname, '../effects/filter/text')
+for (const [backend, extension] of [['glsl', 'glsl'], ['wgsl', 'wgsl']]) {
+    const source = fs.readFileSync(path.join(textShaderDir, backend, `text.${extension}`), 'utf8')
+    assert.match(source, /tileOffset/, `${backend} text shader must consume the tile offset`)
+    assert.match(source, /fullResolution/, `${backend} text shader must consume the full output size`)
+}
+
+const wgsl = fs.readFileSync(path.join(textShaderDir, 'wgsl/text.wgsl'), 'utf8')
+assert.match(wgsl, /position\.xy\s*\+\s*tileOffset/,
+    'WGSL text coordinates must include the tile offset')
+assert.match(wgsl, /textureSample\(textTex,\s*texSampler,\s*globalUV\)/,
+    'WGSL must sample the full-canvas text texture in global output space')
+console.log('✓ both text shaders place the overlay in global tiled-output space')
 
 console.log('PASS test_text_style_roundtrip')

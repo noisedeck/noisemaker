@@ -8,14 +8,19 @@
 @group(0) @binding(2) var textTex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> matteColor: vec3<f32>;
 @group(0) @binding(4) var<uniform> matteOpacity: f32;
+@group(0) @binding(5) var<uniform> tileOffset: vec2<f32>;
+@group(0) @binding(6) var<uniform> fullResolution: vec2<f32>;
 
 @fragment
 fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let size = max(textureDimensions(inputTex, 0), vec2<u32>(1, 1));
-    let uv = position.xy / vec2<f32>(size);
+    let localUV = position.xy / vec2<f32>(size);
+    var fullSize = vec2<f32>(size);
+    if (fullResolution.x > 0.0) { fullSize = fullResolution; }
+    let globalUV = (position.xy + tileOffset) / fullSize;
 
-    let inputColor = textureSample(inputTex, texSampler, uv);
-    let text = textureSample(textTex, texSampler, uv);
+    let inputColor = textureSample(inputTex, texSampler, localUV);
+    let text = textureSample(textTex, texSampler, globalUV);
 
     // Text presence from canvas alpha (1.0 where text exists, 0.0 elsewhere)
     let textPresence = text.a;
