@@ -20,7 +20,7 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## I18n strings
 
-- **Checkpoint:** noisemaker `c38316a1` / noisedeck `114d64f7` (2026-08-31)
+- **Checkpoint:** noisemaker `691eea16` / noisedeck `0f3917fb` (2026-09-03)
 - **Scope:** two translation surfaces:
   - Noisemaker effect catalogs
     `shaders/effects/strings.{de,es,fr,it,ja,pt}.json`. The English catalog
@@ -57,6 +57,13 @@ work, verify it, then update the checkpoint and append a log line.
      non-empty string values plus every placeholder, plural leaf, and markup tag
      from the English catalog.
 - **Log:**
+  - 2026-09-03 — caught up through noisemaker `691eea16` / noisedeck
+    `0f3917fb`: verified that the updated Cell description is present in all six
+    translated effect catalogs and that Noisedeck's insert-zone, MIDI-device,
+    and audio-device strings are translated in all six UI locales. Revalidated
+    exact key order, non-empty values, placeholders, markup, generated-English
+    drift, runtime fallback, and async locale selection; no catalog edits were
+    required in this pass.
   - 2026-08-31 — caught up through noisemaker `c38316a1` / noisedeck
     `114d64f7`: Noisemaker's generated English catalog and all six translated
     effect catalogs remained complete. Noisedeck's translations for unloaded
