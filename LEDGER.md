@@ -95,13 +95,15 @@ work, verify it, then update the checkpoint and append a log line.
 
 ## Large-format tiling
 
-- **Checkpoint:** noisemaker `45a34489` / noisedeck `75262325` (preview
-  branch), 2026-07-10
+- **Checkpoint:** noisemaker `ee523ab9` / noisedeck `539ee089` (preview
+  branch), 2026-09-04
 - **Scope:** every effect must be classified for Noisedeck's large-format
   (tiled print) export. Tile-aware effects consume the global `tileOffset`
-  and `fullResolution` uniforms in both GLSL and WGSL (packed WGSL layouts
-  may need explicit `uniformLayout` slots). Effects that cannot render
-  tiled belong in one of noisedeck's deny-lists:
+  and `fullResolution` uniforms in both GLSL and WGSL when their coordinates
+  depend on the full canvas (packed WGSL layouts may need explicit
+  `uniformLayout` slots); purely local kernels are also safe when their
+  maximum source footprint fits inside the 1024 px overlap. Effects that
+  cannot render tiled belong in one of noisedeck's deny-lists:
   `app/js/utils/hasStatefulEffects.js` (state textures cannot re-render at
   print resolution) or `app/js/utils/hasUpscaleOnlyEffects.js` (would seam
   at the 1024 px tile overlap). An effect in none of the three states
@@ -112,6 +114,18 @@ work, verify it, then update the checkpoint and append a log line.
   deny-list. Verify tile-aware claims with noisedeck's seam harness
   (`tests/large-format-seams/`).
 - **Log:**
+  - 2026-09-04 — caught up through noisemaker `ee523ab9` / noisedeck
+    `539ee089`: audited 25 added artistic filters and seven changed effect
+    definitions. Classified 23 additions as tile-safe, routed `spinBlur` and
+    `pondRipples` to the upscale-only path, and kept `extrude` tiled with a
+    pinned 768 px maximum source-dependency bound. Repaired `text` WGSL to
+    sample its external overlay in global output space and added a behavioral
+    WebGPU full-frame/offset-tile regression. Stopped Noisedeck's animation
+    loop during controlled captures to eliminate a WebGPU harness race and
+    consolidated the diagnostic deny-list onto the production-synced mirror.
+    Revalidated 124 harness/classifier tests, 31 cross-backend tile checks,
+    all 203 shader structures, and the full shader-language suite; no stateful
+    routing changes were required.
   - 2026-07-10 — post-ship catch-up: parallax tile-clamped + synth WGSL
     ports (noisemaker `45a34489`); effects added since ship routed into
     deny-lists, seam-harness hardening (noisedeck `a12ee01e`..`75262325`).
