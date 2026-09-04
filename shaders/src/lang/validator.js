@@ -43,6 +43,13 @@ const STARTER_OPS = new Set()
 const SURFACE_PASSTHROUGH_CALLS = new Set(['read'])
 const validatorHooks = {}
 
+const AUTOMATION_FIELDS = {
+    Oscillator: ['oscType', 'min', 'max', 'speed', 'offset', 'seed'],
+    Midi: ['channel', 'mode', 'min', 'max', 'sensitivity', 'name', 'id'],
+    Audio: ['band', 'min', 'max', 'channel', 'name', 'id']
+}
+const MAX_AUTOMATION_DEPTH = 8
+
 export function registerValidatorHook(name, hook) {
     if (typeof name === 'string' && typeof hook === 'function') {
         validatorHooks[name] = hook
@@ -300,22 +307,43 @@ export function validate(ast) {
         return !!(starter && starter.index === 0)
     }
 
-    function substitute(node) {
+    const reportedAutomationCycles = new Set()
+
+    function substitute(node, resolving = []) {
         if (!node) return node
+        if (node.type === 'Ident' && resolving.includes(node.name)) {
+            const cycleStart = resolving.indexOf(node.name)
+            const cycle = [...resolving.slice(cycleStart), node.name]
+            const cycleKey = cycle.join(' -> ')
+            if (!reportedAutomationCycles.has(cycleKey)) {
+                reportedAutomationCycles.add(cycleKey)
+                pushDiag('S001', node, `Automation cycle detected: ${cycleKey}`)
+            }
+            return {type:'Number', value:0, _automationInvalid:true}
+        }
         if (node.type === 'Ident' && symbols.has(node.name)) {
-            const result = substitute(clone(symbols.get(node.name)))
+            const result = substitute(clone(symbols.get(node.name)), [...resolving, node.name])
             if (result && typeof result === 'object') {
                 result._varRef = node.name
             }
             return result
         }
+        if (AUTOMATION_FIELDS[node.type]) {
+            const mapped = {...node}
+            for (const field of AUTOMATION_FIELDS[node.type]) {
+                if (node[field] !== undefined) {
+                    mapped[field] = substitute(node[field], resolving)
+                }
+            }
+            return mapped
+        }
         if (node.type === 'Chain') {
             const mapped = node.chain.map(c => {
-                const mappedArgs = c.args.map(a => substitute(a))
+                const mappedArgs = c.args.map(a => substitute(a, resolving))
                 let mappedCall = {type:'Call', name:c.name, args:mappedArgs}
                 if (c.kwargs) {
                     const kw = {}
-                    for (const [k,v] of Object.entries(c.kwargs)) kw[k] = substitute(v)
+                    for (const [k,v] of Object.entries(c.kwargs)) kw[k] = substitute(v, resolving)
                     mappedCall.kwargs = kw
                 }
                 return resolveCall(mappedCall)
@@ -323,11 +351,11 @@ export function validate(ast) {
             return {type:'Chain', chain:mapped}
         }
         if (node.type === 'Call') {
-            const mappedArgs = node.args.map(a => substitute(a))
+            const mappedArgs = node.args.map(a => substitute(a, resolving))
             let mappedCall = {type:'Call', name:node.name, args:mappedArgs}
             if (node.kwargs) {
                 const kw = {}
-                for (const [k,v] of Object.entries(node.kwargs)) kw[k] = substitute(v)
+                for (const [k,v] of Object.entries(node.kwargs)) kw[k] = substitute(v, resolving)
                 mappedCall.kwargs = kw
             }
             return resolveCall(mappedCall)
@@ -337,7 +365,7 @@ export function validate(ast) {
 
     if (Array.isArray(ast.vars)) {
         for (const v of ast.vars) {
-            const expr = substitute(clone(v.expr))
+            const expr = substitute(clone(v.expr), [v.name])
             if (expr && isStarterChain(expr)) {
                 const head = firstChainCall(expr)
                 if (head) pushDiag('S006', head)
@@ -379,6 +407,193 @@ export function validate(ast) {
             if (resolved !== undefined) return resolved
         }
         return expr
+    }
+
+    function resolveAutomationEnum(node, enumName, fallback, validValues, descriptorName, fieldName) {
+        let resolved
+        if (node?.type === 'Number') {
+            resolved = node.value
+        } else if (node?.type === 'Member') {
+            resolved = resolveEnum(node.path)
+        } else if (node?.type === 'Ident') {
+            resolved = resolveEnum([enumName, node.name])
+        }
+        if (resolved && resolved.type === 'Number') resolved = resolved.value
+        if (typeof resolved === 'number' && validValues.has(resolved)) return resolved
+
+        if (node?.type === 'String') {
+            pushDiag('S001', node,
+                `String literal not allowed for ${descriptorName}() ${fieldName}`)
+        } else {
+            const message = descriptorName === 'audio' && fieldName === 'band'
+                ? `audio() band must resolve to an integer from 0 to 4 (got ${resolved})`
+                : `${descriptorName}() ${fieldName} must resolve to a supported enum value`
+            pushDiag('S002', node, message)
+        }
+        return fallback
+    }
+
+    function resolveAutomationString(node, descriptorName, fieldName) {
+        if (!node) return undefined
+        const allowlistKey = `${descriptorName}.${fieldName}`
+        if (!ALLOWED_STRING_PARAMS.has(allowlistKey)) {
+            pushDiag('S001', node, `String parameter '${allowlistKey}' is not allowlisted`)
+            return undefined
+        }
+        if (node.type !== 'String') {
+            pushDiag('S001', node, `${descriptorName}() ${fieldName} requires a quoted string`)
+            return undefined
+        }
+        if (node.value.length === 0) {
+            pushDiag('S001', node, `${descriptorName}() ${fieldName} must not be empty`)
+            return undefined
+        }
+        return decodeJsonStringLiteralContent(node.value)
+    }
+
+    function resolveAutomationNumber(node, descriptorName, fieldName, fallback, options = {}, depth = 0) {
+        if (!node) return fallback
+        const reject = (code, message) => {
+            options.onInvalid?.()
+            pushDiag(code, node, message)
+            return fallback
+        }
+        let value
+        if (node.type === 'Number') {
+            value = node.value
+        } else if (options.allowBoolean && node.type === 'Boolean') {
+            value = node.value ? 1 : 0
+        } else if (node.type === 'Member' && options.allowMember !== false) {
+            const resolved = resolveEnum(node.path)
+            value = resolved && resolved.type === 'Number' ? resolved.value : resolved
+        } else if (AUTOMATION_FIELDS[node.type] && options.allowAutomation) {
+            const compiled = compileAutomationDescriptor(node, depth + 1)
+            if (compiled?._invalid) options.onInvalid?.()
+            return compiled
+        } else if (node.type === 'String') {
+            return reject('S001', `String literal not allowed for ${descriptorName}() ${fieldName}`)
+        } else if (node.type === 'Ident') {
+            return reject('S003',
+                `Undefined automation source '${node.name}' for ${descriptorName}() ${fieldName}`)
+        } else {
+            return reject('S002',
+                `${descriptorName}() ${fieldName} must be a number${options.allowAutomation ? ' or automation source' : ''}`)
+        }
+
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            return reject('S002', `${descriptorName}() ${fieldName} must resolve to a finite number`)
+        }
+        if (options.integer && !Number.isInteger(value)) {
+            return reject('S002', `${descriptorName}() ${fieldName} must be an integer`)
+        }
+        if (options.min !== undefined && value < options.min) {
+            return reject('S002',
+                `${descriptorName}() ${fieldName} must be at least ${options.min} (got ${value})`)
+        }
+        if (options.max !== undefined && value > options.max) {
+            return reject('S002',
+                `${descriptorName}() ${fieldName} must be at most ${options.max} (got ${value})`)
+        }
+        if (options.clamp01) return Math.max(0, Math.min(1, value))
+        return value
+    }
+
+    function compileAutomationDescriptor(node, depth = 0) {
+        if (depth > MAX_AUTOMATION_DEPTH) {
+            pushDiag('S001', node,
+                `Automation nesting exceeds the maximum depth of ${MAX_AUTOMATION_DEPTH}`)
+            return 0
+        }
+
+        if (node.type === 'Oscillator') {
+            const value = {
+                type: 'Oscillator',
+                oscType: resolveAutomationEnum(
+                    node.oscType, 'oscKind', 0, new Set([0, 1, 2, 3, 4, 5]), 'osc', 'type'),
+                min: resolveAutomationNumber(node.min, 'osc', 'min', 0,
+                    {allowBoolean:true, allowAutomation:true, clamp01:true}, depth),
+                max: resolveAutomationNumber(node.max, 'osc', 'max', 1,
+                    {allowBoolean:true, allowAutomation:true, clamp01:true}, depth),
+                speed: resolveAutomationNumber(node.speed, 'osc', 'speed', 1,
+                    {allowBoolean:true, allowAutomation:true}, depth),
+                offset: resolveAutomationNumber(node.offset, 'osc', 'offset', 0,
+                    {allowBoolean:true, allowAutomation:true}, depth),
+                seed: resolveAutomationNumber(node.seed, 'osc', 'seed', 1,
+                    {allowBoolean:true, allowAutomation:true}, depth),
+                _ast: node,
+                ...(node._varRef && { _varRef: node._varRef })
+            }
+            return value
+        }
+
+        if (node.type === 'Midi') {
+            return {
+                type: 'Midi',
+                channel: resolveAutomationNumber(node.channel, 'midi', 'channel', 1,
+                    {allowBoolean:true}, depth),
+                mode: resolveAutomationEnum(
+                    node.mode, 'midiMode', 4, new Set([0, 1, 2, 3, 4]), 'midi', 'mode'),
+                min: resolveAutomationNumber(node.min, 'midi', 'min', 0,
+                    {allowBoolean:true, allowAutomation:true, clamp01:true}, depth),
+                max: resolveAutomationNumber(node.max, 'midi', 'max', 1,
+                    {allowBoolean:true, allowAutomation:true, clamp01:true}, depth),
+                sensitivity: resolveAutomationNumber(node.sensitivity, 'midi', 'sensitivity', 1,
+                    {allowBoolean:true, allowAutomation:true}, depth),
+                name: resolveAutomationString(node.name, 'midi', 'name'),
+                id: resolveAutomationString(node.id, 'midi', 'id'),
+                _ast: node,
+                ...(node._varRef && { _varRef: node._varRef })
+            }
+        }
+
+        if (node.type === 'Audio') {
+            const band = resolveAutomationEnum(
+                node.band, 'audioBand', undefined, new Set([0, 1, 2, 3, 4]), 'audio', 'band')
+            let validMin = true
+            let validMax = true
+            const min = resolveAutomationNumber(node.min, 'audio', 'min', 0,
+                {allowAutomation:true, allowMember:false, clamp01:true,
+                    onInvalid:() => { validMin = false }}, depth)
+            const max = resolveAutomationNumber(node.max, 'audio', 'max', 1,
+                {allowAutomation:true, allowMember:false, clamp01:true,
+                    onInvalid:() => { validMax = false }}, depth)
+            let channel
+            let validChannel = true
+            if (node.channel !== undefined) {
+                if (node.channel.type === 'Number' &&
+                    Number.isInteger(node.channel.value) && node.channel.value >= 1) {
+                    channel = node.channel.value
+                } else {
+                    validChannel = false
+                    if (node.channel.type === 'String') {
+                        pushDiag('S001', node.channel,
+                            'String literal not allowed for audio() channel')
+                    } else {
+                        pushDiag('S002', node.channel,
+                            `audio() channel must be a positive integer (got ${node.channel.value ?? node.channel.name ?? node.channel.type})`)
+                    }
+                }
+            }
+            const name = resolveAutomationString(node.name, 'audio', 'name')
+            const id = resolveAutomationString(node.id, 'audio', 'id')
+            const validName = node.name === undefined || name !== undefined
+            const validId = node.id === undefined || id !== undefined
+            return {
+                type: 'Audio',
+                band,
+                min,
+                max,
+                channel,
+                name,
+                id,
+                _invalid: band === undefined || !validMin || !validMax ||
+                    !validName || !validId || !validChannel,
+                _ast: node,
+                ...(node._varRef && { _varRef: node._varRef })
+            }
+        }
+
+        return 0
     }
 
     function evalCondition(node) {
@@ -1090,229 +1305,11 @@ export function validate(ast) {
                                 value = def.default
                             }
                         } else if (node && node.type === 'Oscillator') {
-                            // Oscillator node - resolve the oscType enum value and pass through
-                            // The oscillator will be evaluated at runtime by the pipeline
-                            const oscTypeNode = node.oscType
-                            let oscTypeValue = 0
-                            if (oscTypeNode && oscTypeNode.type === 'Member') {
-                                const resolved = resolveEnum(oscTypeNode.path)
-                                if (typeof resolved === 'number') {
-                                    oscTypeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    oscTypeValue = resolved.value
-                                }
-                            } else if (oscTypeNode && oscTypeNode.type === 'Ident') {
-                                // Try resolving as oscKind.{name}
-                                const resolved = resolveEnum(['oscKind', oscTypeNode.name])
-                                if (typeof resolved === 'number') {
-                                    oscTypeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    oscTypeValue = resolved.value
-                                }
-                            }
-                            // Resolve min, max, speed, offset, seed from the oscillator node
-                            const resolveOscParam = (param) => {
-                                if (!param) return undefined
-                                if (param.type === 'Number') return param.value
-                                if (param.type === 'Boolean') return param.value ? 1 : 0
-                                if (param.type === 'Member') {
-                                    const r = resolveEnum(param.path)
-                                    if (typeof r === 'number') return r
-                                    if (r && r.type === 'Number') return r.value
-                                }
-                                return undefined
-                            }
-                            value = {
-                                type: 'Oscillator',
-                                oscType: oscTypeValue,
-                                min: Math.max(0, Math.min(1, resolveOscParam(node.min) ?? 0)),
-                                max: Math.max(0, Math.min(1, resolveOscParam(node.max) ?? 1)),
-                                speed: resolveOscParam(node.speed) ?? 1,
-                                offset: resolveOscParam(node.offset) ?? 0,
-                                seed: resolveOscParam(node.seed) ?? 1,
-                                // Keep original AST for unparsing
-                                _ast: node,
-                                // Preserve variable reference marker for unparser round-trip
-                                ...(node._varRef && { _varRef: node._varRef })
-                            }
+                            value = compileAutomationDescriptor(node)
                         } else if (node && node.type === 'Midi') {
-                            // MIDI node - resolve the mode enum value and pass through
-                            // The MIDI value will be evaluated at runtime by the pipeline
-                            const modeNode = node.mode
-                            let modeValue = 4 // default: velocity
-                            if (modeNode && modeNode.type === 'Member') {
-                                const resolved = resolveEnum(modeNode.path)
-                                if (typeof resolved === 'number') {
-                                    modeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    modeValue = resolved.value
-                                }
-                            } else if (modeNode && modeNode.type === 'Ident') {
-                                // Try resolving as midiMode.{name}
-                                const resolved = resolveEnum(['midiMode', modeNode.name])
-                                if (typeof resolved === 'number') {
-                                    modeValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    modeValue = resolved.value
-                                }
-                            } else if (modeNode && modeNode.type === 'Number' &&
-                                Number.isInteger(modeNode.value) && modeNode.value >= 0 && modeNode.value <= 4) {
-                                modeValue = modeNode.value
-                            }
-                            // Resolve channel, min, max, sensitivity from the MIDI node
-                            const resolveMidiParam = (param) => {
-                                if (!param) return undefined
-                                if (param.type === 'Number') return param.value
-                                if (param.type === 'Boolean') return param.value ? 1 : 0
-                                if (param.type === 'Member') {
-                                    const r = resolveEnum(param.path)
-                                    if (typeof r === 'number') return r
-                                    if (r && r.type === 'Number') return r.value
-                                }
-                                return undefined
-                            }
-                            const resolveMidiStringParam = (param, paramName) => {
-                                if (!param) return undefined
-                                const allowlistKey = `midi.${paramName}`
-                                if (!ALLOWED_STRING_PARAMS.has(allowlistKey)) {
-                                    pushDiag('S001', param, `String parameter '${allowlistKey}' is not allowlisted`)
-                                    return undefined
-                                }
-                                if (param.type !== 'String') {
-                                    pushDiag('S001', param, `midi() ${paramName} requires a quoted string`)
-                                    return undefined
-                                }
-                                if (param.value.length === 0) {
-                                    pushDiag('S001', param, `midi() ${paramName} must not be empty`)
-                                    return undefined
-                                }
-                                // The lexer intentionally retains escape sequences for
-                                // general DSL strings. MIDI identity is populated from
-                                // host API strings and emitted with JSON escaping, so
-                                // decode only these two explicitly allowlisted fields.
-                                return decodeJsonStringLiteralContent(param.value)
-                            }
-                            value = {
-                                type: 'Midi',
-                                channel: resolveMidiParam(node.channel) ?? 1,
-                                mode: modeValue,
-                                min: Math.max(0, Math.min(1, resolveMidiParam(node.min) ?? 0)),
-                                max: Math.max(0, Math.min(1, resolveMidiParam(node.max) ?? 1)),
-                                sensitivity: resolveMidiParam(node.sensitivity) ?? 1,
-                                name: resolveMidiStringParam(node.name, 'name'),
-                                id: resolveMidiStringParam(node.id, 'id'),
-                                // Keep original AST for unparsing
-                                _ast: node,
-                                // Preserve variable reference marker for unparser round-trip
-                                ...(node._varRef && { _varRef: node._varRef })
-                            }
+                            value = compileAutomationDescriptor(node)
                         } else if (node && node.type === 'Audio') {
-                            // Audio node - resolve the band enum value and pass through
-                            // The audio value will be evaluated at runtime by the pipeline
-                            const bandNode = node.band
-                            let bandValue
-                            if (bandNode && bandNode.type === 'Number') {
-                                bandValue = bandNode.value
-                            } else if (bandNode && bandNode.type === 'Member') {
-                                const resolved = resolveEnum(bandNode.path)
-                                if (typeof resolved === 'number') {
-                                    bandValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    bandValue = resolved.value
-                                }
-                            } else if (bandNode && bandNode.type === 'Ident') {
-                                // Try resolving as audioBand.{name}
-                                const resolved = resolveEnum(['audioBand', bandNode.name])
-                                if (typeof resolved === 'number') {
-                                    bandValue = resolved
-                                } else if (resolved && resolved.type === 'Number') {
-                                    bandValue = resolved.value
-                                }
-                            }
-                            const validBand = Number.isInteger(bandValue) && bandValue >= 0 && bandValue <= 4
-                            if (!validBand) {
-                                if (bandNode?.type === 'String') {
-                                    pushDiag('S001', bandNode,
-                                        "String literal not allowed for audio() band; strings are only valid for audio.name and audio.id")
-                                } else {
-                                    pushDiag('S002', bandNode,
-                                        `audio() band must resolve to an integer from 0 to 4 (got ${bandValue})`)
-                                }
-                            }
-                            // Audio's numeric fields accept only numeric DSL values.
-                            // In particular, booleans must not become channel 1 and
-                            // strings must not bypass the narrow name/id allowlist.
-                            const resolveAudioNumber = (param, paramName) => {
-                                if (!param) return undefined
-                                if (param.type === 'Number') return param.value
-                                if (param.type === 'String') {
-                                    pushDiag('S001', param,
-                                        `String literal not allowed for audio() ${paramName}; strings are only valid for audio.name and audio.id`)
-                                } else {
-                                    pushDiag('S002', param, `audio() ${paramName} must be a number`)
-                                }
-                                return undefined
-                            }
-                            const resolveAudioStringParam = (param, paramName) => {
-                                if (!param) return undefined
-                                const allowlistKey = `audio.${paramName}`
-                                if (!ALLOWED_STRING_PARAMS.has(allowlistKey)) {
-                                    pushDiag('S001', param, `String parameter '${allowlistKey}' is not allowlisted`)
-                                    return undefined
-                                }
-                                if (param.type !== 'String') {
-                                    pushDiag('S001', param, `audio() ${paramName} requires a quoted string`)
-                                    return undefined
-                                }
-                                if (param.value.length === 0) {
-                                    pushDiag('S001', param, `audio() ${paramName} must not be empty`)
-                                    return undefined
-                                }
-                                return decodeJsonStringLiteralContent(param.value)
-                            }
-                            const minValue = resolveAudioNumber(node.min, 'min')
-                            const maxValue = resolveAudioNumber(node.max, 'max')
-                            const validMin = node.min === undefined || minValue !== undefined
-                            const validMax = node.max === undefined || maxValue !== undefined
-                            let channelValue
-                            let validChannel = true
-                            if (node.channel !== undefined) {
-                                if (node.channel.type === 'Number') {
-                                    channelValue = node.channel.value
-                                    validChannel = Number.isInteger(channelValue) && channelValue >= 1
-                                    if (!validChannel) {
-                                        pushDiag('S002', node.channel,
-                                            `audio() channel must be a positive integer (got ${channelValue})`)
-                                    }
-                                } else {
-                                    validChannel = false
-                                    if (node.channel.type === 'String') {
-                                        pushDiag('S001', node.channel,
-                                            'String literal not allowed for audio() channel; strings are only valid for audio.name and audio.id')
-                                    } else {
-                                        pushDiag('S002', node.channel,
-                                            'audio() channel must be a positive integer')
-                                    }
-                                }
-                            }
-                            const nameValue = resolveAudioStringParam(node.name, 'name')
-                            const idValue = resolveAudioStringParam(node.id, 'id')
-                            const validName = node.name === undefined || nameValue !== undefined
-                            const validId = node.id === undefined || idValue !== undefined
-                            value = {
-                                type: 'Audio',
-                                band: validBand ? bandValue : undefined,
-                                min: Math.max(0, Math.min(1, minValue ?? 0)),
-                                max: Math.max(0, Math.min(1, maxValue ?? 1)),
-                                channel: validChannel ? channelValue : undefined,
-                                name: nameValue,
-                                id: idValue,
-                                _invalid: !(validBand && validMin && validMax && validChannel && validName && validId),
-                                // Keep original AST for unparsing
-                                _ast: node,
-                                // Preserve variable reference marker for unparser round-trip
-                                ...(node._varRef && { _varRef: node._varRef })
-                            }
+                            value = compileAutomationDescriptor(node)
                         } else if (node && node.type === 'Member') {
                             const cur = resolveEnum(node.path)
                             if (typeof cur === 'number') {

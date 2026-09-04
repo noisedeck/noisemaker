@@ -60,6 +60,9 @@ const audioBandNames = ['low', 'mid', 'high', 'vol', 'raw']
  * @returns {string} DSL representation of the oscillator
  */
 function formatOscillator(osc) {
+    if (osc._ast?.type === 'Oscillator') {
+        return formatLetExpr(osc._ast)
+    }
     const typeName = oscKindNames[osc.oscType] || 'sine'
     const parts = [`type: oscKind.${typeName}`]
 
@@ -89,6 +92,9 @@ function formatOscillator(osc) {
  * @returns {string} DSL representation of the midi() call
  */
 function formatMidi(midi) {
+    if (midi._ast?.type === 'Midi') {
+        return formatLetExpr(midi._ast)
+    }
     const parts = [`channel: ${midi.channel}`]
 
     // Only include non-default values
@@ -121,7 +127,7 @@ function formatMidi(midi) {
  * @returns {string} DSL representation of the audio() call
  */
 function formatAudio(audio) {
-    if (audio._invalid && audio._ast?.type === 'Audio') {
+    if (audio._ast?.type === 'Audio') {
         return formatLetExpr(audio._ast)
     }
     const bandName = audioBandNames[audio.band] || 'low'
@@ -683,6 +689,7 @@ function unparseChain(chain, options = {}) {
  */
 function formatLetExpr(expr, options = {}) {
     if (!expr) return 'null'
+    if (expr._varRef) return expr._varRef
 
     // Helper: extract numeric value from an AST Number node
     const numVal = (node) => (node && node.type === 'Number') ? node.value : undefined
@@ -705,11 +712,16 @@ function formatLetExpr(expr, options = {}) {
                 typeStr = `oscKind.${expr.oscType.path[expr.oscType.path.length - 1]}`
             } else if (expr.oscType?.type === 'Ident') {
                 typeStr = expr.oscType.name  // variable reference, no prefix
+            } else if (expr.oscType?.type === 'Number' &&
+                Number.isInteger(expr.oscType.value) && expr.oscType.value >= 0 && expr.oscType.value <= 5) {
+                typeStr = `oscKind.${oscKindNames[expr.oscType.value]}`
             }
             const parts = [`type: ${typeStr}`]
             const pushIfNonDefault = (name, node, def) => {
+                if (!node) return
                 const v = numVal(node)
-                if (v !== undefined && v !== def) parts.push(`${name}: ${v}`)
+                if (v !== undefined && v === def) return
+                parts.push(`${name}: ${formatLetExpr(node, options)}`)
             }
             pushIfNonDefault('min', expr.min, 0)
             pushIfNonDefault('max', expr.max, 1)
@@ -721,8 +733,7 @@ function formatLetExpr(expr, options = {}) {
         case 'Midi': {
             // Raw AST Midi: sub-fields are AST nodes
             const parts = []
-            const ch = numVal(expr.channel)
-            if (ch !== undefined) parts.push(`channel: ${ch}`)
+            if (expr.channel) parts.push(`channel: ${formatLetExpr(expr.channel, options)}`)
             let modeStr = null
             if (expr.mode?.type === 'Member' && expr.mode.path) {
                 const name = expr.mode.path[expr.mode.path.length - 1]
@@ -734,8 +745,10 @@ function formatLetExpr(expr, options = {}) {
             }
             if (modeStr) parts.push(`mode: ${modeStr}`)
             const pushMidiField = (name, node, def) => {
+                if (!node) return
                 const v = numVal(node)
-                if (v !== undefined && v !== def) parts.push(`${name}: ${v}`)
+                if (v !== undefined && v === def) return
+                parts.push(`${name}: ${formatLetExpr(node, options)}`)
             }
             pushMidiField('min', expr.min, 0)
             pushMidiField('max', expr.max, 1)

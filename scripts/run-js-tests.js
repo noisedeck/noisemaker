@@ -42,6 +42,7 @@ const testEntries = [
   { file: 'shaders/tests/test_audio.js', parity: false },
   { file: 'shaders/tests/test_external_input.js', parity: false },
   { file: 'shaders/tests/test_midi_audio_parser.js', parity: false },
+  { file: 'shaders/tests/test_nested_automation.js', parity: false },
   { file: 'shaders/tests/test-let-roundtrip.mjs', parity: false },
   { file: 'shaders/tests/test_gl_error_gating.js', parity: false },
   { file: 'shaders/tests/test_cube_driver.js', parity: false },

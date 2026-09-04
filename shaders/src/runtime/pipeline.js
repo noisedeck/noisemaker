@@ -90,6 +90,187 @@ function oscNoise(t, seed) {
     return (n1 + n2) / 2
 }
 
+const AUTOMATION_FIELD_RANGES = {
+    unit: { min: 0, max: 1 },
+    oscillatorSpeed: { min: -20, max: 20 },
+    oscillatorOffset: { min: -1, max: 1 },
+    oscillatorSeed: { min: 1, max: 9999 },
+    midiSensitivity: { min: 0, max: 10 }
+}
+const MAX_AUTOMATION_DEPTH = 8
+
+// 16-point Gauss-Legendre nodes and weights on [-1, 1]. Fixed quadrature keeps
+// noise and deeply nested rate modulation deterministic and seekable.
+const INTEGRATION_NODES = [
+    -0.9894009349916499, -0.9445750230732326, -0.8656312023878318, -0.755404408355003,
+    -0.6178762444026438, -0.4580167776572274, -0.2816035507792589, -0.0950125098376374,
+    0.0950125098376374, 0.2816035507792589, 0.4580167776572274, 0.6178762444026438,
+    0.755404408355003, 0.8656312023878318, 0.9445750230732326, 0.9894009349916499
+]
+const INTEGRATION_WEIGHTS = [
+    0.0271524594117541, 0.0622535239386479, 0.0951585116824928, 0.1246289712555339,
+    0.1495959888165767, 0.1691565193950025, 0.1826034150449236, 0.1894506104550685,
+    0.1894506104550685, 0.1826034150449236, 0.1691565193950025, 0.1495959888165767,
+    0.1246289712555339, 0.0951585116824928, 0.0622535239386479, 0.0271524594117541
+]
+const INTEGRATION_RULES = [
+    { nodes: INTEGRATION_NODES, weights: INTEGRATION_WEIGHTS },
+    {
+        nodes: [
+            -0.9602898564975363, -0.7966664774136267, -0.525532409916329,
+            -0.1834346424956498, 0.1834346424956498, 0.525532409916329,
+            0.7966664774136267, 0.9602898564975363
+        ],
+        weights: [
+            0.1012285362903763, 0.2223810344533745, 0.3137066458778873,
+            0.362683783378362, 0.362683783378362, 0.3137066458778873,
+            0.2223810344533745, 0.1012285362903763
+        ]
+    },
+    {
+        nodes: [-0.8611363115940526, -0.3399810435848563, 0.3399810435848563, 0.8611363115940526],
+        weights: [0.3478548451374538, 0.6521451548625461, 0.6521451548625461, 0.3478548451374538]
+    },
+    {
+        nodes: [-0.5773502691896257, 0.5773502691896257],
+        weights: [1, 1]
+    }
+]
+
+function isAutomationValue(value) {
+    return value && typeof value === 'object' &&
+        (value.type === 'Oscillator' || value.type === 'Midi' || value.type === 'Audio' ||
+         value._ast?.type === 'Oscillator' || value._ast?.type === 'Midi' || value._ast?.type === 'Audio')
+}
+
+function scaleAutomationValue(value, range) {
+    if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return value
+    return range.min + value * (range.max - range.min)
+}
+
+function resolveAutomationField(value, normalizedTime, range, externalState, depth, stack, fallback, context) {
+    if (isAutomationValue(value)) {
+        return evaluateAutomation(value, normalizedTime, range, externalState, depth + 1, stack, context)
+    }
+    return Number.isFinite(value) ? value : fallback
+}
+
+function hasDynamicAutomationFields(config) {
+    const fields = config.type === 'Midi' || config._ast?.type === 'Midi'
+        ? ['min', 'max', 'sensitivity']
+        : ['min', 'max']
+    return fields.some(field => isAutomationValue(config[field]))
+}
+
+function oscPrimitive(type, x) {
+    const whole = Math.floor(x)
+    const fraction = x - whole
+    switch (type) {
+        case 0:
+            return x * 0.5 - Math.sin(x * TAU) / (2 * TAU)
+        case 1: {
+            const partial = fraction < 0.5
+                ? fraction * fraction
+                : 2 * fraction - fraction * fraction - 0.5
+            return whole * 0.5 + partial
+        }
+        case 2:
+            return whole * 0.5 + fraction * fraction * 0.5
+        case 3:
+            return x - (whole * 0.5 + fraction * fraction * 0.5)
+        case 4:
+            return whole * 0.5 + Math.max(0, fraction - 0.5)
+        default:
+            return null
+    }
+}
+
+function canIntegrateOscillatorExactly(config) {
+    return config.oscType >= 0 && config.oscType <= 4 &&
+        [config.min, config.max, config.speed, config.offset, config.seed].every(Number.isFinite)
+}
+
+function integrateSimpleOscillator(config, normalizedTime) {
+    const { oscType, min, max, speed, offset } = config
+    if (speed === 0) {
+        return evaluateOscillator(config, 0, null, 0, new Set()) * normalizedTime
+    }
+    const start = oscPrimitive(oscType, offset)
+    const end = oscPrimitive(oscType, offset + speed * normalizedTime)
+    const rawIntegral = (end - start) / speed
+    return min * normalizedTime + (max - min) * rawIntegral
+}
+
+function integrateAutomation(config, normalizedTime, range, externalState, depth, stack, context) {
+    let integral
+    if ((config.type === 'Oscillator' || config._ast?.type === 'Oscillator') &&
+        canIntegrateOscillatorExactly(config)) {
+        integral = integrateSimpleOscillator(config, normalizedTime)
+    } else if ((config.type === 'Midi' || config.type === 'Audio' ||
+        config._ast?.type === 'Midi' || config._ast?.type === 'Audio') &&
+        !hasDynamicAutomationFields(config)) {
+        // External inputs expose the current snapshot rather than a history.
+        // Treat that snapshot as constant across the requested interval.
+        integral = evaluateAutomation(
+            config, normalizedTime, null, externalState, depth + 1, stack, context) * normalizedTime
+    } else {
+        // Decrease the quadrature order as rate modulators nest. This bounds an
+        // eight-level graph to thousands, rather than millions, of evaluations
+        // while retaining the highest precision at the user-visible output.
+        const rule = INTEGRATION_RULES[Math.min(depth, INTEGRATION_RULES.length - 1)]
+        const midpoint = normalizedTime * 0.5
+        const halfWidth = normalizedTime * 0.5
+        let sum = 0
+        for (let i = 0; i < rule.nodes.length; i++) {
+            const sampleTime = midpoint + halfWidth * rule.nodes[i]
+            sum += rule.weights[i] * evaluateAutomation(
+                config, sampleTime, null, externalState, depth + 1, stack, context)
+        }
+        integral = halfWidth * sum
+    }
+
+    if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max)) return integral
+    return range.min * normalizedTime + integral * (range.max - range.min)
+}
+
+function evaluateAutomation(config, normalizedTime, range, externalState, depth = 0, stack = new Set(),
+    context = { wallTime: Date.now() }) {
+    if (!isAutomationValue(config) || depth > MAX_AUTOMATION_DEPTH || stack.has(config)) {
+        return scaleAutomationValue(0, range)
+    }
+
+    stack.add(config)
+    let value
+    try {
+        if (config.type === 'Oscillator' || config._ast?.type === 'Oscillator') {
+            value = evaluateOscillator(config, normalizedTime, externalState, depth, stack, context)
+        } else if (config.type === 'Midi' || config._ast?.type === 'Midi') {
+            const midiState = externalState?.midi?.getPortState
+                ? externalState.midi.getPortState(config)
+                : externalState?.midi
+            const min = resolveAutomationField(
+                config.min, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 0, context)
+            const max = resolveAutomationField(
+                config.max, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 1, context)
+            const sensitivity = resolveAutomationField(
+                config.sensitivity, normalizedTime, AUTOMATION_FIELD_RANGES.midiSensitivity,
+                externalState, depth, stack, 1, context)
+            value = evaluateMidi(config, midiState, context.wallTime, min, max, sensitivity)
+        } else if (config._invalid) {
+            value = Number.isFinite(config.min) ? config.min : 0
+        } else {
+            const min = resolveAutomationField(
+                config.min, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 0, context)
+            const max = resolveAutomationField(
+                config.max, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 1, context)
+            value = evaluateAudio(config, externalState?.audio, min, max)
+        }
+    } finally {
+        stack.delete(config)
+    }
+    return scaleAutomationValue(value, range)
+}
+
 /**
  * Evaluate an oscillator value based on current time and animation duration.
  *
@@ -103,11 +284,25 @@ function oscNoise(t, seed) {
  * @param {number} normalizedTime - Time normalized to animation duration (0..1)
  * @returns {number} The evaluated oscillator value
  */
-function evaluateOscillator(osc, normalizedTime) {
-    const { oscType, min, max, speed, offset, seed } = osc
+function evaluateOscillator(osc, normalizedTime, externalState, depth = 0, stack = new Set(), context) {
+    const { oscType } = osc
+    const min = resolveAutomationField(
+        osc.min, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 0, context)
+    const max = resolveAutomationField(
+        osc.max, normalizedTime, AUTOMATION_FIELD_RANGES.unit, externalState, depth, stack, 1, context)
+    const offset = resolveAutomationField(
+        osc.offset, normalizedTime, AUTOMATION_FIELD_RANGES.oscillatorOffset, externalState, depth, stack, 0, context)
+    const seed = resolveAutomationField(
+        osc.seed, normalizedTime, AUTOMATION_FIELD_RANGES.oscillatorSeed, externalState, depth, stack, 1, context)
 
-    // Apply speed and offset
-    const t = normalizedTime * speed + offset
+    // A modulated rate is frequency modulation, so phase is the integral of
+    // rate. Literal rates keep the existing closed form exactly.
+    const phase = isAutomationValue(osc.speed)
+        ? integrateAutomation(
+            osc.speed, normalizedTime, AUTOMATION_FIELD_RANGES.oscillatorSpeed,
+            externalState, depth, stack, context)
+        : normalizedTime * (Number.isFinite(osc.speed) ? osc.speed : 1)
+    const t = phase + offset
 
     // Get raw oscillator value (0..1)
     let value
@@ -145,11 +340,12 @@ function evaluateOscillator(osc, normalizedTime) {
  * @param {number} currentTime - Current time (Date.now())
  * @returns {number} The evaluated value in min..max range
  */
-function evaluateMidi(config, midiState, currentTime) {
-    if (!midiState) return config.min
+function evaluateMidi(config, midiState, currentTime, min = config.min, max = config.max,
+    sensitivity = config.sensitivity) {
+    if (!midiState) return min
 
     const channel = midiState.getChannel(config.channel)
-    const { mode, min, max, sensitivity } = config
+    const { mode } = config
 
     let rawValue = 0
 
@@ -212,11 +408,11 @@ function evaluateMidi(config, midiState, currentTime) {
  * @param {import('./external-input.js').AudioState} audioState - Current audio state
  * @returns {number} The evaluated value in min..max range
  */
-function evaluateAudio(config, audioState) {
-    if (config._invalid) return config.min
-    if (!audioState) return config.min
+function evaluateAudio(config, audioState, min = config.min, max = config.max) {
+    if (config._invalid) return min
+    if (!audioState) return min
 
-    const { band, min, max } = config
+    const { band } = config
     const hasDeviceSelector = !!(config.name || config.id || config.channel !== undefined)
     const selectedState = hasDeviceSelector
         ? audioState.getDeviceChannelState?.(config)
@@ -610,6 +806,11 @@ export class Pipeline {
                 const hasValidBand = value._invalid !== true &&
                     Number.isInteger(value.band) && value.band >= 0 && value.band <= 4
                 if (!hasValidBand) return
+
+                // Valid Audio descriptors can delegate their numeric bounds to
+                // other sources, which may introduce additional capture needs.
+                visit(value.min)
+                visit(value.max)
 
                 if (typeof value.name === 'string' && value.name.length > 0 &&
                     Number.isInteger(value.channel) && value.channel >= 1) {
@@ -1188,9 +1389,7 @@ export class Pipeline {
      * @returns {boolean} True if this is an automation config
      */
     isAutomationConfig(value) {
-        return value && typeof value === 'object' &&
-            (value.type === 'Oscillator' || value.type === 'Midi' || value.type === 'Audio' ||
-             value._ast?.type === 'Oscillator' || value._ast?.type === 'Midi' || value._ast?.type === 'Audio')
+        return isAutomationValue(value)
     }
 
     /**
@@ -1712,31 +1911,11 @@ export class Pipeline {
      * @returns {any} The resolved value
      */
     resolveUniformValue(value, time, paramSpec) {
-        if (!value || typeof value !== 'object') return value
-
-        let pct
-
-        // Check if this is an oscillator configuration
-        // Note: `time` is already normalized 0-1 from CanvasRenderer
-        if (value.type === 'Oscillator' || value._ast?.type === 'Oscillator') {
-            pct = evaluateOscillator(value, time)
-        } else if (value.type === 'Midi' || value._ast?.type === 'Midi') {
-            // Uses Date.now() for trigger falloff timing (real-time evaluation)
-            const midiState = this.externalState.midi?.getPortState
-                ? this.externalState.midi.getPortState(value)
-                : this.externalState.midi
-            pct = evaluateMidi(value, midiState, Date.now())
-        } else if (value.type === 'Audio' || value._ast?.type === 'Audio') {
-            pct = evaluateAudio(value, this.externalState.audio)
-        } else {
-            return value
-        }
-
-        // Scale percentage by consumer parameter range
-        if (paramSpec) {
-            return paramSpec.min + pct * (paramSpec.max - paramSpec.min)
-        }
-        return pct
+        if (!isAutomationValue(value)) return value
+        // `time` is already normalized 0..1 by CanvasRenderer. Recursive
+        // evaluation uses the same absolute time, so seeking and export remain
+        // independent of frame order.
+        return evaluateAutomation(value, time, paramSpec, this.externalState)
     }
 
     /**
