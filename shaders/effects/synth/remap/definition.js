@@ -4,14 +4,13 @@ import { Effect } from '../../../src/runtime/effect.js'
  * synth/remap — Polygon-zone router.
  *
  * Renders up to eight polygonal zones, each routed to one engine surface
- * (any of o0..o7, written by an upstream effect). Companion to the Remap
- * web app at https://remap.noisedeck.app — the app produces a portable
- * JSON describing the zones, which fills the per-zone vertex uniforms
- * here. Each zone declares its source via a `zoneN_tex` surface input,
+ * (any of o0..o7, written by an upstream effect). Noisedeck's canvas editor
+ * and portable Remap map imports fill the per-zone vertex uniforms here.
+ * Each zone declares its source via a `zoneN_tex` surface input,
  * wired in DSL: `remap(zone0_tex: read(o0), zone1_tex: read(o3))`.
  *
  * Zone vertices are packed two per vec4 (xy = vert n, zw = vert n+1) for
- * eight zones × eight vertex pairs. Zones with vertexCount < 3 or with
+ * eight zones × 32 vertex pairs. Zones with vertexCount < 3 or with
  * zoneN_tex unwired (default "none") are skipped, and pixels falling
  * outside every active zone show the background color.
  *
@@ -118,7 +117,7 @@ export default new Effect({
   },
 
   // Demo program — proves the effect compiles. Users populate real
-  // zones via the Remap app's loader UI in noisedeck.
+  // zones via canvas editing or portable map import in Noisedeck.
   defaultProgram: "search synth\n\nremap(bgColor: #336699, bgAlpha: 1)\n  .write(o0)",
 
   passes: [
@@ -182,6 +181,7 @@ function makeZoneGlobals() {
                     label: `verts ${pair * 2}–${pair * 2 + 1}`,
                     control: 'slider',
                     hidden: true,
+                    format: 'vector',
                     category: cat
                 }
             }

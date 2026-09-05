@@ -1,22 +1,22 @@
 # synth/remap
 
-Polygon-zone router that pairs with the Remap zone-editor app.
+Polygon-zone router with live canvas editing in Noisedeck.
 
 ## Overview
 
 Each pixel is tested against up to eight polygon zones. The first zone that contains the pixel decides which engine surface is sampled. Pixels outside every active zone — and pixels in zones whose source isn't wired — show the background color. Each zone has its own alpha and an edge smoothing factor blends adjacent zones smoothly.
 
-This effect is the rendering counterpart to the [Remap web app](https://remap.noisedeck.app), which produces a portable JSON describing the zones. Apply the parameters via `applyStepParameterValues`, then wire each zone's source surface in DSL with `zoneN_tex: read(oN)`.
+In Noisedeck, edit zones directly over the live canvas from the Remap effect. Existing `.remap.json` maps can be imported, and the effect exports the same portable version 1 format.
 
 ## Workflow
 
-1. Open the [Remap app](https://remap.noisedeck.app) and paint your zones on the canvas.
-2. From the Export view's **Effect params** tab, copy the parameter object.
-3. In Noisemaker, drop a `synth/remap` effect into your composition.
-4. In your DSL, wire each zone's source: `remap(zone0_tex: read(o0), zone2_tex: read(o5), ...).write(o7)`.
-5. Apply the polygon parameters via the renderer: `applyStepParameterValues({ step_N: params })`.
+1. Add Remap to your Noisedeck composition and choose **edit zones**.
+2. Choose **add zone**, then click points on the live canvas. Click the first point or press Enter to finish; Escape cancels an unfinished shape.
+3. Assign each zone a source using its source control. The mapped image updates as you drag vertices. Click an edge midpoint to insert a vertex; right-click a vertex to remove it.
+4. Set zone names, outline colors, and opacity in the effect controls.
+5. Choose **export remap config** to save the portable map, or **import remap config** to load an existing map.
 
-The shape parameters (`zoneN_count`, `zoneN_vP`) are hidden from the UI because they're meant to be loaded as a batch from the Remap app, not edited by hand. The visible controls are background, alpha, smoothing, and per-zone alpha.
+The canvas editor manages the hidden shape parameters (`zoneN_count`, `zoneN_vP`). Runtime integrations can still apply these parameters through `applyStepParameterValues({ step_N: params })` and wire source surfaces in DSL with `zoneN_tex: read(oN)`. Existing maps and hexadecimal vertex literals remain valid.
 
 ## Parameters
 
@@ -30,12 +30,12 @@ The shape parameters (`zoneN_count`, `zoneN_vP`) are hidden from the UI because 
 For each zone:
 - **Zone N source** (`zoneN_tex`): the engine surface to sample. Wire in DSL with `zoneN_tex: read(oN)`. When unwired (default `"none"`), the zone is skipped.
 - **Alpha**: per-zone opacity.
-- **Vertices** (hidden): vertex count, populated by the loader.
-- **verts P–P+1** (hidden): packed `vec4` holding two vertices, populated by the loader.
+- **Vertices** (hidden): vertex count, managed by canvas editing or map import.
+- **verts P–P+1** (hidden): packed `vec4` holding two vertices, managed by canvas editing or map import.
 
 ## Coordinate space
 
-Vertices are normalized: `(0, 0)` is top-left and `(1, 1)` is bottom-right. The GLSL backend flips the y axis internally so a polygon defined by the Remap app draws in the same orientation it was painted on either backend.
+Vertices are normalized: `(0, 0)` is top-left and `(1, 1)` is bottom-right. The GLSL backend flips the y axis internally so polygons match the canvas editor's orientation on either backend.
 
 ## Limits
 

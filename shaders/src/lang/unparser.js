@@ -166,6 +166,32 @@ function formatEnumName(name) {
 }
 
 /**
+ * Format a finite number without rounding and without exponent notation,
+ * which is not part of the DSL's numeric literal grammar.
+ */
+function formatLosslessNumber(value) {
+    const text = String(value)
+    if (!/[eE]/.test(text)) return text
+
+    const [coefficient, exponentText] = text.toLowerCase().split('e')
+    const exponent = Number(exponentText)
+    const negative = coefficient.startsWith('-')
+    const unsigned = negative ? coefficient.slice(1) : coefficient
+    const [integerPart, fractionPart = ''] = unsigned.split('.')
+    const digits = integerPart + fractionPart
+    const decimalIndex = integerPart.length + exponent
+    const sign = negative ? '-' : ''
+
+    if (decimalIndex <= 0) {
+        return `${sign}0.${'0'.repeat(-decimalIndex)}${digits}`
+    }
+    if (decimalIndex >= digits.length) {
+        return `${sign}${digits}${'0'.repeat(decimalIndex - digits.length)}`
+    }
+    return `${sign}${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`
+}
+
+/**
  * Format a value for DSL output
  * @param {any} value - The value to format
  * @param {object} spec - Optional parameter spec for type hints
@@ -187,6 +213,15 @@ function formatValue(value, spec, options = {}, sourceForm) {
 
     if (value === null || value === undefined) {
         return 'null'
+    }
+
+    const isLosslessVector = spec?.type === 'vec4'
+        && spec?.ui?.format === 'vector'
+        && (Array.isArray(value) || ArrayBuffer.isView(value))
+        && value.length === 4
+        && Array.from(value).every(Number.isFinite)
+    if (isLosslessVector) {
+        return `[${Array.from(value).map(formatLosslessNumber).join(', ')}]`
     }
 
     // Round-trip array literal source form: when the validator tagged an
