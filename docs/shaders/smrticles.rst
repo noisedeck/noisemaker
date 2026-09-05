@@ -16,7 +16,7 @@ Smart Particles
 
 *Whatever you'd like*
 
-Noisemaker's shader pipeline includes common architecture for GPU-accelerated agent-based particle simulations. It provides a unified framework for initializing, simulating, and rendering perhaps millions of particles with shared state management and composable behaviors.
+Noisemaker's shader pipeline provides common architecture for GPU-accelerated particle simulations based on agents. It can initialize, simulate, and render perhaps millions of particles. These particles share state management and composable behaviors.
 
 .. raw:: html
 
@@ -98,11 +98,11 @@ Traditional particle systems duplicate substantial boilerplate code across effec
 - Trail accumulation and decay
 - Point-sprite rendering and blending
 
-SMRTicles factors this common infrastructure into two **wrapper effects** (``pointsEmit`` and ``pointsRender``) that sandwich effect-specific **behavior middleware**. This architecture achieves:
+SMRTicles places effect-specific **behavior middleware** between two **wrapper effects**: ``pointsEmit`` and ``pointsRender``. The wrappers provide the common infrastructure. This architecture achieves:
 
 1. **Code Reduction**: ~40% less shader code per effect
 2. **Consistency**: All effects share the same deposit/blend approach
-3. **Composability**: Mix and match behaviors in a single pipeline
+3. **Composability**: Combine behaviors in a single pipeline
 4. **Maintainability**: Bug fixes propagate to all particle effects
 
 ----
@@ -170,7 +170,7 @@ SMRTicles compositions use method chaining in the Polymorphic DSL:
 State Textures
 --------------
 
-SMRTicles uses three shared global textures for agent state, created by ``pointsEmit`` and consumed by all downstream effects:
+The ``pointsEmit`` effect creates three shared global textures for agent state. All downstream effects consume them:
 
 .. list-table::
    :header-rows: 1
@@ -192,7 +192,7 @@ SMRTicles uses three shared global textures for agent state, created by ``points
 State Texture Sizing
 ^^^^^^^^^^^^^^^^^^^^
 
-Agent count is controlled by the ``stateSize`` parameter, which sets the dimensions of the state textures. Total agents = stateSize × stateSize.
+The ``stateSize`` parameter controls agent count by setting the dimensions of the state textures. Total agents = stateSize × stateSize.
 
 .. list-table::
    :header-rows: 1
@@ -250,7 +250,7 @@ pointsEmit
 
 **Namespace:** ``render``
 
-**Purpose:** Initialize and maintain agent state. Runs every frame to handle respawns.
+**Purpose:** Initialize and maintain agent state. The effect runs every frame to handle respawns.
 
 **Key Parameters:**
 
@@ -357,8 +357,8 @@ All behavior effects live in the ``points`` namespace and follow a consistent pa
 
 1. Read ``global_xyz``, ``global_vel``, ``global_rgba`` from pipeline
 2. Apply effect-specific logic
-3. Write updated state back (MRT output to same textures)
-4. Passthrough ``inputTex`` to ``outputTex`` for 2D chain continuity
+3. Write updated state to the same textures through MRT output
+4. Pass ``inputTex`` unchanged to ``outputTex`` for 2D chain continuity
 
 Available Behaviors
 ^^^^^^^^^^^^^^^^^^^
@@ -525,7 +525,7 @@ To create a new SMRTicles behavior:
 
 3. **Implement shaders**: Create ``glsl/agent.glsl`` and ``wgsl/agent.wgsl`` with your behavior logic.
 
-4. **Test**: Use the MCP tools to verify compilation and rendering:
+4. **Test**: Use the MCP tools to check compilation and rendering:
 
 .. code-block:: bash
 

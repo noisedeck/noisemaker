@@ -1,6 +1,15 @@
 # Noisemaker
 
-Noisemaker is an open source shader framework for humans and coding agents building expressive, extensible visual tools in the browser. It supports WebGL2 and WebGPU, a high-level Polymorphic DSL, declarative effect definitions, portable effect packages, external media/audio/MIDI inputs, and CDN-distributed shader bundles.
+Noisemaker is an open source shader framework for humans and coding agents.
+Use it to build expressive, extensible visual tools in the browser.
+It supports:
+
+- WebGL2 and WebGPU.
+- The high-level Polymorphic DSL.
+- Declarative effect definitions.
+- Portable effect packages.
+- External media/audio/MIDI inputs.
+- Shader bundles distributed through a CDN.
 
 Use this file as the short public map. For a fuller agent-oriented overview, read `/llms-full.txt`.
 
@@ -38,4 +47,9 @@ Use this file as the short public map. For a fuller agent-oriented overview, rea
 - Effects should use internal textures for private state. User surfaces `o0` through `o7` belong to the composition graph.
 - Custom integrations can use `registerNamespace()` and the `user` namespace.
 - Portable effects use `definition.json`, `help.md`, GLSL, WGSL, and the Noisemaker DSL.
-- Validate generated shader work by compiling, rendering, checking metrics, and testing WebGL2/WebGPU parity when both backends matter.
+- Validate generated shader work:
+
+  1. Compile the shaders.
+  2. Render the output.
+  3. Check the metrics.
+  4. Test WebGL2/WebGPU parity when both backends matter.

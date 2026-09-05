@@ -1,7 +1,7 @@
 JavaScript API
 ==============
 
-Noisemaker includes a vanilla JavaScript port that runs in modern browsers. The JavaScript implementation strives to maintain visual parity with the Python version, sharing the same presets, algorithms, and RNG behavior.
+Noisemaker includes a vanilla JavaScript port that runs in modern browsers. The JavaScript implementation strives to maintain visual parity with the Python version. Both share the same presets, algorithms, and RNG behavior.
 
 Overview
 --------
@@ -42,9 +42,8 @@ Include the ES modules directly in your HTML:
 Using the Prebuilt Bundle
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you prefer a single-file build (no import map or bundler required), download
-``noisemaker.bundle.js`` from the latest GitHub release or build it locally with
-``npm run bundle``. The script registers a ``Noisemaker`` global that mirrors the
+For a single-file build, download ``noisemaker.bundle.js`` from the latest GitHub release.
+Alternatively, build it locally with ``npm run bundle``. This build requires no import map or bundler. The script registers a ``Noisemaker`` global that mirrors the
 module exports.
 
 .. code-block:: html
@@ -88,7 +87,7 @@ Additional options: ``--time``, ``--speed``, ``--with-alpha``, ``--debug``
 Core Modules
 ------------
 
-The JavaScript library is organized into ES modules mirroring the Python structure:
+The JavaScript library uses ES modules that mirror the Python structure:
 
 Tensor Operations
 ~~~~~~~~~~~~~~~~~
@@ -300,7 +299,7 @@ Parity Requirements
 From ``js/doc/PY_JS_PARITY_SPEC.md``:
 
 * **RNG behavior must match exactly** - same seed produces same random sequence
-* **Never simulate weighted randomness** by repeating values; use explicit probability checks
+* **Never simulate weighted randomness** by repeating values. Use explicit probability checks.
 * **Float precision differences** are not acceptable - results must be bit-identical where possible
 * **Do not modify Python reference** to make JS tests pass
 * **Do not skip or weaken tests** to hide parity issues
@@ -324,7 +323,7 @@ From ``js/doc/VANILLA_JS_PORT_SPEC.md``:
 When In Doubt
 ~~~~~~~~~~~~~
 
-**Refer to the Python version and do what it does.** The Python version is the baseline reference implementation.
+**Follow the Python implementation.** The Python version is the baseline reference implementation.
 
 Code Style
 ~~~~~~~~~~

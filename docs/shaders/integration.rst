@@ -3,7 +3,7 @@
 Shader Pipeline Integration
 ===========================
 
-How to integrate Noisemaker's shader rendering engine into your own application with your own UI. Noisemaker separates rendering, state, and UI, so you can use the GPU pipeline without adopting a frontend framework.
+This guide explains how to integrate Noisemaker's shader rendering engine into your application with your own UI. Noisemaker separates rendering, state, and UI, so you can use the GPU pipeline without adopting a frontend framework.
 
 For release artifacts and versioning, see :doc:`../releases`.
 
@@ -52,7 +52,7 @@ Installation
 CDN (recommended)
 ^^^^^^^^^^^^^^^^^
 
-Import directly from the Noisemaker CDN. No build step, no vendoring. This is the same pattern we use for all of our production apps at Noise Factor.
+Import directly from the Noisemaker CDN. You do not need a build step or vendored files. This is the same pattern we use for all of our production apps at Noise Factor.
 
 .. code-block:: javascript
 
@@ -67,7 +67,7 @@ Add a preconnect hint in your HTML for faster loading:
 
     <link rel="preconnect" href="https://shaders.noisedeck.app" crossorigin>
 
-Per-effect bundles are served from ``${SHADER_CDN}/effects/`` and are fetched on demand via ``renderer.loadEffect(effectId)`` (or ``loadEffects([...])`` for multiple) before each ``compile()`` call (see Quick Start below).
+The CDN serves per-effect bundles from ``${SHADER_CDN}/effects/``. Before each ``compile()`` call, load the required effects with ``renderer.loadEffect(effectId)`` or ``loadEffects([...])`` for multiple effects. These methods fetch bundles on demand. See Quick Start below.
 
 Pinning levels
 """"""""""""""
@@ -82,7 +82,7 @@ The CDN exposes three URL shapes for every release. Pick the one that matches ho
      - Meaning
      - When to use
    * - ``shaders.noisedeck.app/1``
-     - Rolling latest within **major 1**. Auto-tracks every minor and patch release (e.g., ``1.0.0`` → ``1.0.1`` → ``1.1.0``) until a ``2.0`` ships, at which point this URL freezes and consumers explicitly migrate to ``/2``.
+     - Rolling latest within **major 1**. It automatically tracks every minor and patch release (e.g., ``1.0.0`` → ``1.0.1`` → ``1.1.0``) until ``2.0`` ships. Then this URL freezes and consumers explicitly migrate to ``/2``.
      - Most integrations. No code change needed for minor upgrades.
    * - ``shaders.noisedeck.app/1.0``
      - Rolling latest within the **1.0 minor series**. Stays on the 1.0.x line even if 1.1 or 2.0 ships.
@@ -143,7 +143,7 @@ For development within the noisemaker repo, or when noisemaker is a git submodul
     import { compile, unparse } from '../../shaders/src/lang/index.js'
     import { ProgramState } from '../../demo/shaders/lib/program-state.js'
 
-In source mode, effects are loaded at runtime from the ``shaders/effects/`` directory. Set ``basePath`` to point at the ``shaders/`` directory.
+In source mode, the renderer loads effects at runtime from ``shaders/effects/``. Set ``basePath`` to point at the ``shaders/`` directory.
 
 Quick Start
 -----------
@@ -246,7 +246,14 @@ Creates and manages the GPU rendering pipeline.
 **Path configuration:**
 
 ``basePath``
-    Root URL for shader assets. Use any of the CDN pinning levels (e.g. ``https://shaders.noisedeck.app/1`` for rolling latest within major 1, ``/1.0`` for minor-pinned, or ``/1.0.1`` for an exact immutable pin — see `Pinning levels`_ above), a local vendor path, or a relative path to the ``shaders/`` directory for source mode.
+    Root URL for shader assets. Use one of these paths:
+
+    - A CDN URL from `Pinning levels`_, such as ``https://shaders.noisedeck.app/1``
+      for rolling latest within major 1
+    - A local vendor path
+    - A relative path to ``shaders/`` for source mode
+
+    The CDN provides ``/1.0`` for minor pinning and ``/1.0.1`` for an exact immutable pin.
 
 ``bundlePath``
     Directory containing per-effect bundles and ``manifest.json``. Typically ``${basePath}/effects``.
@@ -373,7 +380,7 @@ Direct access to parsing and code generation, independent of state or rendering.
 Effect Registry
 ^^^^^^^^^^^^^^^
 
-Look up effect definitions to build parameter UIs. Effects must be loaded via ``loadManifest()`` and ``loadEffects()`` before querying.
+Query effect definitions to build parameter UIs. Load effects with ``loadManifest()`` and ``loadEffects()`` before querying.
 
 .. code-block:: javascript
 
@@ -397,7 +404,7 @@ Look up effect definitions to build parameter UIs. Effects must be loaded via ``
 Loading Effects from a DSL
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When the DSL isn't a literal string in your code (user input, saved presets, dynamically generated chains), use ``extractEffectNamesFromDsl`` to walk the DSL against the manifest and build the list of effect IDs to pass to ``loadEffects()``:
+Use ``extractEffectNamesFromDsl`` for DSL from user input, saved presets, or dynamically generated chains. It checks the DSL against the manifest and collects effect IDs. Pass that list to ``loadEffects()``:
 
 .. code-block:: javascript
 
@@ -412,18 +419,19 @@ When the DSL isn't a literal string in your code (user input, saved presets, dyn
     await renderer.loadEffects(effectIds)
     await renderer.compile(userDsl)
 
-Returns ``[{ effectId, namespace, name }, ...]`` for every call site in the DSL that resolves against ``renderer.manifest``. Unknown calls are skipped, so the resulting list is always safe to feed to ``loadEffects()``.
+Returns ``[{ effectId, namespace, name }, ...]`` for every call site in the DSL that resolves against ``renderer.manifest``. The helper skips unknown calls, so you can safely pass the resulting list to ``loadEffects()``.
 
-The static-DSL quickstart at the top of this guide loads its single effect by ID directly — reach for ``extractEffectNamesFromDsl`` when the DSL text isn't known at write time.
+The static-DSL quickstart loads its single effect directly by ID. Use ``extractEffectNamesFromDsl`` when you do not know the DSL text while writing the application.
 
 .. note::
 
-   The current bundle's ``extractEffectNamesFromDsl`` is regex-based and consumes inline ``//`` comments on the same line as the ``search`` directive (it folds the comment text into the namespace name). If your DSL uses inline comments after ``search``, either move them to their own line or strip line comments before calling: ``dsl.replace(/\/\/.*$/gm, '')``.
+   The current bundle's ``extractEffectNamesFromDsl`` uses regex. It includes inline ``//`` comments after a ``search`` directive in the namespace name.
+   If your DSL uses such comments, move them to their own line. Alternatively, remove line comments before calling the helper: ``dsl.replace(/\/\/.*$/gm, '')``.
 
 Parameter Types
 ---------------
 
-Effect parameters are defined in each effect's ``globals``. Use these types to build UI controls.
+Each effect's ``globals`` defines its parameters. Use these types to build UI controls.
 
 .. list-table::
    :header-rows: 1
@@ -534,7 +542,13 @@ Build multi-effect pipelines using the DSL:
     await renderer.compile(dsl)
     state.fromDsl(dsl)
 
-Effects are chained with ``.``: generators at the start, filters in the middle, ``.write(oN)`` to assign to a surface, ``render(oN)`` to display. Multiple chains can write to different surfaces and be composited.
+Connect effects with ``.``. A chain follows this sequence:
+
+1. A generator produces the initial image.
+2. Filters process the image.
+3. The ``.write(oN)`` call assigns the result to a surface.
+
+The ``render(oN)`` directive displays a surface. Multiple chains can write to different surfaces for composition.
 
 Effect Directory Structure
 --------------------------
@@ -592,7 +606,7 @@ Effect Namespaces
 Custom Namespaces
 ^^^^^^^^^^^^^^^^^
 
-External integrations that ship their own effect collection can introduce a top-level namespace as a sibling to the built-ins, without vendoring the engine or sharing the ``user`` namespace.
+External integrations with their own effect collection can add a top-level namespace beside the built-ins. They need not vendor the engine or share the ``user`` namespace.
 
 .. code-block:: javascript
 
@@ -639,7 +653,7 @@ After registration, the DSL parser accepts the new namespace in the ``search`` d
 * Must not be a reserved function name (``from``, ``osc``, ``midi``, ``audio``, ``null``, ``undefined``).
 * Must not collide with a built-in namespace (``synth``, ``filter``, ``mixer``, ``render``, ``points``, ``synth3d``, ``filter3d``, ``classicNoisedeck``, ``io``, ``user``).
 
-Multiple integrations sharing the same engine instance are responsible for picking distinct namespace ids — ``registerNamespace`` throws on collision so the conflict is visible, not silent.
+Integrations sharing an engine instance must choose distinct namespace ids. The ``registerNamespace`` function throws an error on collision, making the conflict visible.
 
 Bundle Exports Reference
 -------------------------
@@ -670,7 +684,7 @@ The core bundle (``noisemaker-shaders-core.esm.js``) exports:
 
 .. note::
 
-   UI components (``UIController``, ``EffectSelect``, ``ToggleSwitch``) are part of the demo app in ``demo/shaders/lib/`` and are not included in the core bundle. Import them directly from source if needed.
+   UI components (``UIController``, ``EffectSelect``, ``ToggleSwitch``) belong to the demo app in ``demo/shaders/lib/``. The core bundle excludes them. Import them directly from source if needed.
 
 Example: Vanilla JS
 --------------------

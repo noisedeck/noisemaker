@@ -26,16 +26,17 @@ make clean
 make dirhtml
 ```
 
-Use `dirhtml`, not `html`. That is the builder scaffold's
-`static-site-release` runs for docs.noisemaker.app, and it is the only
-one that reproduces production URLs: `composer-api.rst` is served as
-`/composer-api/`, not `/composer-api.html`. Relative asset paths inside
-`.. raw:: html` blocks resolve differently between the two, so an
-`html` build can look fine while the deployed page 404s its scripts.
+Use `dirhtml`, not `html`. Scaffold's `static-site-release` uses `dirhtml`
+for docs.noisemaker.app. Only this builder reproduces production URLs.
+It serves `composer-api.rst` as `/composer-api/`, not `/composer-api.html`.
+
+The builders resolve relative asset paths differently inside `.. raw:: html`
+blocks. An `html` build can appear correct while the deployed page returns
+404 errors for its scripts.
 
 3. View the documentation:
 
-The pages reference `/_static/...` root-absolute, so `file://` will not
+The pages use root-absolute `/_static/...` paths. A `file://` URL will not
 load the viewers. Serve the build root over HTTP:
 
 ```bash
@@ -52,7 +53,7 @@ Use the provided build script:
 
 ## Sphinx Configuration
 
-The documentation is configured in `docs/conf.py` with the following extensions:
+`docs/conf.py` configures the documentation with the following extensions:
 
 ### Core Extensions
 - **sphinx.ext.autodoc** - Automatic API documentation from docstrings
@@ -170,7 +171,7 @@ class MyClass:
 
 ## Documentation Publishing
 
-Documentation is automatically built and published in two places:
+Automation builds and publishes documentation in two places:
 - **Primary URL**: https://docs.noisemaker.app/
 - **Parallel ReadTheDocs URL**: https://noisemaker.readthedocs.io/
 - **Primary config**: `.github/workflows/docs-site.yml`
@@ -216,15 +217,15 @@ Current coverage of modules in `docs/api.rst`:
 
 ### Mock Dependencies
 
-Some dependencies (TensorFlow, PIL, etc.) are mocked in `conf.py` to allow documentation
-to build without full installations. If you see import errors, add them to `MOCK_MODULES`.
+`conf.py` mocks some dependencies, including TensorFlow and PIL. These mocks let the documentation build without full dependency installations.
+If a dependency causes an import error, add that dependency to `MOCK_MODULES`.
 
 ### Type Hint Rendering
 
 If type hints aren't rendering correctly:
 1. Ensure `from __future__ import annotations` is at the top of the module
 2. Check that `autodoc_typehints = 'description'` is set in `conf.py`
-3. Verify Napoleon is enabled: `'sphinx.ext.napoleon'` in extensions
+3. Check that Napoleon is enabled: `'sphinx.ext.napoleon'` in extensions
 
 ### Cross-References
 
@@ -240,7 +241,7 @@ To improve documentation coverage:
 2. Convert legacy Sphinx docstrings to Google style
 3. Add examples to docstrings
 4. Include diagrams and visualizations where helpful
-5. Keep the API reference up to date as new modules are added
+5. Update the API reference when you add modules
 
 ## References
 

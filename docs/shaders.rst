@@ -1,7 +1,7 @@
 Shaders
 =======
 
-Noisemaker's GPU rendering engine. Dual WebGL2 and WebGPU backends, a composable DSL for building effect chains, and a growing library of shader effects.
+Noisemaker's GPU rendering engine provides WebGL2 and WebGPU backends. It includes a composable DSL for building effect chains and a growing library of shader effects.
 
 .. raw:: html
 
@@ -122,9 +122,9 @@ Use internal textures (prefixed with ``_``) to chain passes.
 
 **Pattern:**
 
-1. Define internal texture in ``textures: { _temp: { ... } }``
+1. Define an internal texture in ``textures: { _temp: { ... } }``
 2. Pass 1 writes to ``_temp``
-3. Pass 2 reads from ``_temp``, writes to ``outputTex``
+3. Pass 2 reads from ``_temp`` and writes to ``outputTex``
 
 Feedback Effects
 ----------------
@@ -188,7 +188,13 @@ Regenerate manifest after adding/removing effects or changing texture definition
 
    python shaders/scripts/generate_shader_manifest.py
 
-**When to regenerate:** The manifest must be regenerated whenever you add or remove effect files, or modify texture definitions in ``definition.js``. The manifest tracks all effects and their texture requirements for the runtime.
+**When to regenerate:** Regenerate the manifest after any of these changes:
+
+- Adding effect files
+- Removing effect files
+- Changing texture definitions in ``definition.js``
+
+The manifest tracks all effects and their texture requirements for the runtime.
 
 Bundle for distribution:
 

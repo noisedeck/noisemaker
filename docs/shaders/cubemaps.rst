@@ -1,7 +1,7 @@
 Cubemaps
 ========
 
-Render a 3D volume into six seamless cube faces — for skyboxes, planetary surfaces, nebulae, and stars — on both the WebGL2 and WebGPU backends.
+Render a 3D volume into six cube faces with matching edges on WebGL2 and WebGPU. Use the faces for skyboxes, planetary surfaces, nebulae, and stars.
 
 Two renderers turn a volume into cube faces, differing only in how they show the field:
 
@@ -10,9 +10,9 @@ Two renderers turn a volume into cube faces, differing only in how they show the
 
 .. note::
 
-   **Work in progress — not yet ready for use.** Cubemap support is being
-   landed in the engine as a foundational layer for upcoming feature
-   development. The API, parameters, and output are subject to change.
+   **Work in progress — not yet ready for use.** Cubemap support is under
+   development as a foundation for future engine features. The API,
+   parameters, and output are subject to change.
 
 How It Works
 ------------
@@ -28,14 +28,14 @@ A cube camera sits at the center of the volume and looks outward through a 90-de
    index 4  +Z
    index 5  -Z
 
-Each output pixel becomes a 3D view ray, and the ray marches the volume. Because adjacent faces evaluate their shared edge from the *same* 3D direction, the edges match exactly — the seams are correct by construction, not by tiling 2D textures. Continuity across every face edge is proven in ``test/cubeCamera.test.js`` (closed-cube invariant) and ``test/cubeExport.test.js`` (cross-layout adjacency).
+Each output pixel becomes a 3D view ray that marches the volume. Adjacent faces evaluate their shared edge from the *same* 3D direction, so the edges match exactly. This construction produces matching edges without tiling 2D textures. Two tests prove continuity across every face edge: ``test/cubeCamera.test.js`` (closed-cube invariant) and ``test/cubeExport.test.js`` (cross-layout adjacency).
 
 Generating Cube Faces
 ---------------------
 
-Two cubemap renderers take a 3D volume and render the current cube face; drive
-either from a 3D generator such as ``noise3d``. They differ in how they show the
-field:
+Two cubemap renderers take a 3D volume and render the current cube face.
+Drive either renderer from a 3D generator such as ``noise3d``. They show the
+field differently:
 
 .. list-table::
    :header-rows: 1
@@ -134,7 +134,7 @@ Examples
 Rendering All Six Faces
 -----------------------
 
-A cubemap renderer renders one face at a time (whichever ``cubeBasis`` the driver sets). To produce all six faces, call ``renderCubemap()`` on the renderer (or pipeline). It runs the compiled graph six times — once per face — and returns six pixel buffers. The render style is whichever cubemap renderer the graph ends in (``renderCubemapSurface`` / ``renderCubemap3d``) — not a driver option.
+A cubemap renderer renders one face at a time, according to the driver's ``cubeBasis``. To produce all six faces, call ``renderCubemap()`` on the renderer or pipeline. It runs the compiled graph six times, once per face, and returns six pixel buffers. The graph's final cubemap renderer (``renderCubemapSurface`` or ``renderCubemap3d``) determines the render style. The driver has no render-style option.
 
 .. code-block:: javascript
 
@@ -165,7 +165,7 @@ A cubemap renderer renders one face at a time (whichever ``cubeBasis`` the drive
      - 0
      - Time value passed to the render (for animated volumes)
 
-The graph must terminate in a cubemap renderer writing to ``outputSurface``. ``outputSurface`` must name a real surface the DSL wrote to; an unknown name throws. A flat 2D chain (no cubemap renderer) would render the same image six times.
+The graph must terminate in a cubemap renderer writing to ``outputSurface``. The ``outputSurface`` value must name a real surface that the DSL wrote to. An unknown name throws an error. A flat 2D chain without a cubemap renderer would render the same image six times.
 
 Exporting
 ---------
@@ -190,7 +190,7 @@ Two pure helpers live in ``shaders/src/renderer/cubeExport.js``:
 Host Integration
 ----------------
 
-For application developers saving the six faces. See :doc:`integration` for renderer setup; the cubemap-specific flow is:
+To save the six faces, use this cubemap workflow. See :doc:`integration` for renderer setup:
 
 .. code-block:: javascript
 
@@ -220,13 +220,13 @@ For application developers saving the six faces. See :doc:`integration` for rend
 
     renderer.start()  // resume the live preview
 
-The returned array and its buffers are reused on the next ``renderCubemap()`` call — copy a face's ``data`` if you need to retain it across calls.
+The next ``renderCubemap()`` call reuses the returned array and its buffers. Copy a face's ``data`` if you need to retain it across calls.
 
 Technical Notes
 ---------------
 
 - **Face order is fixed**: ``+X, -X, +Y, -Y, +Z, -Z`` (indices 0–5), consistent across the camera, driver, export names, and cross layout.
-- **Readback works on both backends.** ``renderCubemap`` reads the offscreen output surface directly (via ``copyTextureToBuffer`` on WebGPU), which sidesteps the canvas IOSurface readback race that affects on-screen captures.
+- **Readback works on both backends.** The ``renderCubemap`` method reads the offscreen output surface directly (via ``copyTextureToBuffer`` on WebGPU). This avoids the canvas IOSurface readback race that affects on-screen captures.
 - **Pixel rows are top-down** (``readPixels`` flips WebGL2's bottom-up rows to match WebGPU). The exported PNGs and the cross are in standard top-down image orientation.
 - **Volume size limits**: ``x16``–``x128`` (128³ is the current ceiling).
 - ``outputSurface`` defaults to ``o0`` and must match the surface the DSL writes to.

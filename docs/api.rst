@@ -1,9 +1,9 @@
 Noisemaker API
 ==============
 
-Images are float32 tensors (0..1 range), with shape (height, width, channels). Most functions assume seamlessly tiled noise.
+Images are float32 tensors (0..1 range), with shape (height, width, channels). Most functions assume noise that tiles without visible seams.
 
-This is a pre-1.0 API, and may receive backwards incompatible changes.
+This pre-1.0 API may receive changes that break backward compatibility.
 
 noisemaker.generators
 ---------------------

@@ -5,9 +5,15 @@ Layers
 
 Layers is a non-destructive image and video editor that runs in the browser. Users import their own media, stack it with GPU effects and blend modes, and export the result. We shipped the first version in a week. It has zero lines of GPU rendering code.
 
-Users' images and videos are uploaded to GPU textures via ``updateTextureFromSource()``. From there, the whole application is orchestration. It manages a stack of layer objects (plain data) and on every change, generates a Noisemaker DSL program from that stack. Noisemaker compiles and renders the pipeline. Layers never touches WebGL.
+Layers uploads users' images and videos to GPU textures through ``updateTextureFromSource()``. The application manages a stack of layer objects as plain data. On every change, it generates a Noisemaker DSL program from that stack. Noisemaker compiles and renders the pipeline. Layers never calls WebGL.
 
-Say a user has built up three rendering layers in the UI: a photo on the bottom, a blur filter, and a noise texture blended on top at 60% opacity. Layers generates this program:
+Suppose a user creates three rendering layers in the UI:
+
+- A photo at the bottom
+- A blur filter
+- A noise texture blended on top at 60% opacity
+
+Layers generates this program:
 
 .. code-block:: text
 
@@ -28,4 +34,4 @@ The ``solid()`` at the top is a hidden transparent base layer that Layers insert
 
 That's the entire rendering pipeline, a text string. Adding a layer, toggling visibility, changing a blend mode: these regenerate the program and recompile the pipeline. Parameter changes (slider drags, color picks) update GPU uniforms directly through ``ProgramState`` without recompilation.
 
-Every effect in the Noisemaker library is available to the app without any additional graphics processing code. When we add a new effect upstream, Layers picks it up from the CDN automatically. We built the whole thing in a week with Claude as our coding partner.
+Every effect in the Noisemaker library is available to the app without any additional graphics processing code. When we add a new effect upstream, Layers loads it from the CDN automatically. We built the whole thing in a week with Claude as our coding partner.

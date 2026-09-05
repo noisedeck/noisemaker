@@ -3,7 +3,7 @@
 Release Process
 ===============
 
-Noisemaker is a monorepo with three release tracks: Python, JavaScript, and Shaders. The project version is defined in ``pyproject.toml`` and ``package.json`` as a ``MAJOR.MINOR`` string. Patch numbers are never written by hand — they are computed by CI on every release, from the set of existing git tags.
+Noisemaker is a monorepo with three release tracks: Python, JavaScript, and Shaders. The ``pyproject.toml`` and ``package.json`` files define the project version as a ``MAJOR.MINOR`` string. Never write patch numbers by hand. CI computes them for every release from the existing git tags.
 
 Versioning
 ----------
@@ -12,9 +12,9 @@ Noisemaker follows a **Living Version** scheme for in-repo metadata combined wit
 
 - In-repo metadata (``pyproject.toml``, ``package.json``, ``js/bin/noisemaker-js``, ``docs/conf.py``) carries **only** ``MAJOR.MINOR``. You never see a ``PATCH`` segment in source, and you never see a ``-SNAPSHOT`` / ``.dev0`` suffix.
 - Humans only edit the metadata when crossing a minor (``1.0`` → ``1.1``) or major (``1.x`` → ``2.0``) boundary.
-- Every qualifying push to ``main`` is a shader release. CI computes the next patch as ``max existing vMAJOR.MINOR.* tag + 1`` (or ``0`` if none), builds, deploys, and creates the ``vMAJOR.MINOR.PATCH`` annotated tag automatically.
+- Every qualifying push to ``main`` is a shader release. CI computes the next patch as ``max existing vMAJOR.MINOR.* tag + 1``, or ``0`` if no matching tag exists. CI builds, deploys, and creates the ``vMAJOR.MINOR.PATCH`` annotated tag automatically.
 
-This means: for any given commit on ``main``, the resulting release has a concrete patch version that nobody typed — it's derived from history.
+For any given commit on ``main``, the resulting release has a concrete patch version derived from history.
 
 Workflows
 ---------
@@ -33,8 +33,8 @@ JavaScript (``js.yml``)
 Runs on push/PR to ``main`` when ``js/``, ``scripts/``, or related files change.
 
 - **PR / push**: lint (ESLint) and tests run in parallel.
-- **Push to main** (after tests pass): builds browser bundles (``noisemaker.bundle.js``, ``.min.js``, ``.esm.js``, ``.cjs``), a CLI bundle, and standalone executables for Linux x64, macOS arm64, and Windows x64.
-- **Snapshot release**: a GitHub pre-release tagged ``{version}-SNAPSHOT`` is created (or replaced) with all JS bundles and platform executables. The snapshot is updated on every qualifying push to ``main``.
+- **Push to main** (after tests pass): builds browser bundles (``noisemaker.bundle.js``, ``.min.js``, ``.esm.js``, ``.cjs``) and a CLI bundle. It builds standalone executables for Linux x64, macOS arm64, and Windows x64.
+- **Snapshot release**: the workflow creates or replaces a GitHub pre-release tagged ``{version}-SNAPSHOT`` with all JS bundles and platform executables. It updates the snapshot on every qualifying push to ``main``.
 
 Shaders (``shaders.yml``)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -44,16 +44,25 @@ Runs on push/PR to ``main`` when ``shaders/``, ``scripts/``, ``demo/``, or relat
 - **PR / push**: CPU-only verification that changed dual-language shader sources
   carry current cross-backend parity attestations, DSL language tests,
   Playwright render tests (WebGL2), and structure tests.
-- **Push to main** (after tests pass): builds shader bundles and packages them as ``noisemaker-shaders.tar.gz`` (for attachment to the auto-created GitHub release), then delegates the release to the platform release infrastructure.
-- **Automated release** (delegated): the platform workflow checks out noisemaker at the pushed commit, reads ``MAJOR.MINOR`` from ``pyproject.toml``, computes the next patch from existing ``v*`` tags, rebuilds the shader bundles, deploys them to the CDN origin at ``/MAJOR.MINOR.PATCH/``, atomically updates the rolling ``/MAJOR/`` and ``/MAJOR.MINOR/`` symlinks to point at the new patch directory, and creates and pushes the ``vMAJOR.MINOR.PATCH`` annotated tag back to this repo.
-- **Demo site deploy**: the noisemaker.app demo site (separate from the shader CDN) is also built and synced on each qualifying push.
+- **Push to main** (after tests pass): builds shader bundles and packages them as ``noisemaker-shaders.tar.gz`` for the automatically created GitHub release. It then delegates the release to the platform release infrastructure.
+- **Automated release** (delegated): the platform workflow performs these steps:
+
+  1. Checks out noisemaker at the pushed commit.
+  2. Reads ``MAJOR.MINOR`` from ``pyproject.toml``.
+  3. Computes the next patch from existing ``v*`` tags.
+  4. Rebuilds the shader bundles.
+  5. Deploys them to the CDN origin at ``/MAJOR.MINOR.PATCH/``.
+  6. Atomically updates the rolling ``/MAJOR/`` and ``/MAJOR.MINOR/`` symlinks to the new patch directory.
+  7. Creates the ``vMAJOR.MINOR.PATCH`` annotated tag.
+  8. Pushes the tag to this repository.
+- **Demo site deploy**: each qualifying push also builds and syncs the noisemaker.app demo site, which is separate from the shader CDN.
 
 There is no manual tagging step. There is no ``-SNAPSHOT`` for shaders. Every commit that touches shader code produces a concrete, immutable patch release and a new ``v*`` tag.
 
 Tagged release (``release.yml``)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Triggered by any ``v*`` tag push. Under the current tag-on-commit scheme, every tag is created by the automated shader release described above — there are no hand-pushed tags.
+Any ``v*`` tag push triggers this workflow. Under the current tag-on-commit scheme, the automated shader release creates every tag. Humans do not push tags.
 
 - Builds all artifacts in parallel: JS browser bundles, CLI bundle, standalone executables (Linux/macOS/Windows), and shader bundles.
 - Creates a GitHub release with auto-generated notes and attaches all artifacts.
@@ -68,7 +77,7 @@ Runs on push to ``main``/``master`` when ``shaders/`` or ``demo/shaders/`` chang
 CDN Versioning
 --------------
 
-Shader bundles are hosted at ``shaders.noisedeck.app`` in per-patch directories, plus two rolling symlinks that track the newest patch in their respective scope:
+The ``shaders.noisedeck.app`` CDN hosts shader bundles in per-patch directories. Two rolling symlinks track the newest patch in their respective scope:
 
 ::
 
@@ -80,8 +89,8 @@ Shader bundles are hosted at ``shaders.noisedeck.app`` in per-patch directories,
 
 Three pinning levels are available to consumers:
 
-- ``shaders.noisedeck.app/1/`` — rolling latest within **major 1**. Automatically tracks every minor and patch release until a ``2.0`` ships; at that point ``/1/`` freezes and consumers explicitly migrate to ``/2/``. This is the recommended default for most integrations.
-- ``shaders.noisedeck.app/1.0/`` — rolling latest within the **1.0 minor series**. Stays pinned to the 1.0.x line; never automatically crosses a minor boundary.
+- ``shaders.noisedeck.app/1/`` — rolling latest within **major 1**. It automatically tracks every minor and patch release until ``2.0`` ships. At that point, ``/1/`` freezes and consumers explicitly migrate to ``/2/``. This is the recommended default for most integrations.
+- ``shaders.noisedeck.app/1.0/`` — rolling latest within the **1.0 minor series**. It stays pinned to the 1.0.x line and never automatically crosses a minor boundary.
 - ``shaders.noisedeck.app/1.0.1/`` — **exact pin**, immutable. Required for reproducible builds.
 
 See :doc:`shaders/integration` for usage examples at each pinning level.
@@ -123,5 +132,5 @@ Release Cadence
 
 - **Python**: repo-only (CI verification). No published packages yet.
 - **JavaScript snapshots**: updated automatically on every push to ``main``.
-- **Shaders**: released automatically on every qualifying push to ``main``. Each release creates a new immutable ``/MAJOR.MINOR.PATCH/`` directory on the CDN and refreshes the rolling ``/MAJOR/`` and ``/MAJOR.MINOR/`` symlinks. The git ``v*`` tag is created by CI, which in turn triggers the tagged release workflow to publish a GitHub release with all artifacts.
-- **Minor and major bumps**: initiated by a human commit that edits the ``MAJOR.MINOR`` string in metadata. The next automated release after such a commit will land ``.0`` of the new series (e.g., editing ``1.0`` → ``1.1`` produces ``v1.1.0``; editing ``1.9`` → ``2.0`` produces ``v2.0.0``). The workflow never back-patches older series.
+- **Shaders**: released automatically on every qualifying push to ``main``. Each release creates a new immutable ``/MAJOR.MINOR.PATCH/`` directory on the CDN and refreshes the rolling ``/MAJOR/`` and ``/MAJOR.MINOR/`` symlinks. CI creates the git ``v*`` tag. The tag triggers the tagged release workflow, which publishes a GitHub release with all artifacts.
+- **Minor and major bumps**: a human initiates these with a commit that edits ``MAJOR.MINOR`` in metadata. The next automated release produces ``.0`` of the new series. For example, changing ``1.0`` to ``1.1`` produces ``v1.1.0``. Changing ``1.9`` to ``2.0`` produces ``v2.0.0``. The workflow never applies patches to older series.

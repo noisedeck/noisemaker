@@ -5,7 +5,7 @@ Shuffleset
 
 Shuffleset is a self-hosted media streaming platform. We added an audio-reactive shader visualizer to it by wiring the Web Audio API into Noisemaker's audio state system. The integration is 120 lines.
 
-The browser's ``AnalyserNode`` extracts frequency and waveform data from whatever's playing. Each frame, that data is pushed into Noisemaker's ``AudioState`` object, which exposes it as shader uniforms:
+The browser's ``AnalyserNode`` extracts frequency and waveform data from whatever's playing. Each frame, the integration sends that data to Noisemaker's ``AudioState`` object. ``AudioState`` exposes it as shader uniforms:
 
 .. code-block:: javascript
 
@@ -45,4 +45,4 @@ The visualizer itself is a hardcoded DSL string:
       .write(o0)
     render(o0)
 
-The ``scope()`` effect reads audio state internally. Everything after it is standard filter chaining. Swapping in a different visualizer means changing one string.
+The ``scope()`` effect reads audio state internally. Everything after it is standard filter chaining. Changing the visualizer requires changing one string.

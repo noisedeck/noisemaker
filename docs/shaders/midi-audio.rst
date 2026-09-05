@@ -8,7 +8,7 @@ Using in the Demo
 
 The shader demo includes MIDI and Audio toggle buttons in the toolbar. Click **midi** or **audio** to enable external input:
 
-- **MIDI**: Click the ``midi`` button to enable Web MIDI API access. Any connected MIDI controllers will automatically be detected.
+- **MIDI**: Click the ``midi`` button to enable Web MIDI API access. The demo will automatically detect connected MIDI controllers.
 - **Audio**: Click the ``audio`` button to enable microphone input. Your browser will request permission to access the microphone.
 
 Once enabled, you can use ``midi()`` and ``audio()`` in your DSL programs:
@@ -47,7 +47,7 @@ React to bass frequencies in the audio input:
     noise(scaleX: audio(band: audioBand.low, min: 0.1, max: 0.5)).write(o0)
 
 Automation values are normalized percentages. ``min: 0.1, max: 0.5`` maps
-the source across 10%–50% of the receiving effect parameter's range; those
+the source across 10%–50% of the receiving effect parameter's range. Those
 bounds are not absolute parameter values.
 
 midi() Function
@@ -96,11 +96,11 @@ Parameters
    * - ``name``
      - quoted string
      - none
-     - Readable MIDI input name; keyword-only
+     - Readable MIDI input name. Keyword-only.
    * - ``id``
      - quoted string
      - none
-     - Exact MIDI input ID; keyword-only and requires ``name``
+     - Exact MIDI input ID. Keyword-only. Requires ``name``.
 
 MIDI Modes
 ~~~~~~~~~~
@@ -148,7 +148,7 @@ human-readable name and the browser-provided ID:
     )
 
 An ``id`` match is authoritative. A name-only selector is allowed, but it must
-match exactly one connected input; otherwise the source resolves to its
+match exactly one connected input. Otherwise, the source resolves to its
 minimum. ``name`` and ``id`` are quoted, keyword-only fields, and ``id`` is
 invalid without ``name``.
 
@@ -209,15 +209,15 @@ Parameters
    * - ``channel``
      - positive integer
      - none
-     - One-based channel on a selected device; keyword-only and requires ``name``
+     - One-based channel on a selected device. Keyword-only. Requires ``name``.
    * - ``name``
      - quoted string
      - none
-     - Readable audio input name; keyword-only and requires ``channel``
+     - Readable audio input name. Keyword-only. Requires ``channel``.
    * - ``id``
      - quoted string
      - none
-     - Exact audio device ID; keyword-only and requires ``name``
+     - Exact audio device ID. Keyword-only. Requires ``name``.
 
 Audio Bands
 ~~~~~~~~~~~
@@ -237,15 +237,15 @@ Audio Bands
    * - ``audioBand.vol``
      - Overall volume (average of all bands)
    * - ``audioBand.raw``
-     - Bipolar time-domain signal; maps -1…1 onto the normalized 0…1 range
+     - Bipolar time-domain signal. Maps -1…1 onto the normalized 0…1 range.
 
 Selecting an audio input
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``audio()`` reads the legacy aggregate analyser when no selector is present.
-A selected source requires both a device ``name`` and a one-based ``channel``;
-include ``id`` when the browser exposes one so duplicate names remain
-unambiguous:
+A selected source requires both a device ``name`` and a one-based ``channel``.
+Include ``id`` when the browser exposes one. This distinguishes devices with
+duplicate names:
 
 .. code-block:: dsl
 
@@ -294,13 +294,16 @@ Use ``let`` bindings to keep nested programs readable:
 
     noise(scaleX: carrier).write(o0)
 
-The nestable numeric fields are ``min``, ``max``, ``speed``, ``offset``, and
-``seed`` on ``osc()``; ``min``, ``max``, and ``sensitivity`` on ``midi()``;
-and ``min`` and ``max`` on ``audio()``. Enum selectors, device identity, and
-channel numbers remain literal. The compiler rejects cycles and nesting
-deeper than eight descriptors. Oscillator rate modulation is integrated over
-normalized time, so seeking to the same time remains deterministic rather
-than depending on previously rendered frames.
+These numeric fields support nesting:
+
+- ``osc()``: ``min``, ``max``, ``speed``, ``offset``, and ``seed``
+- ``midi()``: ``min``, ``max``, and ``sensitivity``
+- ``audio()``: ``min`` and ``max``
+
+Enum selectors, device identity, and channel numbers remain literal. The compiler rejects cycles and nesting
+deeper than eight descriptors. The evaluator integrates oscillator rate modulation over normalized time.
+Seeking to the same time remains deterministic and does not depend on
+previously rendered frames.
 
 Host Integration
 ----------------
@@ -339,7 +342,7 @@ Updating MIDI State
     midiState.getChannel(1).gate = 1
     midiState.getChannel(1).time = Date.now()
 
-For per-input selectors, register the browser identity and pass it with each
+For per-input selectors, register the browser identity. Pass it with each
 message. The root state still receives the message for unselected ``midi()``
 calls, while the registered port keeps isolated channel state:
 
@@ -371,8 +374,11 @@ Updating Audio State
         requestAnimationFrame(updateAudio)
     }
 
-For selected-device capture, register each device and publish analyzed values
-per channel. Supply ``raw`` for ``audioBand.raw``:
+For selected-device capture:
+
+1. Register each device.
+2. Publish analyzed values per channel.
+3. Supply ``raw`` for ``audioBand.raw``.
 
 .. code-block:: javascript
 
@@ -444,7 +450,7 @@ Technical Notes
 - MIDI channels are 1-indexed (1-16) matching standard MIDI conventions
 - MIDI and audio ``min``/``max`` values are normalized percentages of the
   receiving effect parameter's range
-- Audio band values are normalized to 0–1; ``audioBand.raw`` first maps its
-  bipolar -1…1 signal onto that range
-- Trigger decay is calculated in real-time using ``Date.now()`` for frame-independent animation
-- Values are clamped to the min/max range
+- Audio band values use the normalized 0–1 range. The ``audioBand.raw`` band
+  first maps its bipolar -1…1 signal onto that range.
+- The runtime calculates trigger decay with ``Date.now()`` for frame-independent animation.
+- The runtime clamps values to the min/max range.

@@ -3,10 +3,10 @@ Noisemaker Composer
 
 Noisemaker Composer is a high-level interface for creating generative art with procedural noise.
 
-Presets are authored with the **Composer DSL**, a domain-specific language for defining procedural art presets. It provides a structured, declarative syntax for composing noise generators and image effects while supporting randomization, inheritance, and reusable configurations.
+Use the **Composer DSL** to define procedural art presets. This domain-specific language provides declarative syntax for composing noise generators and image effects. It supports randomization, inheritance, and reusable configurations.
 
 .. note::
-   **JavaScript Compatibility**: The Composer DSL is shared between Python and JavaScript implementations.
+   **JavaScript Compatibility**: Python and JavaScript share the Composer DSL.
    See :doc:`javascript` for using presets in the browser.
 
 .. note::
@@ -26,7 +26,7 @@ The Composer DSL allows you to define presets as JSON-like objects with speciali
 * Apply effects per-octave, post-processing, and final passes
 * Reference other presets inline
 
-The canonical preset library lives in :file:`share/dsl/presets.dsl` and is parsed by :mod:`noisemaker.dsl`. Both the reference Python implementation and the JavaScript port consume that file, so any change to the DSL immediately applies to both environments.
+The canonical preset library is :file:`share/dsl/presets.dsl`. The :mod:`noisemaker.dsl` module parses it. Both the reference Python implementation and the JavaScript port use that file. Any change to the DSL immediately applies to both environments.
 
 Custom Presets
 ~~~~~~~~~~~~~~
@@ -38,7 +38,7 @@ You can create your own presets in a separate DSL file and use them with the CLI
     # Use a custom presets file
     noisemaker generate my-preset --presets ~/my-presets.dsl -o custom.png
 
-Custom preset files follow the same DSL syntax as the built-in :file:`presets.dsl`. You can reference the built-in file as a template. Custom presets can layer on top of each other but cannot inherit from the built-in presets unless they are included in the same file.
+Custom preset files follow the same DSL syntax as the built-in :file:`presets.dsl`. You can reference the built-in file as a template. Custom presets can inherit from each other. To inherit from a built-in preset, include that preset in the same file.
 
 For programmatic usage in Python:
 
@@ -60,16 +60,16 @@ Philosophy
 
 At a high level, each preset answers five key questions:
 
-1. Which presets are being built on? (``layers``)
+1. Which presets does this preset inherit from? (``layers``)
 2. What are the meaningful variables? (``settings``)
-3. What are the noise generation parameters? (``generator``)
-4. Which effects should be applied to each octave? (``octaves``)
-5. Which effects should be applied after flattening layers? (``post`` and ``final``)
+3. Which parameters control noise generation? (``generator``)
+4. Which effects should each octave receive? (``octaves``)
+5. Which effects should follow layer flattening? (``post`` and ``final``)
 
 Grammar
 -------
 
-The DSL follows a strict grammar for parsing and validation. Programs are parsed into an abstract syntax tree (AST) and evaluated against a whitelist of operations and surfaces—the evaluator never invokes ``eval`` or ``Function``.
+The DSL follows a strict grammar for parsing and validation. The parser converts programs into an abstract syntax tree (AST). The evaluator checks programs against a whitelist of operations and surfaces. It never invokes ``eval`` or ``Function``.
 
 .. code-block:: text
 
@@ -109,9 +109,9 @@ Grammar Notes
 ~~~~~~~~~~~~~
 
 * Floats may omit the leading zero (e.g., ``.5``).
-* Trailing commas in lists, dictionaries, and argument lists are allowed.
+* Lists, dictionaries, and argument lists allow trailing commas.
 * ``Enum`` resolves to JavaScript enum objects exported from ``constants.js``.
-* Whitespace and comments are skipped between tokens.
+* The parser skips whitespace and comments between tokens.
 * Single-line comments use ``//`` and run until the newline.
 * Block comments use ``/* … */`` and must be terminated before end of file.
 
@@ -139,7 +139,7 @@ layers
 
 **Purpose:** Inherit settings, generators, and effects from parent presets.
 
-Parent presets are applied in order, with later presets overriding earlier ones. The current preset's settings override all parents.
+The composer applies parent presets in order. Later presets override earlier ones. The current preset's settings override all parents.
 
 .. code-block:: javascript
 
@@ -150,7 +150,7 @@ settings
 
 **Type:** Dictionary
 
-**Purpose:** Define variables that can be referenced throughout the preset using ``settings.key_name``.
+**Purpose:** Define variables for use throughout the preset as ``settings.key_name``.
 
 Settings support literals, enum references, helper functions, arithmetic expressions, and conditionals.
 
@@ -508,7 +508,7 @@ Example usage:
 Effect Calls
 ------------
 
-Effects are called with named parameters using colon syntax:
+Call effects with named parameters using colon syntax:
 
 .. code-block:: javascript
 
@@ -636,9 +636,9 @@ Debugging
 When a preset doesn't parse or evaluate correctly:
 
 1. **Check syntax**: Ensure all braces, brackets, and parentheses are balanced
-2. **Verify enum names**: Enum references must exactly match defined enums
+2. **Check enum names**: Enum references must exactly match defined enums
 3. **Check parameter names**: Effect parameters must match the effect's signature
-4. **Look for typos**: Setting references must exactly match defined keys
+4. **Check setting references**: They must exactly match defined keys
 5. **Test incrementally**: Build complex presets step-by-step
 
 The Python and JavaScript parsers provide error messages with line/column information when syntax errors occur.
@@ -756,21 +756,21 @@ JavaScript
 Architecture Overview
 ---------------------
 
-The Noisemaker Composer system is built on three layers:
+The Noisemaker Composer system has three layers:
 
 1. **DSL Layer** (:mod:`noisemaker.dsl`)
    
-   Parses and evaluates the Composer DSL from :file:`share/dsl/presets.dsl`. The same DSL file is used by both Python and JavaScript implementations, ensuring cross-platform consistency.
+   This layer parses and evaluates the Composer DSL from :file:`share/dsl/presets.dsl`. Both Python and JavaScript use the same DSL file for consistency across platforms.
 
 2. **Preset Layer** (:mod:`noisemaker.presets`, :mod:`noisemaker.composer`)
    
-   Loads preset definitions and provides the ``Preset`` class for rendering. Handles preset inheritance (layering), settings resolution, and effect application.
+   This layer loads preset definitions and provides the ``Preset`` class for rendering. It handles preset inheritance (layering), resolves settings, and applies effects.
 
 3. **Generator/Effect Layer** (:mod:`noisemaker.generators`, :mod:`noisemaker.effects`)
    
    Low-level TensorFlow operations for generating procedural noise and applying image effects.
 
-The DSL provides a declarative interface to these lower-level APIs, making it easy to compose complex generative art without writing imperative code.
+The DSL provides a declarative interface to these lower-level APIs. You can compose complex generative art without writing imperative code.
 
 Cross-Platform Compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -782,7 +782,7 @@ Both the Python and JavaScript implementations:
 * Produce deterministic output given the same seed
 * Support the same set of helper functions and enums
 
-Any change to the DSL immediately applies to both environments, making it easy to maintain consistency across platforms.
+Any change to the DSL immediately applies to both environments. This shared source helps maintain consistency across platforms.
 
 See Also
 --------

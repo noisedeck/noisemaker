@@ -1,12 +1,16 @@
 The 3D Pipeline
 ===============
 
-Generate, filter, and render volumetric fields — a true 3D counterpart to the
-2D synth/filter/render chain, on both the WebGL2 and WebGPU backends.
+The 3D pipeline generates, filters, and renders volumetric fields on WebGL2
+and WebGPU. It is the 3D counterpart to the 2D synth/filter/render chain.
 
-A 3D chain has the same shape as a 2D one: a generator produces a field, zero
-or more filters transform it, and a renderer turns it into pixels. The
-difference is that every intermediate value is a volume rather than an image.
+A 3D chain follows the same sequence as a 2D chain:
+
+1. A generator produces a field.
+2. Zero or more filters transform it.
+3. A renderer converts it to pixels.
+
+Each intermediate value is a volume rather than an image.
 
 .. code-block:: dsl
 
@@ -22,9 +26,9 @@ difference is that every intermediate value is a volume rather than an image.
 ``volumeSize`` (on the generator) sets the volume resolution: ``x16``,
 ``x32``, ``x64``, or ``x128`` (16³ … 128³). Downstream effects inherit it
 automatically. The runtime stores a volume in a 2D slice atlas whose dimensions
-are ``volumeSize × volumeSize²``. If the requested atlas exceeds the device's
-maximum texture dimension, the whole chain is stepped down to the largest
-supported power-of-two size. For example, a device limited to 8192-pixel
+are ``volumeSize × volumeSize²``. The requested atlas can exceed the device's maximum texture dimension.
+In that case, the runtime reduces the whole chain to the largest supported
+power-of-two size. For example, a device limited to 8192-pixel
 textures renders a requested ``x128`` chain at ``x64`` instead of producing an
 incomplete volume.
 
@@ -33,8 +37,7 @@ Generators (synth3d)
 
 Volume generators live in the ``synth3d`` namespace: ``noise3d``, ``cell3d``,
 ``fractal3d``, ``shape3d``, ``cellularAutomata3d``, ``reactionDiffusion3d``,
-and ``flythrough3d``. Each one's parameters are documented in the Effect
-Reference.
+and ``flythrough3d``. The Effect Reference documents each generator's parameters.
 
 Volumetric filters (filter3d)
 -----------------------------
@@ -46,9 +49,8 @@ Filters in the ``filter3d`` namespace transform a volume and pass it on:
 - ``flow3d`` — an agent-based 3D flow field that deposits trails through the
   volume.
 
-Recoloring filters follow a shared pattern: they change a voxel's color while
-passing its shape (geometry) through untouched, so any downstream renderer
-sees the same surface.
+Recoloring filters change a voxel's color and preserve its shape (geometry).
+Every downstream renderer therefore sees the same surface.
 
 Renderers
 ---------

@@ -1,9 +1,9 @@
 Demo UI
 =======
 
-The Noisemaker Shader Demo is an interactive browser-based playground for exploring GPU shader effects. It provides real-time rendering with live parameter controls, a DSL code editor, and support for both WebGL 2 and WebGPU backends.
+The Noisemaker Shader Demo lets you explore GPU shader effects in the browser. It renders in real time with live parameter controls and a DSL code editor. It supports both WebGL 2 and WebGPU backends.
 
-A hosted demo can be viewed at https://noisemaker.app/demo/shaders/
+View the hosted demo at https://noisemaker.app/demo/shaders/
 
 What the Demo Does
 ------------------
@@ -123,7 +123,7 @@ Manages the demo UI — effect selection, controls, DSL editing:
 DSL Language
 ~~~~~~~~~~~~
 
-Effects are composed using a chainable DSL:
+Compose effects using a chainable DSL:
 
 .. code-block:: text
 
@@ -152,7 +152,7 @@ See :doc:`language` for full DSL specification.
 Bundling for Distribution
 -------------------------
 
-For production deployments, shader effects can be bundled into standalone JavaScript modules.
+You can bundle shader effects into standalone JavaScript modules for production deployments.
 
 Building Bundles
 ~~~~~~~~~~~~~~~~
@@ -199,7 +199,7 @@ The demo supports URL parameters for deep linking:
 Pluggable Controls
 ------------------
 
-The UI system is designed to be **pluggable** — downstream projects can substitute custom web components for the default HTML elements.
+Downstream projects can substitute custom web components for the default HTML elements.
 
 Overview
 ~~~~~~~~
@@ -219,7 +219,7 @@ Architecture
 Control Handle Interface
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Each control is represented by a **ControlHandle** object:
+A **ControlHandle** object represents each control:
 
 .. code-block:: javascript
 
@@ -229,7 +229,7 @@ Each control is represented by a **ControlHandle** object:
        setValue: (value) => void // Set display value
    }
 
-The ``UIController`` stores these handles on control group elements (``controlGroup._controlHandle``) so that ``checkStructureAndApplyState()`` can update controls without knowing their implementation details.
+The ``UIController`` stores these handles on control group elements (``controlGroup._controlHandle``). The ``checkStructureAndApplyState()`` method uses them to update controls without knowing their implementation details.
 
 Control Factory
 ~~~~~~~~~~~~~~~
@@ -324,11 +324,11 @@ Downstream projects can provide custom control implementations by extending ``Co
 ProgramState
 ------------
 
-``ProgramState`` is a decoupled state management layer that sits between the UI and the renderer. It provides:
+``ProgramState`` manages state independently between the UI and the renderer. It provides:
 
 - **Centralized state access** via ``getValue()``/``setValue()``
 - **Event-driven updates** - emits ``change``, ``structurechange``, ``reset`` events
-- **Batching** - multiple changes can be batched to emit a single event
+- **Batching** - combines multiple changes into a single event
 - **Serialization** - ``serialize()``/``deserialize()`` for undo/redo and persistence
 - **Media metadata** - stores metadata about media and text inputs
 
@@ -378,26 +378,26 @@ When a control value changes:
 1. The control's ``change`` event fires
 2. ``programState.setValue()`` updates the state
 3. ``_updateDslFromEffectParams()`` regenerates the DSL text
-4. The DSL editor is updated
+4. The UI updates the DSL editor
 
 DSL → Controls
 ~~~~~~~~~~~~~~
 
 When DSL text changes (e.g., user edits the text):
 
-1. ``checkStructureAndApplyState(dsl)`` is called
+1. The UI calls ``checkStructureAndApplyState(dsl)``
 2. For each parameter, the method finds the control group
-3. If ``controlGroup._controlHandle.setValue`` exists, it's called
-4. Otherwise, falls back to native element queries (backward compatibility)
+3. If ``controlGroup._controlHandle.setValue`` exists, the method calls it
+4. Otherwise, the method queries native elements for backward compatibility
 
-This design ensures that custom web components are updated correctly when DSL text changes, solving the common problem where custom dropdowns don't sync from DSL edits.
+This design updates custom web components when DSL text changes. Custom dropdowns therefore stay synchronized with DSL edits.
 
 Module Controls Reset Hook
 --------------------------
 
-When a module's "reset" button is clicked, the UIController rebuilds that module's controls from scratch. Downstream projects that apply custom UI transformations (e.g., rearranging mixer A/B sliders into a special layout) need to re-apply those transformations after the rebuild.
+When you click a module's "reset" button, the UIController rebuilds that module's controls. Downstream projects need to repeat any custom UI transformations after the rebuild. These transformations can include a custom layout for mixer A/B sliders.
 
-The ``onModuleControlsReset`` callback fires after a module's controls are rebuilt:
+The ``onModuleControlsReset`` callback fires after the UIController rebuilds a module's controls:
 
 .. code-block:: javascript
 
@@ -531,4 +531,4 @@ With this setup:
 1. Controls render using ``<select-dropdown>`` instead of ``<select>``
 2. User interactions update the DSL text correctly
 3. DSL text edits update the dropdown via ``setValue()``
-4. No need to override ``checkStructureAndApplyState()`` or other internal methods
+4. You do not need to override ``checkStructureAndApplyState()`` or other internal methods

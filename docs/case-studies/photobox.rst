@@ -3,9 +3,9 @@ Photobox
 
 `photobox.noisefactor.io <https://photobox.noisefactor.io/>`_
 
-Photobox is a Photo Booth clone that runs in the browser. We built it in four hours with Claude. It captures your camera feed, runs it through GPU shader effects in real-time, and lets you take photos and record video. 18 effects across two tabs, 3x3 live preview grid, persistent gallery.
+Photobox is a Photo Booth clone that runs in the browser. We built it in four hours with Claude. It captures your camera feed, runs it through GPU shader effects in real-time, and lets you take photos and record video. It provides 18 effects across two tabs, a 3x3 live preview grid, and a persistent gallery.
 
-The interesting part is how the camera gets into the shader pipeline. The browser's ``getUserMedia`` API gives you a ``<video>`` element. Noisemaker's ``CanvasRenderer`` can accept any image source as an external texture. The bridge between them is one call per frame:
+The camera feed enters the shader pipeline through an external texture. The browser's ``getUserMedia`` API gives you a ``<video>`` element. Noisemaker's ``CanvasRenderer`` can accept any image source as an external texture. The bridge between them is one call per frame:
 
 .. code-block:: javascript
 

@@ -1,7 +1,7 @@
 Composer API (CPU)
 ==================
 
-Noisemaker's original Python effects library and its vanilla JS port. These use TensorFlow (Python) or Canvas 2D (JS) for CPU-based rendering — separate from the GPU shader engine.
+This reference covers Noisemaker's original Python effects library and its vanilla JS port. They render on the CPU through TensorFlow (Python) or Canvas 2D (JS). These libraries are separate from the GPU shader engine.
 
 .. raw:: html
 

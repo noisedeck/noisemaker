@@ -3,14 +3,18 @@ Renderer Output
 
 ``CanvasRenderer`` normally presents the selected ``render(oN)`` surface to
 its canvas. Output sinks let a host send that same rendered surface to
-additional destinations, while the bounded frame-export queue provides an
+additional destinations. The bounded frame-export queue provides an
 asynchronous GPU-to-CPU path for recording, streaming, or analysis.
 
-Both APIs require an active compiled pipeline. They belong to that concrete
-pipeline. A successful in-place recompile preserves its registered sinks;
-switching backends, disposing the renderer, or any fallback that replaces the
-pipeline closes the old sinks, and the host must register new ones on the
-replacement pipeline.
+Both APIs require an active compiled pipeline and belong to that pipeline.
+A successful in-place recompile preserves its registered sinks. The following
+actions close the old sinks:
+
+- Switching backends
+- Disposing the renderer
+- A fallback that replaces the pipeline
+
+The host must register new sinks on the replacement pipeline.
 
 Output Sinks
 ------------
@@ -32,12 +36,12 @@ A sink implements three methods:
 
 ``configure(descriptor)``
     Receives the current output dimensions and format. It runs when the
-    pipeline resizes and immediately when a sink is added to an already
-    configured pipeline.
+    pipeline resizes. It also runs immediately when the host adds a sink to an
+    already configured pipeline.
 
 ``submit(textureId, presentationTimestamp)``
     Receives the selected output texture once per rendered frame. Return
-    ``true`` when the frame was accepted or ``false`` when it was dropped.
+    ``true`` when the sink accepts the frame or ``false`` when it drops the frame.
     Throwing from one sink does not stop the remaining sinks or the renderer.
 
 ``close(options)``
@@ -61,18 +65,18 @@ The pipeline supplies this descriptor:
 Per-sink counters are available from
 ``renderer.pipeline.sinkManager.stats.get(sink)`` as ``accepted``, ``dropped``,
 and ``failed`` while the sink is registered. Copy them before calling the
-removal function if they are needed afterward.
+removal function if you need them afterward.
 
 Asynchronous Frame Export
 -------------------------
 
 ``createFrameExportQueue()`` creates a fixed ring of reusable readback slots.
-The default is three slots; ``slots`` may be any integer from 2 through 8.
+The default is three slots. The ``slots`` value may be any integer from 2 through 8.
 When every slot is busy, ``enqueue()`` returns ``false`` immediately instead
 of blocking the render loop.
 
-``FrameExportQueue`` is not itself a sink. Adapt it with a small sink and poll
-it from the host event loop:
+``FrameExportQueue`` is not itself a sink. Adapt it with a small sink.
+Poll the queue from the host event loop:
 
 .. code-block:: javascript
 
@@ -131,7 +135,7 @@ it from the host event loop:
     pollExports = false
     removeExportSink()
 
-The host must call ``poll()``; the queue does not create a timer. A completed
+The host must call ``poll()``. The queue does not create a timer. A completed
 callback receives ``(frame, timestamp, context)``. The timestamp and optional
 context are the same values passed to ``enqueue()``. ``queue.available`` says
 whether a configured, open queue currently has a free slot, and ``queue.stats``
@@ -141,8 +145,8 @@ tracks ``accepted``, ``dropped``, ``completed``, and ``failed`` frames.
 
     Reconfiguring or closing a queue releases pending frames without invoking
     their callbacks or incrementing ``completed``, ``failed``, or ``dropped``.
-    Do not reconfigure or close while accepted frames are pending when terminal
-    delivery or accounting is required.
+    If terminal delivery or accounting is required, do not reconfigure or close
+    the queue while accepted frames are pending.
 
 Frame Format and Backends
 -------------------------
@@ -164,9 +168,8 @@ later delivery on the same slot if the consumer needs to retain it.
 
 The export descriptor accepts ``straight``, ``opaque``, and ``premultiplied``
 alpha modes. ``straight`` preserves RGBA, ``opaque`` forces alpha to one, and
-``premultiplied`` multiplies RGB by alpha. ``colorSpace`` and ``fps`` are
-validated metadata; the adapters do not perform color conversion or frame-rate
-throttling.
+``premultiplied`` multiplies RGB by alpha. The adapters validate ``colorSpace`` and ``fps`` as metadata. They do not
+convert colors or throttle the frame rate.
 
 Frame export does not relax the pipeline rule against synchronous GPU readback
 inside an effect pass. It is a bounded asynchronous host-output path, serviced

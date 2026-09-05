@@ -91,13 +91,13 @@ The parser constructs the AST based on the grammar defined in :ref:`Polymorphic 
 **Key Structural Differences:**
 
 
-* **Flat Chains:** Chains are represented as a flat array of operation nodes,
-  not nested ``CallExpression`` objects.
+* **Flat Chains:** The parser represents chains as a flat array of operation
+  nodes, not nested ``CallExpression`` objects.
 * **Explicit Output:** A ``.write()`` directive is a ``Write`` node in the
-  chain. A terminal write target is also summarized in the statement's
+  chain. The parser also summarizes the terminal write target in the statement's
   ``write`` property for downstream validation.
-* **Separated State:** Variable assignments, render instructions, and chain
-  plans are tracked separately at the root. ``plans`` is an array of
+* **Separated State:** The parser tracks variable assignments, render
+  instructions, and chain plans separately at the root. ``plans`` is an array of
   ``ChainStmt`` nodes.
 
 ----
@@ -117,8 +117,8 @@ chains for expansion.
 
 
 * **Search Order Resolution:** The required ``search`` directive defines the
-  namespace search order for the program. Programs without it are rejected.
-* **Namespace Lookup:** Resolves function names (e.g., ``noise``) to Effect Definitions by walking the search order until a match is found.
+  namespace search order for the program. The parser rejects programs without it.
+* **Namespace Lookup:** Resolves function names (e.g., ``noise``) to Effect Definitions by searching namespaces in order until it finds a match.
 * **Variable Scope:** Tracks ``let`` assignments and resolves variable references.
 
 2.2 Chain Analysis
@@ -127,7 +127,7 @@ chains for expansion.
 Since the AST already represents chains as flat arrays, the analyzer iterates sequentially through the ``chain`` list.
 
 
-#. **Root Identification:** The first element of the ``chain`` array is identified as the generator or source.
+#. **Root Identification:** Identifies the first element of the ``chain`` array as the generator or source.
 #. **Operation Creation:** Resolves each ``Call`` node to a namespaced effect
    operation.
 #. **Parameter Binding:**
@@ -195,7 +195,7 @@ in the Effect Definition.
 ^^^^^^^^^^^^^^^^^^^^^^
 
 Expansion also collects the GLSL or WGSL source specifications referenced by
-each pass. Program names are scoped to the effect instance, and compile-time
+each pass. The expander scopes program names to the effect instance. Compile-time
 define values form part of the program key so distinct variants do not collide.
 
 The compiler does not compile GPU programs. During Pipeline initialization,
@@ -218,22 +218,24 @@ the ordered pass data for the runtime.
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 The resource allocator computes each virtual texture's first and last use, then
-applies linear-scan allocation to assign ``phys_N`` identifiers. A logical slot
-ID can be reused when its prior virtual texture's lifetime ended in an earlier
-pass. This produces only a virtual-to-slot map; it does not create GPU textures
-or a runtime texture pool.
+applies linear-scan allocation to assign ``phys_N`` identifiers. The allocator can reuse a logical slot ID if its prior virtual texture's
+lifetime ended in an earlier pass. This produces only a virtual-to-slot map.
+It does not create GPU textures or a runtime texture pool.
 
-Texture IDs beginning with ``global_`` are omitted from the allocation map.
+The allocator omits texture IDs beginning with ``global_`` from the allocation map.
 
 4.2 Graph Assembly
 ^^^^^^^^^^^^^^^^^^
 
-``compileGraph()`` returns an object containing the source hash, original
-source, ordered ``passes``, collected ``programs``, virtual-to-physical
-``allocations``, resolved texture specs, selected render surface, and
-compilation timestamp. It does not topologically sort passes or generate a
-separate GPU command list; the Pipeline executes the compiler-produced pass
-order.
+``compileGraph()`` returns an object with these fields:
+
+- Source hash and original source
+- Ordered ``passes`` and collected ``programs``
+- Virtual-to-physical ``allocations`` and resolved texture specs
+- Selected render surface and compilation timestamp
+
+It does not topologically sort passes or generate a separate GPU command
+list. The Pipeline executes passes in the compiler-produced order.
 
 ----
 
@@ -242,9 +244,8 @@ Failures and Diagnostics
 
 The front end reports semantic issues with the ``S001``–``S008`` diagnostics
 documented in :ref:`Polymorphic DSL <shader-language>`. Lexer and parser
-failures are JavaScript ``SyntaxError`` instances, and a missing mandatory
-``search`` directive is rejected during parsing (with a defensive validation
-check as well).
+failures are JavaScript ``SyntaxError`` instances. The parser rejects a missing
+mandatory ``search`` directive. Validation also checks for this directive.
 
 The following structured codes cross the compiler/runtime boundary. This is a
 focused list rather than an inventory of every backend-specific capability

@@ -3,12 +3,12 @@
 Polymorphic DSL
 ===============
 
-Polymorphic is the high level language powering the Noisemaker Rendering Pipeline, enabling live-coding visuals by chaining functions that evaluate to native shader graphs. The Polymorphic DSL serves as the high-level builder for the pipeline, allowing users to define complex, multi-pass effects declaratively.
+Polymorphic is the high-level language for the Noisemaker Rendering Pipeline. It supports live-coded visuals through function chains that evaluate to native shader graphs. The DSL lets users define complex, multi-pass effects declaratively.
 
-The language compiles to an ordered array of render passes executed on the GPU.
-Each valid program must materialize its generator chains into explicit outputs
-so the pipeline can connect passes and manage double-buffered surfaces
-deterministically.
+The language compiles to an ordered array of render passes that the GPU executes.
+Each valid program must write its generator chains to explicit outputs.
+These outputs let the pipeline connect passes and manage double-buffered
+surfaces deterministically.
 
 Grammar
 -------
@@ -65,29 +65,35 @@ Grammar
 **Output Materialization:**
 
 
-* Any chain that begins with a generator **must** terminate with ``.write(<surface>)``; omitting the terminal ``.write()`` on a generator chain yields diagnostic ``S006``.
-* Chains that extend an existing surface (e.g., reading via ``read(o0)`` and applying additional nodes) may omit ``.write()`` only when they are nested inside another chain that eventually writes to a surface.
+* Any chain that begins with a generator **must** terminate with ``.write(<surface>)``. Omitting the terminal ``.write()`` yields diagnostic ``S006``.
+* A chain that extends an existing surface may omit ``.write()`` only inside another chain that eventually writes to a surface.
+  For example, an extending chain can read through ``read(o0)`` and apply additional nodes.
 
 **Chainable Writes:**
 
 
 * ``.write(<surface>)`` can appear **anywhere** in a chain, including mid-chain.
-* When ``.write()`` appears mid-chain, it writes the current result to the specified surface and **passes the texture through** to the next node in the chain.
+* A mid-chain ``.write()`` writes the current result to the specified surface.
+  It **passes the texture through** to the next node.
 * Multiple ``.write()`` calls in a single chain write to multiple surfaces.
 * **Chains must still terminate with** ``.write()`` — mid-chain writes alone are not sufficient.
 * Example: ``noise().write(o0).blur().write(o1)`` writes the noise to ``o0``, then blurs and writes the result to ``o1``.
 
 **Generators:**
-An effect chain that creates new content starts with a generator. Generators
-are effects whose passes consume none of the pipeline inputs recognized by
-``isStarterEffect()``: ``inputTex``, ``inputTex3d``, or the direct surface
-references ``o0`` through ``o7``. ``read()`` and ``read3d()`` are separate
+An effect chain that creates new content starts with a generator. The passes in a generator consume none of the pipeline inputs that
+``isStarterEffect()`` recognizes:
+
+- ``inputTex``
+- ``inputTex3d``
+- Direct surface references ``o0`` through ``o7``
+
+The ``read()`` and ``read3d()`` operations are separate
 built-in ways to start from existing surfaces.
 
 
 * Generator examples (non-exhaustive): ``noise``, ``solid``, ``media``.
-* The generator classification is derived from pass inputs; an effect may
-  declare explicit non-pipeline inputs and still be a generator.
+* Pass inputs determine generator classification. An effect may declare
+  explicit non-pipeline inputs and still be a generator.
 
 **Colors:**
 Hex colors support 3, 6, or 8 digits: ``#RGB``, ``#RRGGBB``, ``#RRGGBBAA``. Alpha defaults to ``FF`` (1.0) if omitted.
@@ -101,7 +107,7 @@ Strings use double quotes: ``"hello"``. For multi-line strings, use triple quote
   World""").write(o0)
 
 **Arrow Functions:**
-Currently restricted to zero-argument expression lambdas: ``() => expr``. Used primarily for deferred evaluation in control structures or future callbacks.
+Arrow functions currently support only zero-argument expression lambdas: ``() => expr``. Their primary use is deferred evaluation in control structures or future callbacks.
 
 Language Features
 -----------------
@@ -141,13 +147,12 @@ Some effects accept multi-component vector parameters. Use the built-in vector c
 
 **Array literals:**
 
-Array literals — comma-separated numbers in square brackets — are an
-additional input form for any vector-valued argument. They are parsed
-and validated the same way ``vec2()`` / ``vec3()`` / ``vec4()`` are,
-and round-trip through the unparser as ``[…]`` so a program written
-with array literals comes back from a parse → unparse cycle in the
-same form. The vector constructor calls are unchanged and remain the
-canonical form for programs that already use them.
+Array literals contain comma-separated numbers in square brackets. They
+provide an additional input form for any vector-valued argument. The parser
+and validator handle them like ``vec2()``, ``vec3()``, and ``vec4()``.
+The unparser preserves the ``[…]`` form through a parse → unparse cycle.
+Vector constructor calls remain unchanged. They remain the canonical form
+for programs that already use them.
 
 .. code-block:: none
 
@@ -155,8 +160,8 @@ canonical form for programs that already use them.
   effect(quad: [0.05, 0.05, 0.45, 0.95]).write(o0)
 
 Elements may be any numeric expression (negative numbers, arithmetic,
-``Math.PI``). Array length is not enforced by the validator — whatever
-elements the source declared are passed through to the runtime.
+``Math.PI``). The validator does not enforce array length. It passes every declared
+element to the runtime.
 
 Variables & Aliases
 ^^^^^^^^^^^^^^^^^^^
@@ -193,7 +198,7 @@ Invoking variables that store function calls merges stored arguments with call-s
 
 * **Positional Arguments:** Appended to the stored arguments.
 * **Named Arguments:** Merged with stored arguments. **Call-site arguments override stored arguments** if keys conflict.
-* **Duplicate Keys:** If a named argument is provided multiple times in a single call, the last value wins.
+* **Duplicate Keys:** If a call provides a named argument multiple times, the last value wins.
 
 Control Flow
 ^^^^^^^^^^^^
@@ -202,15 +207,15 @@ The language supports ``if``, ``elif``, ``else`` for conditionals.
 
 .. note::
 
-  Control flow syntax is part of the parser and validator today, but runtime execution (branching) is not yet implemented. Programs using these constructs will not execute until the pipeline gains full support.
+  The parser and validator support control flow syntax, but the runtime does not yet execute branches. Programs using these constructs will not execute until the pipeline gains full support.
 
 **Arrow Functions:**
-Arrow functions (``() => expr``) are treated as **lazy expressions**. They are not evaluated immediately but are passed as-is to the effect or control structure, which determines when (or if) to evaluate them.
+Arrow functions (``() => expr``) are **lazy expressions**. The evaluator passes them unchanged to the effect or control structure without evaluating them immediately. That recipient determines when or whether to evaluate them.
 
 Subchains
 ^^^^^^^^^
 
-Subchains provide a first-class mechanism for grouping contiguous effects within a chain. They create atomic encapsulations that can be identified, manipulated, and reasoned about as units.
+Subchains group contiguous effects within a chain. Each group forms one unit that you can identify, manipulate, and reason about.
 
 **Syntax:**
 
@@ -226,7 +231,7 @@ Subchains provide a first-class mechanism for grouping contiguous effects within
 * ``name`` (optional): A human-readable label for the subchain.
 * ``id`` (optional): A unique identifier for programmatic access.
 
-Both arguments can be omitted, or ``name`` can be passed as a positional argument.
+You can omit both arguments or pass ``name`` as a positional argument.
 
 **Examples:**
 
@@ -250,7 +255,7 @@ Both arguments can be omitted, or ``name`` can be passed as a positional argumen
 **Rules:**
 
 * Subchains cannot be empty—they must contain at least one effect.
-* Subchains cannot be the first element in a chain; they require input from a preceding effect.
+* Subchains cannot be the first element in a chain. They require input from a preceding effect.
 * Effects inside subchains cannot be generators (e.g., ``noise()``, ``solid()``).
 * Subchains are chainable—the output flows through to subsequent effects after the closing brace.
 * Effects inside subchains use the same argument syntax as regular chain effects.
@@ -299,34 +304,34 @@ These namespaces are actively developed and maintained:
 Classic Namespaces
 ^^^^^^^^^^^^^^^^^^
 
-In addition to the actively developed and maintained namespaces above, the following namespaces were ported from older versions of our products. Each namespace offers a different take on how runtime composition can work.
+The following namespaces contain ports from older versions of our products. They supplement the actively developed and maintained namespaces above. Each namespace offers a different approach to runtime composition.
 
 * ``classicNoisedeck``: These are complex and often slower shaders brought over from the "Classic" Noisedeck.app shader graph.
 
 Custom Namespaces
 ^^^^^^^^^^^^^^^^^
 
-External integrations can introduce their own top-level namespace at runtime via the ``registerNamespace()`` API, alongside the built-ins listed above. Once registered, the new id is accepted by the ``search`` directive and behaves like any built-in namespace. The reserved ``user`` namespace is also available without registration for ad-hoc effects.
+External integrations can introduce their own top-level namespace at runtime via the ``registerNamespace()`` API, alongside the built-ins listed above. After registration, the ``search`` directive accepts the new id. The namespace behaves like any built-in namespace. The reserved ``user`` namespace is also available without registration for ad-hoc effects.
 
 See :doc:`integration` for the full API: ``registerNamespace(id, descriptor)``, ``unregisterNamespace(id)``, and validation rules.
 
 Search Order
 ^^^^^^^^^^^^
 
-Every program **must** begin with a ``search`` directive that defines the namespace resolution order. There are no implicit defaults—explicit search order is required.
+Every program **must** begin with a ``search`` directive that defines the namespace resolution order. The language requires an explicit search order and has no implicit defaults.
 
 .. code-block:: none
 
   search synth, filter
   noise().translate().write(o0)
 
-When a function like ``noise()`` is called, the compiler walks the search order
-(``synth``, then ``filter``) until a matching effect is found.
+For a call such as ``noise()``, the compiler searches namespaces in order
+(``synth``, then ``filter``) until it finds a matching effect.
 
 **Resolution Rules:**
 
 #. **Mandatory Search Directive:** Every program must start with ``search <namespace>, ...`` to specify which namespaces to search and in what order.
-#. **Unqualified Identifiers:** Calls like ``noise()`` walk the search order until a matching effect is found.
+#. **Unqualified Identifiers:** Calls like ``noise()`` search namespaces in order until they find a matching effect.
 #. **Overrides:** The ``from(ns, fn())`` helper allows sourcing an operation from a specific namespace temporarily (e.g., ``from(synth, noise())``).
 
 **Note:** Inline namespace prefixes (e.g., ``synth.noise()``) are **forbidden** in program chains. Use the ``search`` directive or ``from()`` helper instead.
@@ -334,7 +339,7 @@ When a function like ``noise()`` is called, the compiler walks the search order
 Enums
 -----
 
-Many function arguments accept enumerated options defined in a global registry. Enums are defined at the top level in ``std_enums.js`` as global categories (e.g., ``color``, ``blend``, ``wrap``).
+Many function arguments accept enumerated options defined in a global registry. The ``std_enums.js`` file defines enums at the top level as global categories (e.g., ``color``, ``blend``, ``wrap``).
 
 For example, the ``noise`` effect accepts a ``colorMode`` parameter with values from the global ``color`` enum. You can reference enum values in three ways:
 
@@ -518,11 +523,11 @@ Use the ``osc()`` function to create an oscillator:
    * - speed
      - number or automation
      - 1
-     - Loop speed multiplier; automated values map to -20..20
+     - Loop speed multiplier. Automated values map to -20..20.
    * - offset
      - number or automation
      - 0
-     - Phase offset in cycles; automated values map to -1..1
+     - Phase offset in cycles. Automated values map to -1..1.
    * - seed
      - number or automation
      - 1
@@ -583,12 +588,12 @@ Usage Examples
 Runtime Behavior
 ^^^^^^^^^^^^^^^^
 
-Oscillators are evaluated per-frame based on the current animation time. The pipeline normalizes time to a 0..1 range over the animation duration (default 10 seconds), then applies the speed multiplier and offset before computing the waveform value.
+The pipeline evaluates oscillators each frame from the current animation time. It normalizes time to a 0..1 range over the animation duration (default 10 seconds). It applies the speed multiplier and offset before computing the waveform value.
 
 The oscillator's ``min`` and ``max`` are normalized percentages. The receiving
 effect parameter maps that normalized value onto its own declared range. For
-example, ``min: 0.1, max: 0.8`` traverses 10%–80% of that parameter's range; the
-bounds are not absolute parameter values.
+example, ``min: 0.1, max: 0.8`` traverses 10%–80% of that parameter's range.
+The bounds are not absolute parameter values.
 
 Live Input
 ----------
@@ -604,16 +609,16 @@ descriptors.
 * ``mode``: ``midiMode.*`` value (default ``midiMode.velocity``)
 * ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
 * ``sensitivity``: Number or automation setting trigger falloff (default 1)
-* ``name`` / ``id``: Optional keyword-only input selector; ``id`` requires ``name``
+* ``name`` / ``id``: Optional keyword-only input selector. The ``id`` field requires ``name``.
 
 ``audio(band, min?, max?, channel: N, name: "...", id: "...")``
 
 * ``band`` (required): ``audioBand.low``, ``audioBand.mid``, ``audioBand.high``,
   ``audioBand.vol``, or ``audioBand.raw``
 * ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
-* ``channel`` / ``name`` / ``id``: Optional keyword-only device selector; a
-  selected source requires ``channel`` and ``name``, while ``id`` requires
-  ``name``
+* ``channel`` / ``name`` / ``id``: Optional keyword-only device selector. A
+  selected source requires ``channel`` and ``name``. The ``id`` field requires
+  ``name``.
 
 Example:
 
@@ -624,17 +629,20 @@ Example:
    let rate = midi(channel: 1, min: floor, max: 1)
    noise(scaleX: osc(type: oscKind.sine, speed: rate)).write(o0)
 
-The nestable fields are ``min``, ``max``, ``speed``, ``offset``, and ``seed``
-on ``osc()``; ``min``, ``max``, and ``sensitivity`` on ``midi()``; and ``min``
-and ``max`` on ``audio()``. Enum values, device identity, and channel numbers
-remain literal. Up to eight nested levels beneath the outer descriptor are
-supported. For selected-device examples, raw audio behavior, and host
+These fields support nesting:
+
+- ``osc()``: ``min``, ``max``, ``speed``, ``offset``, and ``seed``
+- ``midi()``: ``min``, ``max``, and ``sensitivity``
+- ``audio()``: ``min`` and ``max``
+
+Enum values, device identity, and channel numbers remain literal. The language
+supports up to eight nested levels beneath the outer descriptor. For selected-device examples, raw audio behavior, and host
 integration, see :doc:`midi-audio`.
 
 Pipeline Integration
 --------------------
 
-The DSL acts as a high-level builder for the Render Graph defined in :ref:`Pipeline Specification <shader-pipeline>`. For a detailed look at how the DSL is compiled, see :ref:`Compiler Specification <shader-compiler>`.
+The DSL acts as a high-level builder for the Render Graph defined in :ref:`Pipeline Specification <shader-pipeline>`. For compiler details, see :ref:`Compiler Specification <shader-compiler>`.
 
 Mapping DSL to Effects
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -713,7 +721,7 @@ Used by the SMRTicles particle system (see :ref:`SMRTicles <shader-smrticles>`):
 * **Velocity Surfaces:** ``vel0``-``vel7`` store agent velocities.
 * **Color Surfaces:** ``rgba0``-``rgba7`` store agent colors.
 
-These surfaces are managed by the ``pointsEmit`` and ``pointsRender`` wrappers. Behavior effects read and write these surfaces to update agent state each frame.
+The ``pointsEmit`` and ``pointsRender`` wrappers manage these surfaces. Behavior effects read and write these surfaces to update agent state each frame.
 
 **Mesh Surfaces:**
 
@@ -725,7 +733,12 @@ These surfaces are managed by the ``pointsEmit`` and ``pointsRender`` wrappers. 
 Feedback Loops
 ^^^^^^^^^^^^^^
 
-If a chain reads from a Surface that hasn't been written to yet in the current frame (or reads from itself), it reads the texture content from the **previous frame**. This enables feedback effects.
+A chain reads texture content from the **previous frame** in either of these cases:
+
+- The current frame has no earlier write to that Surface.
+- The chain reads from itself.
+
+This behavior enables feedback effects.
 
 Diagnostics
 -----------
@@ -801,5 +814,5 @@ Common Errors
 
 * **S005 (Illegal chain structure):** Generator functions (like ``noise`` and ``solid``) must appear at the start of a chain. They cannot consume an existing chain output.
 * **S006 (Starter chain missing write):** Generator-driven chains must end with ``.write()`` to produce a reusable surface.
-* **S007 (Deprecated parameter alias):** A parameter name you used still works but has been renamed. Update to the current name.
-* **S008 (Deprecated effect):** An effect you used still works but has been replaced by a newer effect. Update to the current name.
+* **S007 (Deprecated parameter alias):** The parameter has a new name. The previous name still works. Use the current name.
+* **S008 (Deprecated effect):** A newer effect replaces this effect, but the previous effect still works. Use the current name.

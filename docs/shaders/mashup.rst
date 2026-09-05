@@ -1,8 +1,8 @@
 Mashup
 ======
 
-Route up to eight sources through one grayscale control — posterize the
-control's luminance into bands and show a different surface in each band.
+Route up to eight sources through one grayscale control. The effect posterizes
+the control's luminance into bands. Each band shows a different surface.
 
 ``mixer/mashup`` reads the luminance of its ``source`` input and divides the
 0…1 range into ``layers`` equal bands. Each band displays a different engine
@@ -10,8 +10,8 @@ surface: the darkest band shows the first layer, the brightest shows the
 last. ``smoothness`` feathers each band boundary so adjacent sources
 cross-fade instead of meeting at a hard edge.
 
-It is the luminance-driven cousin of ``synth/remap``: where Remap routes
-surfaces to polygon zones, Mashup routes them to gray-level bands. Like
+Like ``synth/remap``, Mashup routes surfaces to regions. Remap uses polygon
+zones, and Mashup uses luminance bands. Like
 Remap, every input — including the control — is an explicit slot wired in
 DSL with ``read(oN)``.
 
@@ -30,8 +30,8 @@ DSL with ``read(oN)``.
 Notes
 -----
 
-- The control input is only sampled for its luminance — its color never
-  shows directly unless a band's layer source is unwired, in which case that
-  band falls back to showing the control input.
-- Bands are assigned darkest → brightest, so re-ordering the wired sources
-  re-orders which luminance range each occupies.
+- The effect normally samples only the control input's luminance. If a band's
+  layer source is unwired, that band shows the control input directly, including
+  its color.
+- Bands run from darkest to brightest. Changing the order of the wired sources
+  changes which luminance range each source occupies.

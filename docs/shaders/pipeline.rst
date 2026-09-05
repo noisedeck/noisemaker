@@ -3,7 +3,7 @@
 Pipeline Spec
 =============
 
-This document outlines the specification for the Noisemaker Rendering Pipeline and effect definition format. It is designed to support complex, multi-pass effects defined declaratively, executed on a unified GPU pipeline supporting either WebGL 2 or WebGPU backends.
+This document specifies the Noisemaker Rendering Pipeline and effect definition format. The pipeline supports declarative, multi-pass effects on WebGL 2 and WebGPU backends.
 
 1. Core Philosophy
 ------------------
@@ -12,9 +12,9 @@ This document outlines the specification for the Noisemaker Rendering Pipeline a
 #. **Declarative Effects:** Effects are ``Effect`` configuration objects that
    declare parameters, textures, shader programs, and passes.
 #. **Ordered Execution:** Expansion appends passes in DSL plan, effect-step, and
-   definition order; the Pipeline executes that array in the same order.
-#. **Multi-Pass By Design:** Effect definitions expand into explicit multi-pass schedules; layering and feedback are first-class.
-#. **Backend Agnostic:** The definition format is abstract; the runtime handles the specifics of WebGL 2 vs. WebGPU.
+   definition order. The Pipeline executes that array in the same order.
+#. **Multi-Pass By Design:** Effect definitions expand into explicit multi-pass schedules with direct support for layering and feedback.
+#. **Backend Agnostic:** The definition format is abstract. The runtime handles WebGL 2 and WebGPU details.
 #. **GPU-Resident Intermediates:** Normal pass-to-pass texture flow remains on
    the GPU. Explicit uploads, frame exports, and readback APIs cross the CPU/GPU
    boundary when requested.
@@ -30,14 +30,18 @@ The pipeline consists of three main phases:
 Phase 1: Compilation (Source to Compiled Graph)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Occurs when the DSL code changes. See :ref:`Compiler Specification <shader-compiler>` for the detailed specification of this phase.
+Compilation occurs when the DSL code changes. See :ref:`Compiler Specification <shader-compiler>` for the detailed specification of this phase.
 
 
-#. **Parse DSL:** Generate AST.
+#. **Parse DSL:** Generate the AST.
 #. **Analyze:** Resolve namespaces and parameters into validated planned chains.
 #. **Expand Effects:** Append each planned effect's constituent passes and
    collect its program and texture specifications.
-#. **Scope State Textures:** Effects that maintain simulation state use ``global_*`` textures (e.g., ``global_rd_state``, ``global_ca_state``, ``global_accum``). During expansion, these are scoped per-chain (e.g., ``global_rd_state_chain_0``) so that multiple instances of the same stateful effect in separate chains get independent state. Particle textures (``global_xyz``, ``global_vel``, etc.) are further scoped per-pipeline to the node that creates them. Effects within the same chain share state, which is required for patterns like ``loopBegin``/``loopEnd`` that share ``global_accum``.
+#. **Scope State Textures:** Effects maintain simulation state in ``global_*`` textures, such as ``global_rd_state``, ``global_ca_state``, and ``global_accum``.
+   Expansion scopes these textures per chain, for example ``global_rd_state_chain_0``.
+   Instances of the same stateful effect in separate chains therefore have independent state.
+   Expansion further scopes particle textures (``global_xyz``, ``global_vel``, etc.) per pipeline to their creating node.
+   Effects within a chain share state. Patterns such as ``loopBegin``/``loopEnd`` require this sharing for ``global_accum``.
 #. **Resource Analysis:** Determine the first and last use of each non-global
    virtual texture and compute a linear-scan allocation map.
 #. **Assemble:** Package the ordered passes, programs, allocation map, texture
@@ -46,44 +50,59 @@ Occurs when the DSL code changes. See :ref:`Compiler Specification <shader-compi
 Phase 2: Pipeline Initialization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Occurs before execution and revisits texture allocation when dimensions change.
+The Pipeline initializes before execution and revisits texture allocation when dimensions change.
 
 
 #. **Backend Initialization:** Initialize WebGL 2 or WebGPU.
-#. **Program Compilation:** Resolve each unique program referenced by the pass
-   list and compile it with the selected backend.
-#. **Texture Creation:** Resolve graph texture dimensions and create ordinary
-   textures plus double-buffered global surfaces. The current Pipeline creates
-   textures by virtual ID; it does not consume the compiler's allocation map as
-   a backend texture pool.
+#. **Program Compilation:** Resolve each unique program referenced by the pass list.
+   Compile it with the selected backend.
+#. **Texture Creation:** Resolve graph texture dimensions.
+   Create ordinary textures and double-buffered global surfaces.
+   The current Pipeline creates textures by virtual ID. It does not use the
+   compiler's allocation map as a backend texture pool.
 
 Phase 3: Execution (GPU Driver)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Occurs every frame.
+The Pipeline executes every frame.
 
 
-#. **Update Globals:** Refresh runtime uniforms sourced from the implementation: ``time`` (seconds since start), ``deltaTime`` (frame-to-frame delta), ``frame`` (integer tick), ``resolution`` (``vec2`` pixels), and ``aspect`` (width ÷ height).
+#. **Update Globals:** Refresh these runtime uniforms from the implementation:
+
+   - ``time``: seconds since start
+   - ``deltaTime``: frame-to-frame delta
+   - ``frame``: integer tick
+   - ``resolution``: ``vec2`` pixels
+   - ``aspect``: width ÷ height
+
 #. **Iterate Passes:** Walk ``graph.passes`` in compiler-produced order.
 #. **Dispatch:**
 
    * **WebGL 2:**
 
-     * Activate the compiled ``WebGLProgram`` for the pass and resolve the target framebuffer (global surfaces map to the current write buffer).
-     * Derive the viewport from the target texture dimensions (or the pass override) and bind it before issuing work.
-     * Bind each declared input texture to successive texture units and upload merged uniforms from ``globalUniforms`` + pass uniforms via ``gl.uniform*``.
-     * Configure blending if the pass requests it, then issue either ``gl.drawArrays(gl.TRIANGLES, 0, 3)`` for the default full-screen triangle or ``gl.drawArrays(gl.POINTS, ...)`` when ``drawMode == 'points'``.
+     * Activate the compiled ``WebGLProgram`` for the pass.
+       Resolve the target framebuffer. Global surfaces map to the current write buffer.
+     * Derive the viewport from the target texture dimensions or the pass override.
+       Bind the viewport before issuing work.
+     * Bind each declared input texture to successive texture units.
+       Upload merged uniforms from ``globalUniforms`` + pass uniforms through ``gl.uniform*``.
+     * Configure blending if the pass requests it.
+       Issue ``gl.drawArrays(gl.TRIANGLES, 0, 3)`` for the default full-screen triangle.
+       When ``drawMode == 'points'``, issue ``gl.drawArrays(gl.POINTS, ...)`` instead.
 
    * **WebGPU:**
 
-     * Create a command encoder at frame start, then for each pass resolve the output texture view (respecting double-buffer swaps).
-     * Reflect the program's supported group-0 bindings and create entries for
-       its declared textures, selected samplers, storage resources, and either
-       a packed struct buffer or individual uniform buffers.
+     * Create a command encoder at frame start.
+       For each pass, resolve the output texture view with the current double-buffer swaps.
+     * Reflect the program's supported group-0 bindings.
+       Create entries for its declared textures, selected samplers, and storage resources.
+       Create entries for a packed struct buffer or individual uniform buffers, as applicable.
      * Render passes load an existing target by default and clear it only when
-       ``pass.clear`` is set, then bind the pipeline/group and issue the
+       ``pass.clear`` is set. They then bind the pipeline/group and issue the
        requested draw.
-     * Compute passes begin a compute pass, set the compute pipeline/bind group, and dispatch ``passEncoder.dispatchWorkgroups(...)`` using explicit ``workgroups`` or dimensions derived from the output texture.
+     * For a compute pass, begin the pass.
+       Set the compute pipeline/bind group.
+       Dispatch ``passEncoder.dispatchWorkgroups(...)`` with explicit ``workgroups`` or dimensions derived from the output texture.
 
 ----
 
@@ -96,8 +115,8 @@ Occurs every frame.
 
 * **Render Passes:** Standard ``drawArrays`` into Framebuffer Objects (FBOs).
 * **GPGPU Fallbacks:** Effects that use native WebGPU compute provide separate
-  GLSL fragment programs for WebGL. Storage-texture or ``outputBuffer`` passes
-  are remapped to framebuffer outputs before the fallback program is drawn.
+  GLSL fragment programs for WebGL. The backend remaps storage-texture or ``outputBuffer`` passes to framebuffer
+  outputs before drawing the fallback program.
 
 3.2 WebGPU Implementation
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -138,16 +157,19 @@ compute implementation and an explicit GLSL render/GPGPU implementation.
 * Each source-detected compute program compiles into a
   ``GPUComputePipeline``. Multi-entry-point programs cache a pipeline per
   selected ``entryPoint``.
-* Dispatch shape uses ``workgroups: [x,y,z]`` when supplied. Otherwise the
-  backend tries a pass ``size``, the first output texture's dimensions, and
-  then the screen dimensions, using ``[ceil(width/8), ceil(height/8), 1]``
-  for dimension-derived dispatches. It raises
+* Dispatch shape uses ``workgroups: [x,y,z]`` when supplied. Otherwise, the backend tries dimensions in this order:
+
+  1. The pass ``size``
+  2. The first output texture's dimensions
+  3. The screen dimensions
+
+  Dimension-derived dispatches use ``[ceil(width/8), ceil(height/8), 1]``. The backend raises
   ``ERR_COMPUTE_DISPATCH_UNRESOLVED`` if none is available.
 * Bindings:
 
-  * Reflected ``@group(0)`` sampled textures, samplers, uniform buffers,
-    storage buffers, and storage textures are bound by name from the pass and
-    frame state.
+  * The backend binds reflected ``@group(0)`` resources by name from the pass
+    and frame state. Resources include sampled textures, samplers, uniform
+    buffers, storage buffers, and storage textures.
   * Uniform bindings use the WGSL reflection and per-binding buffer paths
     described in Section 7.
 
@@ -158,8 +180,8 @@ compute implementation and an explicit GLSL render/GPGPU implementation.
 * WebGL has no WGSL entry-point detection, compute dispatch, or ``workgroups``
   handling. The effect's GLSL program must implement the equivalent operation
   as a renderable fragment-shader pass.
-* Passes using ``storageTextures`` or an ``outputBuffer`` output take the
-  backend's GPGPU conversion path, which remaps those outputs to framebuffer
+* Passes using ``storageTextures`` or an ``outputBuffer`` output use the
+  backend's GPGPU conversion path. This path remaps those outputs to framebuffer
   color attachments and draws the GLSL fallback program. It does not translate
   WGSL invocation built-ins into GLSL.
 * Multiple outputs use MRT. Capability and framebuffer failures surface from
@@ -169,11 +191,11 @@ compute implementation and an explicit GLSL render/GPGPU implementation.
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 
-* WebGPU capabilities come from the WGSL source and active device; there is no
+* WebGPU capabilities come from the WGSL source and active device. There is no
   ``effect.version`` feature gate. WebGL fallback programs remain limited to
   operations expressible through its render-based path.
 * A source-detected WebGPU compute program may precede or follow render
-  programs; definition and DSL order determine execution order.
+  programs. Definition and DSL order determine execution order.
 * ``repeat`` may be a fixed number or a uniform name. Repeated writes to global
   surfaces use the Pipeline's frame-local read/write bindings between
   iterations.
@@ -183,23 +205,23 @@ compute implementation and an explicit GLSL render/GPGPU implementation.
 6. Validation Rules
 --------------------
 
-Validation is split across the current implementation:
+The current implementation validates at these stages:
 
 
 #. **DSL Parsing:** The parser enforces syntax and the mandatory ``search``
    directive, throwing ``SyntaxError`` for parse failures.
 #. **DSL Semantics:** The validator resolves names, chain structure, arguments,
-   enums, and automation. It returns ``S001``–``S008`` diagnostics; error-level
+   enums, and automation. It returns ``S001``–``S008`` diagnostics. Error-level
    diagnostics become ``ERR_COMPILATION_FAILED`` in ``compileGraph()``.
 #. **Expansion:** Missing registered effects or a program with no render/write
    target become ``ERR_EXPANSION_FAILED``.
 #. **Effect Harness Validation:** ``validateEffectDefinition()`` checks only the
    required effect name, a non-empty pass list, each pass's program and object
-   inputs/outputs, and global parameter types. It returns strings and is used by
-   the structure harness; it is not a complete JSON-schema validator.
-#. **Backend Validation:** Shader source, binding, program, texture, device-limit,
-   and dispatch failures are detected when the Pipeline compiles or executes
-   programs.
+   inputs/outputs, and global parameter types. The structure harness uses its returned strings. This function is not a
+   complete JSON-schema validator.
+#. **Backend Validation:** The Pipeline detects failures when it compiles or
+   executes programs. These include shader source, binding, program, texture,
+   device-limit, and dispatch failures.
 
 6.1 Shader Compilation Lifecycle
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -209,9 +231,9 @@ compiles each distinct program name once. The expander gives programs
 effect-instance-scoped names and includes sorted compile-time define values in
 the name, so different define variants receive different backend entries.
 
-During CanvasRenderer recompilation, rendering is paused with ``isCompiling``;
-``recompile()`` replaces the graph and recreates graph-dependent textures, then
-CanvasRenderer invokes ``compilePrograms()`` before rendering resumes. A DSL or
+During recompilation, CanvasRenderer pauses rendering with ``isCompiling``.
+The ``recompile()`` method replaces the graph and recreates graph-dependent
+textures. CanvasRenderer then invokes ``compilePrograms()`` before rendering resumes. A DSL or
 expansion failure returns ``null`` before the graph swap.
 
 ----
@@ -221,12 +243,11 @@ expansion failure returns ``null`` before the graph swap.
 
 ``analyzeLiveness()`` scans the ordered pass array. Every non-global texture
 mentioned by an input or output receives a ``{start, end}`` interval spanning
-its first and last mention. IDs beginning with ``global_`` are excluded.
+its first and last mention. The analysis excludes IDs beginning with ``global_``.
 
 ``allocateResources()`` then walks the same pass order. It assigns ``phys_N``
 slots to previously unseen outputs and releases an input's slot after its last
-use. A released slot can be reused only by an output in a later pass. The
-resulting ``Map<virtualId, physicalId>`` is stored on the compiled graph.
+use. A released slot can be reused only by an output in a later pass. The compiled graph stores the resulting ``Map<virtualId, physicalId>``.
 
 The current Pipeline does not use that map to pool backend textures: it creates
 textures from ``graph.textures`` by virtual ID. Consequently the allocator does
@@ -238,10 +259,10 @@ not group by dimensions or formats and has no runtime compaction cycle.
 **WebGL Texture Units:**
 
 
-* Slots 0..N assigned sequentially in pass input declaration order.
+* The backend assigns slots 0..N sequentially in pass input declaration order.
 * The backend resolves global surface IDs through the current frame state and
   binds either 2D or 3D texture targets as required.
-* The available-unit limit is checked while binding; overflow raises
+* The backend checks the available-unit limit while binding. Overflow raises
   ``ERR_TOO_MANY_TEXTURES`` with the pass id and device limit.
 
 **WebGPU Bind Groups:**
@@ -249,14 +270,14 @@ not group by dimensions or formats and has no runtime compaction cycle.
 The backend parses WGSL resource declarations and entry-point usage, then
 builds entries for supported ``@group(0)`` bindings. It handles sampled
 textures, storage textures, storage buffers, samplers, and uniforms according
-to each declaration's binding index; other groups are currently skipped.
+to each declaration's binding index. It currently skips other groups.
 
 7.2 Uniform Transport
 ^^^^^^^^^^^^^^^^^^^^^
 
-Uniform transport is backend-specific. WebGL uploads ordinary active uniforms
-and, when an effect provides ``uniformLayout`` metadata for an active uniform
-block, packs that block according to the declared 16-byte slots. For WebGPU, a
+Uniform transport is backend-specific. WebGL uploads ordinary active uniforms.
+If an effect provides ``uniformLayout`` metadata for an active uniform block,
+WebGL packs that block into the declared 16-byte slots. For WebGPU, a
 struct binding receives one packed uniform buffer, while a scalar/vector/matrix
 uniform binding receives its own small buffer. The backend recycles those
 buffers after submission.
@@ -314,13 +335,19 @@ Global geometry buffers (``geo0``.. ``geo7``) defined implicitly:
 
 **CRITICAL: User-Only Surfaces**
 
-Surfaces ``o0``..``o7``, ``vol0``..``vol7``, and ``geo0``..``geo7`` are **reserved exclusively for user composition** and **MUST NOT** be hardwired within effect definitions. Effects requiring internal feedback or temporary storage must allocate their own internal surfaces (e.g., ``_feedbackBuffer``, ``_temp0``) in their ``textures`` property. Hardwiring these surfaces within an effect definition will corrupt the user's composition graph.
+Surfaces ``o0``..``o7``, ``vol0``..``vol7``, and ``geo0``..``geo7`` are **reserved exclusively for user composition**.
+Effect definitions **MUST NOT** hardwire these surfaces. Hardwiring them will
+corrupt the user's composition graph.
+
+Effects that need internal feedback or temporary storage must allocate their
+own internal surfaces in ``textures``. Examples include ``_feedbackBuffer``
+and ``_temp0``.
 
 **Terminology:**
 
 
 * ``doubleBuffered``: The surface has read and write texture IDs. Frame-local
-  bindings advance after writes; display surfaces swap at frame end, while
+  bindings advance after writes. Display surfaces swap at frame end, while
   recognized state surfaces retain their final bindings.
 
 8.0.1 Global Surface Behavior
@@ -329,18 +356,16 @@ Surfaces ``o0``..``o7``, ``vol0``..``vol7``, and ``geo0``..``geo7`` are **reserv
 At frame start, each surface's current read and write IDs seed frame-local
 maps. A chain writing ``.write(o0)`` targets the current write ID. The Pipeline
 advances the frame-local binding after the pass, so later reads and writes in
-the same frame see the newest content. Multiple writes are supported and are
-resolved by this ordered binding update; there is no separate multiwrite
-validator.
+the same frame see the newest content. This ordered binding update supports multiple writes. There is no separate
+multiwrite validator.
 
 8.1 Resize Behavior
 ^^^^^^^^^^^^^^^^^^^^
 
 ``Pipeline.resize(width, height)`` updates the output-sink descriptor, then
-calls ``createSurfaces()`` and ``recreateTextures()``. Dimension specifications
-are resolved against the new screen size and current pass uniforms. A backend
-texture is reused when its resolved dimensions still match; otherwise the old
-texture is destroyed and recreated. Resizing also restarts asynchronous effect
+calls ``createSurfaces()`` and ``recreateTextures()``. The Pipeline resolves dimension specifications against the new screen size
+and current pass uniforms. It reuses a backend texture when its resolved
+dimensions still match. Otherwise, it destroys and recreates the texture. Resizing also restarts asynchronous effect
 initialization. The current resize path does not blit old surface content into
 newly sized textures or recompile shader programs.
 
@@ -351,28 +376,28 @@ newly sized textures or recompile shader programs.
 
 There is no dependency DAG or topological sort. ``expand()`` appends passes in
 DSL plan order, effect-step order, and each definition's ``passes`` array order.
-Built-in read, write, and final blit passes are inserted at the point where the
-expander encounters them. ``Pipeline.render()`` walks ``graph.passes`` from
+The expander inserts built-in read, write, and final blit passes where it
+encounters them. ``Pipeline.render()`` walks ``graph.passes`` from
 index zero to the end.
 
 For global surfaces, the Pipeline maintains frame-local read and write
 bindings. A write updates those bindings so a later pass in the same frame sees
-the fresh result; the surface record is swapped or persisted at frame end.
+the fresh result. At frame end, the Pipeline swaps or preserves the surface record.
 
 **Dynamic Pass Skipping:**
 The Pipeline can evaluate ``conditions`` with ``skipIf`` and/or ``runIf`` on a
 pass already present in a graph. The effect expander does not currently copy
 ``conditions`` from effect pass definitions, so this mechanism is unavailable
-to ordinary DSL-compiled effects. On a graph pass that does carry the field,
-the runtime compares each condition's named uniform with ``equals`` before
-dispatch and skips the pass when the condition says not to run.
+to ordinary DSL-compiled effects. For a graph pass with this field, the runtime compares each condition's named
+uniform with ``equals`` before dispatch. It skips the pass when the condition
+says not to run.
 
 9.1 Repeated Passes
 ^^^^^^^^^^^^^^^^^^^
 
-``repeat`` is copied from the pass definition into the expanded pass. A number
-is clamped to an integer of at least one; a string names a global or pass
-uniform whose current value supplies that count. The Pipeline executes the same
+The expander copies ``repeat`` from the pass definition into the expanded pass.
+A number is clamped to an integer of at least one. A string names a global or
+pass uniform whose current value supplies that count. The Pipeline executes the same
 pass object that many times. After each repeated write to a global surface, it
 adopts the new frame-local read/write bindings before the next iteration.
 
@@ -385,23 +410,22 @@ adopts the new frame-local read/write bindings before the next iteration.
 * An effect global's ``uniform`` field names the shader value populated by the
   expander. A pass's resolved uniforms take precedence over same-named runtime
   globals.
-* Enum members are resolved to their registered numeric values during semantic
-  validation.
+* Semantic validation resolves enum members to their registered numeric values.
 * Ordinary uniforms, uniform blocks, samplers, storage buffers, and storage
   textures follow the backend-specific reflection paths described in Section
-  7; the runtime does not apply a generic ``u_`` prefix rewrite.
+  7. The runtime does not apply a generic ``u_`` prefix rewrite.
 
 10.1 Pipeline Texture References
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 ``inputTex`` is the canonical 2D reference to the previous effect's output.
 During expansion it resolves to the current virtual input texture. A
-non-starter effect cannot begin a chain; the DSL validator reports diagnostic
+non-starter effect cannot begin a chain. The DSL validator reports diagnostic
 ``S005`` before expansion.
 
-``outputTex`` is the canonical 2D output reference. It resolves to the current
-node's virtual output, or directly to the terminal global surface when the last
-pass of a writing chain can target that surface. An ordinary undeclared output
+``outputTex`` is the canonical 2D output reference. It resolves to the current node's virtual output. If the last pass of a writing
+chain can target the terminal global surface, it resolves directly to that
+surface instead. An ordinary undeclared output
 texture receives a screen-sized ``rgba16f`` spec in ``compileGraph()``.
 
 The corresponding volumetric references are ``inputTex3d`` and
@@ -453,8 +477,8 @@ codes:
 12. Current Performance Behavior
 --------------------------------
 
-Graph compilation is synchronous; the implementation does not enforce a pass
-count timing target or emit compile-time pool metrics. Normal rendering keeps
+Graph compilation is synchronous. The implementation does not enforce a timing
+target by pass count or emit compile-time pool metrics. Normal rendering keeps
 intermediate textures on the GPU. Readback occurs only through explicit APIs
 such as frame export, cubemap capture, or backend ``readPixels()``.
 
@@ -464,7 +488,7 @@ such as frame export, cubemap capture, or backend ``readPixels()``.
 -----------------
 
 The current ``Effect`` constructor copies the supported configuration fields
-described in :ref:`Effect Definition Spec <shader-effects>`; it does not expose
+described in :ref:`Effect Definition Spec <shader-effects>`. It does not expose
 an ``effect.version`` feature gate. Hosts extend the available language through
 effect registration and the namespace registry.
 
@@ -515,11 +539,17 @@ effect registration and the namespace registry.
 14.2 Pipeline State
 ^^^^^^^^^^^^^^^^^^^
 
-The Pipeline holds the compiled graph, selected backend, output sinks,
-double-buffered global surfaces, global uniforms, dimensions, frame-local
-surface bindings, external MIDI/audio state, and async-effect cancellation
-handles. ``isCompiling`` is the render gate used while backend programs are
-being rebuilt; there is no separate effect lifecycle state machine.
+The Pipeline holds these runtime resources and state:
+
+- The compiled graph and selected backend
+- Output sinks and double-buffered global surfaces
+- Global uniforms and dimensions
+- Frame-local surface bindings
+- External MIDI/audio state
+- Async-effect cancellation handles
+
+The ``isCompiling`` flag prevents rendering while the backend rebuilds
+programs. There is no separate effect lifecycle state machine.
 
 14.3 Frame Execution State
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -557,17 +587,16 @@ being rebuilt; there is no separate effect lifecycle state machine.
 16.1 Hot Reload Protocol
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-CanvasRenderer sets ``isCompiling`` before invoking ``recompile()``. A source
-compile or expansion failure is logged and returns ``null`` before replacing
-the existing graph. On success, ``recompile()`` assigns ``pipeline.graph`` and
-recreates graph-dependent surfaces and textures; CanvasRenderer then awaits
+CanvasRenderer sets ``isCompiling`` before invoking ``recompile()``. If source compilation or expansion fails, the method logs the failure.
+It returns ``null`` before replacing the existing graph. On success, ``recompile()`` assigns ``pipeline.graph`` and
+recreates graph-dependent surfaces and textures. CanvasRenderer then awaits
 ``compilePrograms()`` before rendering resumes.
 
 16.2 Error Recovery
 ^^^^^^^^^^^^^^^^^^^
 
 ``Pipeline.render()`` logs a pass execution failure with the pass id and
-rethrows it; it does not substitute a fallback texture or continue later
+rethrows it. It does not substitute a fallback texture or continue later
 passes. Pipeline initialization likewise propagates program compilation and
 resource errors after clearing the ``isCompiling`` gate.
 

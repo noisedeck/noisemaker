@@ -3,11 +3,11 @@
 Effect String Localization
 ==========================
 
-Effect-facing text — display names, descriptions, parameter labels, and enum
-option labels — can be translated without changing effect definitions, the
-manifest, or any existing consumer. The English source of truth stays in the
-definitions; translations ship as separate, optional catalogs that consumers
-opt into at runtime.
+You can translate effect display names, descriptions, parameter labels, and enum
+option labels. Translation requires no changes to effect definitions, the
+manifest, or existing consumers. The definitions remain the English source of
+truth. Translations ship as separate, optional catalogs that consumers enable
+at runtime.
 
 How it works
 ------------
@@ -23,10 +23,11 @@ keyed by stable IDs derived from identifiers effects already use:
    <namespace>/<effect>.<paramId>.<choiceKey>  enum option label
    @ns/<namespace>                             namespace label
 
-The catalog is written to ``shaders/effects/strings.en.json`` and copied to the
-CDN next to ``manifest.json`` (``.../effects/strings.en.json``). A translator
-copies it to ``strings.<locale>.json`` and translates the values; partial files
-are fine — any missing key falls back to English. Names and labels keep the
+The generator writes the catalog to ``shaders/effects/strings.en.json``.
+Distribution copies it to the CDN beside ``manifest.json``
+(``.../effects/strings.en.json``). A translator copies the catalog to
+``strings.<locale>.json`` and translates the values. Partial files are valid.
+The localizer uses English for any missing key. Names and labels keep the
 definition's explicit casing (for example ``Adjust``).
 
 Generating the base catalog
@@ -36,16 +37,21 @@ Generating the base catalog
 
    npm run strings
 
-Run this whenever you add or remove an effect, or change a ``name``,
-``description``, ``ui.label``, or a ``choices`` key. The test
+Run this command after any of these changes:
+
+- Adding or removing an effect
+- Changing a ``name``, ``description``, or ``ui.label``
+- Changing a ``choices`` key
+
+The test
 ``npm run test:shaders:i18n`` fails if the committed ``strings.en.json`` is out
 of date.
 
 Consuming translations
 ----------------------
 
-The localizer lives on ``CanvasRenderer`` and is **opt-in** — until a consumer
-sets a locale, nothing changes and no catalog is fetched:
+The localizer belongs to ``CanvasRenderer`` and is **opt-in**. Until a consumer
+sets a locale, behavior stays unchanged and the renderer fetches no catalog:
 
 .. code-block:: javascript
 
@@ -61,10 +67,15 @@ sets a locale, nothing changes and no catalog is fetched:
 
    await renderer.setLocale(null)               // back to unchanged English
 
-``localize(id, fallback)`` returns the active-locale value, then the English base
-value, then ``fallback``. Pass the consumer's current English (for example the
-``camelToSpaceCase`` display) as ``fallback`` so that with no locale set — or a
-missing key — the output is exactly today's English.
+``localize(id, fallback)`` searches in this order:
+
+1. The active locale
+2. The English base catalog
+3. The ``fallback`` argument
+
+Pass the consumer's current English text as ``fallback``, such as the
+``camelToSpaceCase`` display. This preserves the current English output when
+no locale is set or a key is missing.
 
 Backward compatibility
 ----------------------
@@ -72,22 +83,21 @@ Backward compatibility
 - ``manifest.json`` and effect definitions are unchanged.
 - ``strings.<locale>.json`` are separate, optional downloads.
 - With no locale set, every API returns its previous English value.
-- A missing, empty, or unfetchable locale value degrades to the English base,
-  then to the caller's fallback. To leave a string untranslated, omit the key
-  (an empty value behaves the same — it falls back to English).
+- For a missing, empty, or unfetchable locale value, the localizer uses the
+  English base, then the caller's fallback. To leave a string untranslated,
+  omit the key. An empty value also selects English.
 
 Adding a locale
 ---------------
 
 1. Copy ``shaders/effects/strings.en.json`` to ``strings.<locale>.json``.
 2. Translate the values (leave the keys/identifiers untouched).
-3. Ship it — the bundler copies ``strings.*.json`` into ``dist``.
+3. Ship the catalog. The bundler copies ``strings.*.json`` into ``dist``.
 4. Consumers call ``renderer.setLocale('<locale>')``.
 
 Not translated
 --------------
 
-Identifiers are part of the DSL / uniform contract and are never translated:
+Never translate identifiers. They are part of the DSL / uniform contract:
 ``namespace``, ``func``, parameter names, ``choices`` values, ``uniform`` names,
-and ``tags``. Parameter ``category`` strings are grouping keys, so they are not
-included in the catalog.
+and ``tags``. Parameter ``category`` strings are grouping keys. The catalog excludes them.

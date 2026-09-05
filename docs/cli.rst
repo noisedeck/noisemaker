@@ -1,7 +1,7 @@
 Noisemaker CLI
 ==============
 
-The ``noisemaker`` command-line interface provides tools for generating procedural art, creating animations, and applying effects to images using `Composer Presets <composer.html>`_.
+The ``noisemaker`` command-line interface uses `Composer Presets <composer.html>`_ to generate procedural art, create animations, and apply effects to images.
 
 Overview
 --------
@@ -156,18 +156,20 @@ Strobe safety verdict
 ^^^^^^^^^^^^^^^^^^^^^
 
 After rendering, ``animate`` prints a machine-readable
-``strobe-warning: yes`` or ``strobe-warning: no`` line. The check applies the
-WCAG general flash threshold to an 8×8 sampling grid before any watermark is
-added. ``yes`` means that more than three flashes occur in a one-second window
-either in the whole-frame mean or in at least one quarter of the sampled grid
-cells. The animation is still written, so callers can use the verdict to add a
+``strobe-warning: yes`` or ``strobe-warning: no`` line. Before adding any watermark, the command checks an 8×8 sampling grid against
+the WCAG general flash threshold. The ``yes`` verdict means that more than
+three flashes occur in a one-second window in either measurement:
+
+- The whole-frame mean
+- At least one quarter of the sampled grid cells
+
+The command still writes the animation. Callers can use the verdict to add a
 photosensitivity warning or hold the output for review.
 
 When ``--target-duration`` is set, the detector uses
 ``frame-count / target-duration`` as the playback rate. MP4 encoding applies
-the same requested timing; GIF encoding does not, so omit
-``--target-duration`` for GIFs when the verdict must reflect their actual
-playback rate.
+the same requested timing. GIF encoding does not. For a verdict that reflects
+actual GIF playback, omit ``--target-duration``.
 
 apply
 ~~~~~
@@ -261,7 +263,7 @@ Create an animated collage from multiple directories of image sequences.
 - ``--input-dir DIRECTORY`` - Directory containing subdirectories of frames
 
 The input directory must contain at least four usable subdirectories. A usable
-subdirectory contains at least ``--frame-count`` PNG files; shorter directories
+subdirectory contains at least ``--frame-count`` PNG files. Shorter directories
 and non-PNG files do not count. The command exits with an error when fewer than
 four usable subdirectories remain.
 
@@ -282,7 +284,7 @@ four usable subdirectories remain.
 - ``--target-duration FLOAT`` - Stretch MP4 output to the specified duration (seconds)
 
 Like ``animate``, this command prints a ``strobe-warning: yes|no`` verdict
-after it has scored the rendered frames against the WCAG general flash
+after it scores the rendered frames against the WCAG general flash
 threshold described above.
 
 **Examples:**
@@ -298,7 +300,7 @@ threshold described above.
 Working with Presets
 --------------------
 
-Presets are predefined combinations of layers, effects, and settings. They are defined in ``share/dsl/presets.dsl``.
+Presets are predefined combinations of layers, effects, and settings. The ``share/dsl/presets.dsl`` file defines them.
 
 Common generator presets include:
 
