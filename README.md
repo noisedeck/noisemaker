@@ -1,6 +1,6 @@
 # Noisemaker
 
-Noisemaker is a friendly, extendable shader art engine for the browser. It renders real-time generative art and visual effects on WebGL2 and WebGPU — 100+ composable effects, a compact declarative DSL for wiring them together, and no required build step or dependencies.
+Noisemaker is an extendable shader art engine for the browser. It renders real-time generative art and visual effects on WebGL2 and WebGPU. It includes 100+ composable effects and a compact declarative DSL to connect them. It requires no build step or dependencies.
 
 ## Noisedeck
 
@@ -22,23 +22,25 @@ Full documentation, including the complete API reference and preset guide, is av
 
 ## Getting Started
 
-Installation, CLI usage, API walkthroughs, and advanced workflows are covered in the documentation index. Platform-specific quick-start guides for Python, browser modules, and Docker live there as well as in the dedicated READMEs linked below.
+The documentation index covers installation, CLI usage, API walkthroughs, and advanced workflows. It also includes quick-start guides for Python, browser modules, and Docker. The dedicated READMEs below provide platform-specific guides.
 
 ## Bring your coding agent
 
-Noisemaker is easy for coding agents to pick up: the docs ship in machine-readable form ([llms.txt](https://noisemaker.app/llms.txt), [llms-full.txt](https://noisemaker.app/llms-full.txt)), and every effect carries a structured definition and a manifest entry. That covers composing programs in the DSL — and it covers writing effects, too: your own GLSL and WGSL in the [Portable Effects](https://github.com/noisefactorllc/portable) format, with [shade-mcp](https://github.com/noisefactorllc/shade-mcp) driving a real browser to compile them, render frames, check every uniform does something, and diff WebGL2 against WebGPU. See [Building with coding agents](https://docs.noisemaker.app/coding-agents/) for the full workflow.
+Coding agents can read the documentation in machine-readable form: [llms.txt](https://noisemaker.app/llms.txt) and [llms-full.txt](https://noisemaker.app/llms-full.txt). Every effect includes a structured definition and a manifest entry. These resources cover DSL composition and custom GLSL and WGSL effects in the [Portable Effects](https://github.com/noisefactorllc/portable) format.
+
+[shade-mcp](https://github.com/noisefactorllc/shade-mcp) drives a real browser to compile effects, render frames, check each uniform's effect, and compare WebGL2 with WebGPU. See [Building with coding agents](https://docs.noisemaker.app/coding-agents/) for the full workflow.
 
 ## Contributing
 
-Issues and pull requests are welcome! Review the [Code of Conduct](CODE_OF_CONDUCT.md) and follow the contribution guidelines in the docs before opening changes.
+Issues and pull requests are welcome! Review the [Code of Conduct](CODE_OF_CONDUCT.md). Follow the contribution guidelines in the docs before opening changes.
 
 ## Ports
 
 Additional platform-specific guides:
 
 - Python development and API details live in the docs linked above
-- JavaScript presets port is covered in the [JavaScript README](js/README-JS.md)
-- Shader effects port is documented in the [Shaders README](shaders/README-SHADERS.md)
+- The [JavaScript README](js/README-JS.md) covers the JavaScript presets port
+- The [Shaders README](shaders/README-SHADERS.md) documents the shader effects port
 - Container workflows appear in the [Docker README](README-DOCKER.md)
 
 ## Credits

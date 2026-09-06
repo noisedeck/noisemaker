@@ -8,11 +8,12 @@ To build the Docker image from source:
 docker build -t noisemaker .
 ```
 
-The Dockerfile is located at the root of the repository and uses a multi-stage build for optimal image size.
+The Dockerfile is at the repository root. It uses a multi-stage build to reduce image size.
 
 ## Usage
 
-Getting noisemaker output out of Docker requires mounting a volume for output files. You must:
+To access Noisemaker output outside Docker, you must mount a volume for output files. You must:
+
 - Mount a local directory to `/output` in the container (`-v /your/local/output:/output`)
 - Prefix the output filename with `output/` (`--filename output/noise.png`)
 
@@ -27,7 +28,7 @@ docker run -v `pwd`/output:/output noisemaker \
 
 ### Docker on Windows
 
-Make sure that disk sharing is enabled in your local Docker settings, and provide the full local path to `-v`.
+Make sure that your local Docker settings enable disk sharing. Provide the full local path to `-v`.
 
 Replace {{YOUR-USERNAME-HERE}} and {{PATH-TO-OUTPUT}} in the example below:
 
