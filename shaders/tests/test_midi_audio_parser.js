@@ -333,9 +333,8 @@ test('audio rejects mixed keyword and positional overflow', () => {
     assert(threw, 'should not silently discard an unconsumed positional argument')
 })
 
-test('audio requires device name and channel together, and id requires name', () => {
+test('audio named devices require a channel, and id requires name', () => {
     for (const source of [
-        'search synth\nnoise(scale: audio(band: audioBand.low, channel: 1)).write(o0)',
         'search synth\nnoise(scale: audio(band: audioBand.low, name: "Interface")).write(o0)',
         'search synth\nnoise(scale: audio(band: audioBand.low, channel: 1, id: "port-id")).write(o0)'
     ]) {
@@ -711,6 +710,162 @@ test('formats selected raw audio with readable name, exact id and channel', () =
     assertEqual(result,
         'audio(band: audioBand.raw, channel: 2, name: "ES-9", id: "audio-port-2")',
         'should retain selected raw audio identity')
+})
+
+
+test('MIDI CC and CC14 compile and round-trip controller selection in nested automation', () => {
+    for (const [mode, expectedMode, cc] of [['cc', 5, 74], ['cc14', 6, 31]]) {
+        const source = `search synth\nlet controller = ${cc}\nlet knob = midi(channel: 2, mode: midiMode.${mode}, cc: controller, name: "Keys", id: "port")\nnoise(scale: osc(speed: knob)).write(o0)`
+        const compiled = compile(source)
+        assertEqual(compiled.diagnostics.length, 0, 'CC mode should compile without diagnostics')
+        const config = compiled.plans[0].chain[0].args.scale.speed
+        assertEqual(config.mode, expectedMode, 'new modes should append to the existing enum')
+        assertEqual(config.cc, cc, 'static let controller should resolve')
+        const text = unparse(compiled)
+        assert(text.includes('cc: controller'), 'let controller field should survive unparse')
+        const again = compile(text)
+        assertEqual(again.diagnostics.length, 0, 'unparsed nested CC should compile cleanly')
+        assertEqual(again.plans[0].chain[0].args.scale.speed.cc, cc, 'nested round-trip should retain controller')
+        const formatted = formatValue({ type: 'Midi', channel: 2, mode: expectedMode, cc, min: 0, max: 1, sensitivity: 1 })
+        assert(formatted.includes(`mode: midiMode.${mode}`) && formatted.includes(`cc: ${cc}`), 'runtime format should retain controller and mode')
+    }
+})
+
+test('CC modes default to controller one and reject dynamic or out-of-range controllers', () => {
+    for (const mode of ['cc', 'cc14']) {
+        const config = compile(`search synth\nnoise(scale: midi(channel: 1, mode: midiMode.${mode})).write(o0)`).plans[0].chain[0].args.scale
+        assertEqual(config.cc, 1, 'CC modes should default to controller one')
+        for (const cc of [mode === 'cc' ? '128' : '32', '-1', '1.5', 'true', '"1"', 'osc()']) {
+            const compiled = compile(`search synth\nnoise(scale: midi(channel: 1, mode: midiMode.${mode}, cc: ${cc})).write(o0)`)
+            assert(compiled.diagnostics.length > 0, 'invalid controller should produce diagnostics')
+            assertEqual(compiled.plans[0].chain[0].args.scale._invalid, true, 'invalid controller should remain inert')
+        }
+    }
+})
+
+test('audio default and named channels round-trip through nested automation', () => {
+    for (const fields of ['channel: 32', 'channel: 2, name: "Interface", id: "port"']) {
+        const source = `search synth\nnoise(scale: osc(speed: audio(band: audioBand.raw, ${fields}))).write(o0)`
+        const compiled = compile(source)
+        assertEqual(compiled.diagnostics.length, 0, 'selected channel should compile cleanly')
+        const config = compiled.plans[0].chain[0].args.scale.speed
+        const again = compile(unparse(compiled)).plans[0].chain[0].args.scale.speed
+        assertEqual(again.channel, config.channel, 'channel should survive nested round-trip')
+        const runtime = { ...config }
+        delete runtime._ast
+        const formatted = formatValue(runtime)
+        assert(formatted.includes(`channel: ${config.channel}`), 'runtime format should retain channel')
+    }
+})
+
+test('audio channel bounds reject invalid static routing without legacy fallback', () => {
+    for (const fields of ['channel: 1.5', 'channel: 0', 'channel: 33', 'channel: 240', 'channel: true', 'channel: osc()']) {
+        const graph = compileGraph(`search synth\nnoise(scale: audio(band: audioBand.raw, ${fields})).write(o0)`)
+        const requirements = new Pipeline(graph, null).getAudioInputRequirements()
+        assertEqual(requirements.needsLegacy, false, 'invalid selector must not become legacy capture')
+        assertEqual(requirements.selected.length, 0, 'invalid selector must request no capture')
+        const compiled = compile(`search synth\nnoise(scale: audio(band: audioBand.raw, ${fields})).write(o0)`)
+        assert(compiled.diagnostics.length > 0, 'invalid routing should have diagnostics')
+        assertEqual(compiled.plans[0].chain[0].args.scale._invalid, true, 'invalid routing should remain inert')
+    }
+})
+
+
+test('raw AST formatting retains CC modes and audio channel selection', () => {
+    for (const invocation of [
+        'midi(channel: 2, mode: midiMode.cc14, cc: 31, name: "Keys", id: "port")',
+        'audio(band: audioBand.raw, channel: 2, name: "Interface", id: "port")'
+    ]) {
+        const source = `search synth\nnoise(scale: ${invocation}).write(o0)`
+        const raw = parse(lex(source)).plans[0].chain[0].kwargs.scale
+        const formatted = formatValue(raw)
+        const actual = compile(`search synth\nnoise(scale: ${formatted}).write(o0)`)
+        assertEqual(actual.diagnostics.length, 0, 'formatted raw AST should recompile cleanly')
+        const config = actual.plans[0].chain[0].args.scale
+        assertEqual(config.channel, 2, 'raw AST should preserve channel')
+        assertEqual(config.name, raw.type === 'Midi' ? 'Keys' : 'Interface', 'raw AST should preserve readable device')
+        assertEqual(config.id, 'port', 'raw AST should preserve exact device')
+        if (raw.type === 'Midi') {
+            assertEqual(config.mode, 6, 'raw AST should preserve CC14 mode')
+            assertEqual(config.cc, 31, 'raw AST should preserve controller')
+        }
+    }
+})
+
+
+test('CC mode channels must be static integers from one to sixteen', () => {
+    for (const mode of ['cc', 'cc14']) {
+        for (const channel of ['0', '17', '1.5', 'true', '"1"', 'osc()']) {
+            const compiled = compile(`search synth\nnoise(scale: midi(channel: ${channel}, mode: midiMode.${mode})).write(o0)`)
+            assert(compiled.diagnostics.length > 0, 'invalid CC channel should have diagnostics')
+            assertEqual(compiled.plans[0].chain[0].args.scale._invalid, true, 'invalid CC channel should be inert')
+        }
+    }
+})
+
+
+test('expression modes and MPE selectors preserve static aliases through nested round trips', () => {
+    for (const [mode, expected] of [['nrpn', 7], ['pitchBend', 8], ['pressure', 9], ['polyPressure', 10]]) {
+        const source = `search synth\nlet zone = midiZone.upper\nlet size = 7\nlet parameter = 1234\nlet expression = midi(zone: zone, members: size, mode: midiMode.${mode}${mode === 'nrpn' ? ', nrpn: parameter' : ''}, name: "Expressive", id: "port")\nnoise(scale: osc(speed: expression)).write(o0)`
+        const compiled = compile(source)
+        assertEqual(compiled.diagnostics.length, 0, 'new modes and aliases should compile')
+        const config = compiled.plans[0].chain[0].args.scale.speed
+        assertEqual(config.mode, expected, 'appended mode number')
+        assertEqual(config.zone, 1, 'upper zone value')
+        assertEqual(config.members, 7, 'member count alias')
+        assertEqual(config.channel, undefined, 'zone must not fabricate channel1')
+        if (mode === 'nrpn') assertEqual(config.nrpn, 1234, 'parameter alias')
+        const again = compile(unparse(compiled))
+        assertEqual(again.diagnostics.length, 0, 'nested round-trip should compile')
+        const roundTrip = again.plans[0].chain[0].args.scale.speed
+        for (const field of ['mode', 'zone', 'members', 'channel', 'nrpn']) {
+            assertEqual(roundTrip[field], config[field], `${field} should survive round-trip`)
+        }
+        const formatted = formatValue({ type: 'Midi', zone: 1, members: 7, mode: expected,
+            ...(mode === 'nrpn' ? { nrpn: 1234 } : {}), min: 0, max: 1, sensitivity: 1 })
+        assert(formatted.includes('zone: midiZone.upper'), 'formatValue should emit named zone')
+        assert(!formatted.includes('channel:'), 'formatValue must preserve zone selector')
+    }
+})
+
+test('MPE/NRPN selectors reject conflicts, dynamic selectors and null parameter address', () => {
+    for (const fields of ['zone: midiZone.lower, channel: 1', 'channel: 2, members: 4', 'mode: midiMode.pressure']) {
+        let rejected = false
+        try { compile(`search synth\nnoise(scale: midi(${fields})).write(o0)`) } catch { rejected = true }
+        assert(rejected, `invalid selector relationship should fail parsing: ${fields}`)
+    }
+    for (const fields of [
+        'channel: 1, mode: midiMode.nrpn',
+        'channel: 1, mode: midiMode.nrpn, nrpn: 16383',
+        'channel: 1, mode: midiMode.nrpn, nrpn: -1',
+        'channel: 1, mode: midiMode.nrpn, nrpn: osc()',
+        'zone: 2, mode: midiMode.pressure',
+        'zone: osc(), mode: midiMode.pressure',
+        'zone: midiZone.lower, members: 0',
+        'zone: midiZone.upper, members: 16',
+        'zone: midiZone.upper, members: 1.5',
+        'channel: 17, mode: midiMode.pitchBend'
+    ]) {
+        const compiled = compile(`search synth\nnoise(scale: midi(${fields})).write(o0)`)
+        assert(compiled.diagnostics.length > 0, `invalid config needs diagnostics: ${fields}`)
+        assertEqual(compiled.plans[0].chain[0].args.scale._invalid, true, 'invalid selection must remain inert')
+    }
+})
+
+test('raw MIDI AST formatting preserves expression selectors and identity', () => {
+    const source = 'search synth\nnoise(scale: midi(zone: midiZone.lower, mode: midiMode.nrpn, nrpn: 16382, name: "Keys", id: "port")).write(o0)'
+    const config = compile(source).plans[0].chain[0].args.scale
+    const printed = formatValue(config._ast)
+    const again = compile(`search synth\nnoise(scale: ${printed}).write(o0)`)
+    assertEqual(again.diagnostics.length, 0, 'raw AST output should compile')
+    const value = again.plans[0].chain[0].args.scale
+    for (const field of ['zone', 'members', 'mode', 'nrpn', 'name', 'id']) {
+        assertEqual(value[field], config[field], `${field} should survive raw AST formatting`)
+    }
+    const retained = compile('search synth\nlet mode = midiMode.pitchBend\nnoise(scale: midi(channel: 2, mode: mode, cc: 74, nrpn: 0)).write(o0)')
+    assertEqual(retained.diagnostics.length, 0, 'valid unused selectors can survive UI mode changes')
+    assertEqual(retained.plans[0].chain[0].args.scale.mode, 8, 'mode alias')
+    assertEqual(compile(unparse(retained)).plans[0].chain[0].args.scale.nrpn, 0, 'unused parameter retained')
 })
 
 // ============================================================================

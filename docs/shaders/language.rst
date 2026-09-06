@@ -603,22 +603,58 @@ Use ``midi()`` and ``audio()`` to drive parameters from external signals. Like
 maps onto its own range. Their numeric fields can also contain other automation
 descriptors.
 
-``midi(channel, mode?, min?, max?, sensitivity?, name: "...", id: "...")``
+``midi(channel, mode?, min?, max?, sensitivity?, cc: N, nrpn: N, name: "...", id: "...")``
 
-* ``channel`` (required): MIDI channel 1-16
+* ``channel``: Fixed MIDI channel 1–16, required unless ``zone`` is supplied.
+* ``zone``: Optional keyword-only ``midiZone.lower`` or ``midiZone.upper``.
+  Selects the newest held note across MPE member channels. Cannot be combined
+  with ``channel``. No held note returns ``min``.
+* ``members``: Optional keyword-only count 1–15, requiring ``zone``. Omit to
+  follow the port's RPN 6 zone configuration, using 15 until configured.
+  An explicit count overrides discovery for the binding.
 * ``mode``: ``midiMode.*`` value (default ``midiMode.velocity``)
 * ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
 * ``sensitivity``: Number or automation setting trigger falloff (default 1)
+* ``cc``: Optional keyword-only controller number (default 1). Use
+  ``midiMode.cc`` for 7-bit CC 0–127, or ``midiMode.cc14`` for paired 14-bit CC.
+  In 14-bit mode, ``cc: N`` selects MSB controller 0–31 and LSB controller
+  ``N + 32``. CC values hold independently per device/channel and ignore
+  note-off and ``sensitivity``.
+* ``nrpn``: Keyword-only parameter address 0–16382, required for
+  ``midiMode.nrpn``. Tracks CC99/98 selection and Data Entry CC6/38 separately
+  per device/channel/parameter. Values are normalized from 0–16383.
 * ``name`` / ``id``: Optional keyword-only input selector. The ``id`` field requires ``name``.
+
+``midiMode.pitchBend`` reads the full 14-bit bend position (neutral 8192),
+``midiMode.pressure`` reads channel pressure, and ``midiMode.polyPressure``
+reads key pressure. They work with fixed channels or MPE zones. Zone bindings
+read raw member gestures; manager controls remain separately addressable by
+fixed channel. Bend is a normalized position, without semitone conversion or
+manager/member combination. MIDI 2.0 and general RPN parameter automation are
+not exposed. See :doc:`midi-audio` for message handling, held-note selection,
+and the distinct byte-update policies for ``cc14`` and NRPN.
 
 ``audio(band, min?, max?, channel: N, name: "...", id: "...")``
 
 * ``band`` (required): ``audioBand.low``, ``audioBand.mid``, ``audioBand.high``,
   ``audioBand.vol``, or ``audioBand.raw``
 * ``min`` / ``max``: Number or automation setting the normalized bounds (default 0..1)
-* ``channel`` / ``name`` / ``id``: Optional keyword-only device selector. A
-  selected source requires ``channel`` and ``name``. The ``id`` field requires
-  ``name``.
+* ``channel``: Optional keyword-only channel 1–32. Alone, it selects a channel
+  on the default audio device. Without any selector, the legacy aggregate
+  analyser remains in use.
+* ``name`` / ``id``: Optional keyword-only device selector. A named audio
+  source requires ``channel``; ``id`` requires ``name`` and is authoritative.
+
+Device and channel selection are independent for both functions. A name-only
+selector must match exactly one connected device; missing, disconnected,
+ambiguous, or unavailable selected sources resolve to ``min``.
+``audioBand.raw`` requires a real host-supplied sample before it becomes ready;
+raw silence then maps to the midpoint of the output range.
+
+Audio channel choices must follow the host's actual delivered count. The DSL's
+32-channel processing ceiling does not guarantee 32-channel hardware capture:
+the Chromium 152 Linux capture path currently requests two channels per device.
+See :doc:`midi-audio` for backend limits and capture requirements.
 
 Example:
 
@@ -635,8 +671,12 @@ These fields support nesting:
 - ``midi()``: ``min``, ``max``, and ``sensitivity``
 - ``audio()``: ``min`` and ``max``
 
-Enum values, device identity, and channel numbers remain literal. The language
-supports up to eight nested levels beneath the outer descriptor. For selected-device examples, raw audio behavior, and host
+Enum values, channel numbers, and MIDI ``cc``, ``nrpn``, and ``members`` must be static literals or
+``let`` aliases resolving to valid literals, not live automation. Device
+names and IDs must remain quoted string literals.
+Bounds are clamped to 0–1 before mapping to the receiving parameter's range.
+The language supports up to eight nested levels beneath the outer descriptor.
+For selected-device examples, raw audio behavior, and host
 integration, see :doc:`midi-audio`.
 
 Pipeline Integration

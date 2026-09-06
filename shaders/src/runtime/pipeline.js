@@ -342,44 +342,73 @@ function evaluateOscillator(osc, normalizedTime, externalState, depth = 0, stack
  */
 function evaluateMidi(config, midiState, currentTime, min = config.min, max = config.max,
     sensitivity = config.sensitivity) {
-    if (!midiState) return min
+    if (config._invalid || !midiState) return min
 
-    const channel = midiState.getChannel(config.channel)
     const { mode } = config
+    const hasZone = config.zone !== undefined
+    if (hasZone && (config.channel !== undefined || (config.zone !== 0 && config.zone !== 1))) return min
+    if (config.members !== undefined && (!hasZone || !Number.isInteger(config.members) ||
+        config.members < 1 || config.members > 15)) return min
+    if (!hasZone && mode >= 5 &&
+        (!Number.isInteger(config.channel) || config.channel < 1 || config.channel > 16)) return min
+    const voice = hasZone ? midiState.getZoneVoice?.(config) : null
+    if (hasZone && !voice) return min
+    const channel = hasZone ? voice.channel : midiState.getChannel(config.channel)
+    const note = voice ? { ...voice, gate: 1 } : channel
 
     let rawValue = 0
 
     switch (mode) {
         case 0: // noteChange - value from note regardless of gate
-            rawValue = channel.key
+            rawValue = note.key
             break
 
         case 1: // gateNote - value from note only while gate on
-            if (channel.gate === 1) {
-                rawValue = channel.key
+            if (note.gate === 1) {
+                rawValue = note.key
             }
             break
 
         case 2: // gateVelocity - value from velocity only while gate on
-            if (channel.gate === 1) {
-                rawValue = channel.velocity
+            if (note.gate === 1) {
+                rawValue = note.velocity
             }
             break
 
         case 3: // triggerNote - note value with falloff
-            if (channel.gate === 1) {
-                rawValue = channel.key
-                const elapsed = currentTime - channel.time
+            if (note.gate === 1) {
+                rawValue = note.key
+                const elapsed = currentTime - note.time
                 const decay = Math.min(1, elapsed * sensitivity * 0.001)
                 rawValue = rawValue * (1 - decay)
             }
             break
 
+        case 5: // 7-bit control change
+        case 6: { // paired 14-bit control change
+            const cc = config.cc ?? 1
+            if (!Number.isInteger(cc) || cc < 0 || cc > (mode === 6 ? 31 : 127)) return min
+            const normalized = mode === 6
+                ? (channel.cc14?.[cc] ?? 0) / 16383
+                : (channel.cc?.[cc] ?? 0) / 127
+            return min + normalized * (max - min)
+        }
+
+        case 7:
+            if (!Number.isInteger(config.nrpn) || config.nrpn < 0 || config.nrpn > 16382) return min
+            return min + (channel.nrpn?.get(config.nrpn) ?? 0) / 16383 * (max - min)
+        case 8:
+            return min + (channel.pitchBend ?? 8192) / 16383 * (max - min)
+        case 9:
+            return min + (channel.pressure ?? 0) / 127 * (max - min)
+        case 10:
+            return min + (channel.polyPressure?.[note.key] ?? 0) / 127 * (max - min)
+
         case 4: // velocity (default) - velocity with falloff
         default:
-            if (channel.gate === 1) {
-                rawValue = channel.velocity
-                const elapsed = currentTime - channel.time
+            if (note.gate === 1) {
+                rawValue = note.velocity
+                const elapsed = currentTime - note.time
                 const decay = Math.min(1, elapsed * sensitivity * 0.001)
                 rawValue = rawValue * (1 - decay)
             }
@@ -389,6 +418,24 @@ function evaluateMidi(config, midiState, currentTime, min = config.min, max = co
     // Map 0-127 MIDI range to min-max output range
     const normalized = rawValue / 127
     return min + normalized * (max - min)
+}
+
+function hasAudioSelectorIntent(config) {
+    const source = config._ast?.type === 'Audio' ? config._ast : config
+    return config.name !== undefined || config.id !== undefined ||
+        config.channel !== undefined ||
+        source.name !== undefined || source.id !== undefined ||
+        source.channel !== undefined
+}
+
+function isValidAudioSelector(config) {
+    const source = config._ast?.type === 'Audio' ? config._ast : config
+    if ((source.name !== undefined && config.name === undefined) ||
+        (source.id !== undefined && config.id === undefined) ||
+        (source.channel !== undefined && config.channel === undefined)) return false
+    if (config.name !== undefined && (typeof config.name !== 'string' || !config.name)) return false
+    if (config.id !== undefined && (typeof config.id !== 'string' || !config.id || !config.name)) return false
+    return Number.isInteger(config.channel) && config.channel >= 1 && config.channel <= 32
 }
 
 /**
@@ -413,8 +460,9 @@ function evaluateAudio(config, audioState, min = config.min, max = config.max) {
     if (!audioState) return min
 
     const { band } = config
-    const hasDeviceSelector = !!(config.name || config.id || config.channel !== undefined)
-    const selectedState = hasDeviceSelector
+    const hasSelector = hasAudioSelectorIntent(config)
+    if (hasSelector && !isValidAudioSelector(config)) return min
+    const selectedState = hasSelector
         ? audioState.getDeviceChannelState?.(config)
         : audioState
     if (!selectedState) return min
@@ -799,10 +847,7 @@ export class Pipeline {
             visited.add(value)
 
             if (value.type === 'Audio' || value._ast?.type === 'Audio') {
-                const source = value._ast?.type === 'Audio' ? value._ast : value
-                const hasSelectorIntent = value.name !== undefined || value.id !== undefined ||
-                    value.channel !== undefined || source.name !== undefined ||
-                    source.id !== undefined || source.channel !== undefined
+                const hasSelectorIntent = hasAudioSelectorIntent(value)
                 const hasValidBand = value._invalid !== true &&
                     Number.isInteger(value.band) && value.band >= 0 && value.band <= 4
                 if (!hasValidBand) return
@@ -812,12 +857,11 @@ export class Pipeline {
                 visit(value.min)
                 visit(value.max)
 
-                if (typeof value.name === 'string' && value.name.length > 0 &&
-                    Number.isInteger(value.channel) && value.channel >= 1) {
+                if (hasSelectorIntent && isValidAudioSelector(value)) {
                     const requirement = {
                         id: typeof value.id === 'string' && value.id.length > 0 ? value.id : null,
-                        name: value.name,
-                        channel: value.channel,
+                        name: value.name ?? null,
+                        channel: value.channel ?? 1,
                         needsRaw: value.band === 4
                     }
                     const key = JSON.stringify([requirement.id, requirement.name, requirement.channel])

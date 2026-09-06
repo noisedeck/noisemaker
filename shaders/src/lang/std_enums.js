@@ -24,7 +24,13 @@ const midiModeEnum = {
     gateNote: { type: 'Number', value: 1 },       // value from note only while gate on
     gateVelocity: { type: 'Number', value: 2 },   // value from velocity only while gate on
     triggerNote: { type: 'Number', value: 3 },    // note value with time-based falloff
-    velocity: { type: 'Number', value: 4 }        // velocity with time-based falloff (default)
+    velocity: { type: 'Number', value: 4 },       // velocity with time-based falloff (default)
+    cc: { type: 'Number', value: 5 },             // 7-bit control change
+    cc14: { type: 'Number', value: 6 },           // paired 14-bit control change
+    nrpn: { type: 'Number', value: 7 },
+    pitchBend: { type: 'Number', value: 8 },
+    pressure: { type: 'Number', value: 9 },
+    polyPressure: { type: 'Number', value: 10 }
 }
 
 // Audio band enum for audio() function
@@ -59,6 +65,7 @@ export const stdEnums = {
     },
     oscKind: oscKindEnum,
     midiMode: midiModeEnum,
+    midiZone: { lower: { type: 'Number', value: 0 }, upper: { type: 'Number', value: 1 } },
     audioBand: audioBandEnum,
     palette: paletteEnum
 }

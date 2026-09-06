@@ -192,10 +192,10 @@ export function parse(tokens) {
 
         // Parameter order: channel, mode, min, max, sensitivity
         const paramOrder = ['channel', 'mode', 'min', 'max', 'sensitivity']
-        const keywordOnlyParams = ['name', 'id']
+        const keywordOnlyParams = ['name', 'id', 'cc', 'nrpn', 'zone', 'members']
         const validParams = [...paramOrder, ...keywordOnlyParams]
         if (args.length > paramOrder.length) {
-            throw new SyntaxError(`midi() name and id are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
+            throw new SyntaxError(`midi() name, id, cc, nrpn, zone and members are keyword-only at line ${nameToken.line} col ${nameToken.col}`)
         }
         for (const key of Object.keys(kwargs)) {
             if (!validParams.includes(key)) {
@@ -230,13 +230,19 @@ export function parse(tokens) {
             throw new SyntaxError(`midi() has an excess positional argument at line ${nameToken.line} col ${nameToken.col}`)
         }
 
-        if (!resolved.channel) {
-            throw new SyntaxError(`midi() requires 'channel' argument at line ${nameToken.line} col ${nameToken.col}`)
+        if (!resolved.channel && kwargs.zone === undefined) {
+            throw new SyntaxError(`midi() requires 'channel' or 'zone' argument at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (resolved.channel && kwargs.zone !== undefined) {
+            throw new SyntaxError(`midi() 'channel' and 'zone' are mutually exclusive at line ${nameToken.line} col ${nameToken.col}`)
+        }
+        if (kwargs.members !== undefined && kwargs.zone === undefined) {
+            throw new SyntaxError(`midi() 'members' requires 'zone' at line ${nameToken.line} col ${nameToken.col}`)
         }
         if (kwargs.id !== undefined && kwargs.name === undefined) {
             throw new SyntaxError(`midi() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
         }
-        for (const paramName of keywordOnlyParams) {
+        for (const paramName of ['name', 'id']) {
             const value = kwargs[paramName]
             if (value === undefined) continue
             if (value.type !== 'String') {
@@ -254,6 +260,10 @@ export function parse(tokens) {
             min: resolved.min,
             max: resolved.max,
             sensitivity: resolved.sensitivity,
+            cc: kwargs.cc,
+            nrpn: kwargs.nrpn,
+            zone: kwargs.zone,
+            members: kwargs.members,
             name: kwargs.name,
             id: kwargs.id,
             loc: { line: nameToken.line, col: nameToken.col }
@@ -321,7 +331,7 @@ export function parse(tokens) {
         if (kwargs.id !== undefined && kwargs.name === undefined) {
             throw new SyntaxError(`audio() 'id' requires readable 'name' at line ${nameToken.line} col ${nameToken.col}`)
         }
-        if ((kwargs.channel === undefined) !== (kwargs.name === undefined)) {
+        if (kwargs.name !== undefined && kwargs.channel === undefined) {
             throw new SyntaxError(`audio() selected device requires both 'name' and 'channel' at line ${nameToken.line} col ${nameToken.col}`)
         }
         for (const paramName of ['name', 'id']) {

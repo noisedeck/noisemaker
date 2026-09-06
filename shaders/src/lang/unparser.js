@@ -16,7 +16,7 @@ const oscKindNames = ['sine', 'tri', 'saw', 'sawInv', 'square', 'noise1d', 'nois
 /**
  * Map MIDI mode number to midiMode enum name
  */
-const midiModeNames = ['noteChange', 'gateNote', 'gateVelocity', 'triggerNote', 'velocity']
+const midiModeNames = ['noteChange', 'gateNote', 'gateVelocity', 'triggerNote', 'velocity', 'cc', 'cc14', 'nrpn', 'pitchBend', 'pressure', 'polyPressure']
 
 /**
  * Map audio band number to audioBand enum name
@@ -92,16 +92,23 @@ function formatOscillator(osc) {
  * @returns {string} DSL representation of the midi() call
  */
 function formatMidi(midi) {
+    if ((midi.channel && typeof midi.channel === 'object') ||
+        (midi.zone && typeof midi.zone === 'object')) return formatLetExpr(midi)
     if (midi._ast?.type === 'Midi') {
         return formatLetExpr(midi._ast)
     }
-    const parts = [`channel: ${midi.channel}`]
+    const parts = midi.zone !== undefined
+        ? [`zone: midiZone.${midi.zone === 0 ? 'lower' : 'upper'}`]
+        : [`channel: ${midi.channel}`]
+    if (midi.members !== undefined) parts.push(`members: ${midi.members}`)
 
     // Only include non-default values
     const modeName = midiModeNames[midi.mode] || 'velocity'
     if (modeName !== 'velocity') {
         parts.push(`mode: midiMode.${modeName}`)
     }
+    if (midi.cc !== undefined) parts.push(`cc: ${midi.cc}`)
+    if (midi.nrpn !== undefined) parts.push(`nrpn: ${midi.nrpn}`)
     if (midi.min !== 0) {
         parts.push(`min: ${midi.min}`)
     }
@@ -127,6 +134,7 @@ function formatMidi(midi) {
  * @returns {string} DSL representation of the audio() call
  */
 function formatAudio(audio) {
+    if (audio.band && typeof audio.band === 'object') return formatLetExpr(audio)
     if (audio._ast?.type === 'Audio') {
         return formatLetExpr(audio._ast)
     }
@@ -471,7 +479,7 @@ function formatValue(value, spec, options = {}, sourceForm) {
             return formatOscillator(value)
         }
         // Handle MIDI configuration
-        if (value.type === 'Midi' && typeof value.channel === 'number') {
+        if (value.type === 'Midi' && (typeof value.channel === 'number' || typeof value.zone === 'number')) {
             return formatMidi(value)
         }
         // Handle MIDI AST from _ast property
@@ -529,6 +537,10 @@ function formatValue(value, spec, options = {}, sourceForm) {
             }
             if (modeName !== 'velocity') {
                 parts.push(`mode: midiMode.${modeName}`)
+            }
+            if (value.cc !== undefined) parts.push(`cc: ${formatLetExpr(value.cc, options)}`)
+            for (const field of ['nrpn', 'zone', 'members']) {
+                if (value[field] !== undefined) parts.push(`${field}: ${formatLetExpr(value[field], options)}`)
             }
             if (value.min && value.min.type === 'Number' && value.min.value !== 0) {
                 parts.push(`min: ${value.min.value}`)
@@ -788,6 +800,10 @@ function formatLetExpr(expr, options = {}) {
             pushMidiField('min', expr.min, 0)
             pushMidiField('max', expr.max, 1)
             pushMidiField('sensitivity', expr.sensitivity, 1)
+            pushMidiField('cc', expr.cc, undefined)
+            pushMidiField('nrpn', expr.nrpn, undefined)
+            pushMidiField('zone', expr.zone, undefined)
+            pushMidiField('members', expr.members, undefined)
             // MIDI identity accepts either DSL quote style. Normalize the
             // decoded value through JSON escaping so every result reparses.
             if (expr.name?.type === 'String') {

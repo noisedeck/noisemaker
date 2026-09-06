@@ -514,6 +514,86 @@ test('audio defaults band values correctly', () => {
     assertEqual(result, 0, 'should return 0 for default audio state')
 })
 
+
+test('default audio channels are independent from legacy aggregate analysis', () => {
+    const { pipeline, audioState } = createTestPipeline()
+    audioState.low = 0.9
+    audioState.registerDefaultChannels(2)
+    audioState.getDefaultChannelState(1).low = 0.25
+    audioState.getDefaultChannelState(2).low = 0.75
+    const config = { type: 'Audio', band: 0, min: 0, max: 1 }
+    assertEqual(pipeline.resolveUniformValue(config, 0), 0.9, 'legacy should retain aggregate analysis')
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 1 }, 0), 0.25, 'default channel one should be separate')
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 2 }, 0), 0.75, 'default channel two should be separate')
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 3 }, 0), 0, 'missing channel must not use aggregate')
+    audioState.disconnectDefaultInput()
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 2 }, 0), 0, 'disconnected default channel should be inert')
+    audioState.registerDefaultChannels(1)
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 2 }, 0), 0, 'removed channel must remain unavailable')
+    assertEqual(pipeline.resolveUniformValue({ ...config, channel: 1 }, 0), 0, 'reconnect must not retain stale analysis')
+})
+
+test('audio requirements retain default channels without legacy fallback', () => {
+    const audio = (fields) => ({ type: 'Audio', band: 0, min: 0, max: 1, ...fields })
+    const pipeline = new Pipeline({ passes: [{ uniforms: {
+        a: audio({ channel: 2 }), b: audio({ channel: 2, band: 4 }),
+        c: audio({ channel: 32, name: 'Left', id: 'left' }),
+        d: audio({ channel: 32, name: 'Right', id: 'right' }),
+        invalidChannel: audio({ channel: 33 }),
+        invalidAst: audio({ _ast: { type: 'Audio', channel: { type: 'Number', value: 0 } } })
+    } }] }, null)
+    assertEqual(JSON.stringify(pipeline.getAudioInputRequirements()), JSON.stringify({
+        needsLegacy: false, needsLegacyRaw: false, selected: [
+            { id: null, name: null, channel: 2, needsRaw: true },
+            { id: 'left', name: 'Left', channel: 32, needsRaw: false },
+            { id: 'right', name: 'Right', channel: 32, needsRaw: false }
+        ]
+    }), 'capture requirements should preserve device/channel identity and ignore invalid selectors')
+})
+
+test('full audio inventory blocks ambiguous names even when only one device is captured', () => {
+    const { pipeline, audioState } = createTestPipeline()
+    audioState.registerDevice({ id: 'left', name: 'Interface', channelCount: 2 })
+    audioState.setChannelValues('left', 1, { low: 0.8 })
+    const config = { type: 'Audio', band: 0, min: 0.2, max: 1, name: 'Interface', channel: 1 }
+    audioState.setDeviceInventory([
+        { id: 'left', name: 'Interface', connected: true },
+        { id: 'right', name: 'Interface', connected: true }
+    ])
+    assertEqual(pipeline.resolveUniformValue(config, 0), 0.2, 'uncaptured duplicate must make name-only selection inert')
+    assertApprox(pipeline.resolveUniformValue({ ...config, id: 'left' }, 0), 0.84, 0.000001, 'exact identity must still resolve')
+    audioState.setDeviceInventory([
+        { id: 'left', name: 'Interface', connected: true },
+        { id: 'right', name: 'Interface', connected: false }
+    ])
+    assertApprox(pipeline.resolveUniformValue(config, 0), 0.84, 0.000001, 'disconnecting duplicate should restore unique name resolution')
+    audioState.setDeviceInventory([{ id: 'right', name: 'Interface', connected: true }])
+    assertEqual(pipeline.resolveUniformValue(config, 0), 0.2, 'unique inventory identity must not consume stale other-device capture')
+})
+
+test('audio channel 32 remains distinct from 31 and from other devices', () => {
+    const { pipeline, audioState } = createTestPipeline()
+    audioState.registerDefaultChannels(32)
+    audioState.getDefaultChannelState(31).setRaw(-0.6)
+    audioState.getDefaultChannelState(32).setRaw(0.8)
+    for (const id of ['mixer-a', 'mixer-b']) {
+        audioState.registerDevice({ id, name: id, channelCount: 32 })
+    }
+    audioState.setChannelValues('mixer-a', 31, { raw: -0.4 })
+    audioState.setChannelValues('mixer-a', 32, { raw: 0.6 })
+    audioState.setChannelValues('mixer-b', 32, { raw: -0.8 })
+    const config = { type: 'Audio', band: 4, min: 0, max: 1, channel: 32 }
+    assertApprox(pipeline.resolveUniformValue(config, 0), 0.9, 0.000001, 'default device channel 32 should resolve')
+    assertApprox(pipeline.resolveUniformValue({ ...config, channel: 31 }, 0), 0.2, 0.000001, 'default adjacent channel must stay separate')
+    assertApprox(pipeline.resolveUniformValue({ ...config, name: 'mixer-a', id: 'mixer-a' }, 0), 0.8, 0.000001, 'named mixer channel 32 should resolve')
+    assertApprox(pipeline.resolveUniformValue({ ...config, name: 'mixer-a', id: 'mixer-a', channel: 31 }, 0), 0.3, 0.000001, 'named adjacent channel must stay separate')
+    assertApprox(pipeline.resolveUniformValue({ ...config, name: 'mixer-b', id: 'mixer-b' }, 0), 0.1, 0.000001, 'other mixer channel 32 must stay separate')
+    const requirements = new Pipeline({ passes: [{ uniforms: { a: config,
+        b: { ...config, name: 'mixer-a', id: 'mixer-a' } } }] }, null).getAudioInputRequirements()
+    assertEqual(JSON.stringify(requirements.selected.map(({ id, channel }) => ({ id, channel }))),
+        JSON.stringify([{ id: null, channel: 32 }, { id: 'mixer-a', channel: 32 }]), 'capture requirements must retain high physical channel numbers')
+})
+
 // ============================================================================
 // Summary
 // ============================================================================

@@ -45,7 +45,7 @@ const validatorHooks = {}
 
 const AUTOMATION_FIELDS = {
     Oscillator: ['oscType', 'min', 'max', 'speed', 'offset', 'seed'],
-    Midi: ['channel', 'mode', 'min', 'max', 'sensitivity', 'name', 'id'],
+    Midi: ['channel', 'mode', 'min', 'max', 'sensitivity', 'name', 'id', 'cc', 'nrpn', 'zone', 'members'],
     Audio: ['band', 'min', 'max', 'channel', 'name', 'id']
 }
 const MAX_AUTOMATION_DEPTH = 8
@@ -527,12 +527,53 @@ export function validate(ast) {
         }
 
         if (node.type === 'Midi') {
+            const mode = resolveAutomationEnum(
+                node.mode, 'midiMode', 4, new Set([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), 'midi', 'mode')
+            const strictChannel = mode >= 5
+            const hasZone = node.zone !== undefined
+            const zone = hasZone
+                ? resolveAutomationEnum(node.zone, 'midiZone', undefined, new Set([0, 1]), 'midi', 'zone')
+                : undefined
+            let validSelection = !hasZone || zone !== undefined
+            let members
+            if (node.members !== undefined) {
+                members = resolveAutomationNumber(node.members, 'midi', 'members', undefined,
+                    {integer:true, min:1, max:15, allowMember:false,
+                        onInvalid:() => { validSelection = false }}, depth)
+                if (!hasZone) validSelection = false
+            }
+            if (hasZone && node.channel !== undefined) validSelection = false
+            let validChannel = true
+            const channel = hasZone ? undefined : resolveAutomationNumber(node.channel, 'midi', 'channel', 1,
+                strictChannel
+                    ? {integer:true, min:1, max:16, allowMember:false,
+                        onInvalid:() => { validChannel = false }}
+                    : {allowBoolean:true}, depth)
+            let validCc = true
+            const cc = node.cc !== undefined || mode === 5 || mode === 6
+                ? resolveAutomationNumber(node.cc, 'midi', 'cc', 1,
+                    {integer:true, min:0, max:mode === 6 ? 31 : 127, allowMember:false,
+                        onInvalid:() => { validCc = false }}, depth)
+                : undefined
+            let nrpn
+            if (node.nrpn !== undefined || mode === 7) {
+                if (node.nrpn === undefined) {
+                    pushDiag('S002', node, 'midi() nrpn mode requires a parameter number')
+                    validSelection = false
+                }
+                nrpn = resolveAutomationNumber(node.nrpn, 'midi', 'nrpn', undefined,
+                    {integer:true, min:0, max:16382, allowMember:false,
+                        onInvalid:() => { validSelection = false }}, depth)
+            }
             return {
                 type: 'Midi',
-                channel: resolveAutomationNumber(node.channel, 'midi', 'channel', 1,
-                    {allowBoolean:true}, depth),
-                mode: resolveAutomationEnum(
-                    node.mode, 'midiMode', 4, new Set([0, 1, 2, 3, 4]), 'midi', 'mode'),
+                channel,
+                mode,
+                ...(cc !== undefined && { cc }),
+                ...(nrpn !== undefined && { nrpn }),
+                ...(hasZone && { zone }),
+                ...(node.members !== undefined && { members }),
+                ...((!validCc || !validChannel || !validSelection) && { _invalid: true }),
                 min: resolveAutomationNumber(node.min, 'midi', 'min', 0,
                     {allowBoolean:true, allowAutomation:true, clamp01:true}, depth),
                 max: resolveAutomationNumber(node.max, 'midi', 'max', 1,
@@ -561,7 +602,7 @@ export function validate(ast) {
             let validChannel = true
             if (node.channel !== undefined) {
                 if (node.channel.type === 'Number' &&
-                    Number.isInteger(node.channel.value) && node.channel.value >= 1) {
+                    Number.isInteger(node.channel.value) && node.channel.value >= 1 && node.channel.value <= 32) {
                     channel = node.channel.value
                 } else {
                     validChannel = false
@@ -570,7 +611,7 @@ export function validate(ast) {
                             'String literal not allowed for audio() channel')
                     } else {
                         pushDiag('S002', node.channel,
-                            `audio() channel must be a positive integer (got ${node.channel.value ?? node.channel.name ?? node.channel.type})`)
+                            `audio() channel must be a positive integer from 1 to 32 (got ${node.channel.value ?? node.channel.name ?? node.channel.type})`)
                     }
                 }
             }

@@ -6,6 +6,7 @@
  */
 
 import { MidiState, MidiChannelState, MidiInputManager, AudioState } from '../src/runtime/external-input.js'
+import { Pipeline } from '../src/runtime/pipeline.js'
 
 let passCount = 0
 let failCount = 0
@@ -574,8 +575,10 @@ await asyncTest('a stale hot-plug open cannot resurrect a disconnected port', as
 
         assertEqual(manager.getStatus().state, 'disconnected',
             'stale open completion must not overwrite disconnected status')
-        assertEqual(manager.getPorts().length, 0,
-            'stale open completion must not register the disconnected port')
+        assertEqual(manager.getPorts().length, 1,
+            'physical inventory should retain the encountered input')
+        assertEqual(manager.getPorts()[0].connected, false,
+            'stale open completion must not reconnect the physical inventory entry')
         assertEqual(input.onmidimessage, null,
             'stale open completion must not restore the message listener')
     } finally {
@@ -583,6 +586,168 @@ await asyncTest('a stale hot-plug open cannot resurrect a disconnected port', as
             configurable: true,
             value: previousNavigator
         })
+    }
+})
+
+await asyncTest('MIDI physical inventory keeps failed-open duplicate names ambiguous', async () => {
+    const a = { id: 'twin-a', name: 'Twin', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, async open() { this.connection = 'open'; return this } }
+    const b = { id: 'twin-b', name: 'Twin', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, async open() { throw new Error('busy') } }
+    const access = { inputs: new Map([[a.id, a], [b.id, b]]), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { requestMIDIAccess: async () => access } })
+    const midi = new MidiState()
+    const manager = new MidiInputManager({ setMidiState: () => midi })
+    try {
+        let inventoryEvents = 0
+        manager.onPortsChange(() => { inventoryEvents++ })
+        assertEqual(await manager.enable(), true, 'access succeeds despite one failed open')
+        const beforeMessages = inventoryEvents
+        a.onmidimessage({ data: new Uint8Array([0xb0, 74, 127]) })
+        assert(midi.getPortState({ name: 'Twin' }) === null, 'physical duplicate remains ambiguous')
+        assertEqual(midi.getPortState({ id: a.id }).getChannel(1).cc[74], 127, 'available exact input works')
+        assertEqual(midi.getPortState({ id: b.id }), null, 'failed exact input stays inert')
+        const pipeline = new Pipeline(null, null)
+        pipeline.setMidiState(midi)
+        assertEqual(pipeline.resolveUniformValue({ type: 'Midi', mode: 8, channel: 1,
+            name: b.name, id: b.id, min: 0.2, max: 1 }, 0), 0.2,
+        'failed-open bend must not expose initialized center as a live value')
+        assertEqual(manager.getPorts().filter(port => port.connected).length, 2, 'inventory includes inaccessible physical input')
+        assertEqual(inventoryEvents, beforeMessages, 'messages do not publish inventory')
+    } finally {
+        manager.disable()
+        Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
+    }
+})
+
+await asyncTest('MIDI disconnect during startup clears state before another input finishes opening', async () => {
+    let releaseOpen
+    let signalOpening
+    const opening = new Promise(resolve => { signalOpening = resolve })
+    const a = { id: 'ready-a', name: 'Ready', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, async open() { this.connection = 'open'; return this } }
+    const b = { id: 'pending-b', name: 'Pending', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, open() {
+            signalOpening()
+            return new Promise(resolve => { releaseOpen = () => { this.connection = 'open'; resolve(this) } })
+        } }
+    const access = { inputs: new Map([[a.id, a], [b.id, b]]), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { requestMIDIAccess: async () => access } })
+    const midi = new MidiState()
+    const manager = new MidiInputManager({ setMidiState: () => midi })
+    let enabling
+    try {
+        enabling = manager.enable()
+        await opening
+        const pipeline = new Pipeline(null, null)
+        pipeline.setMidiState(midi)
+        assertEqual(pipeline.resolveUniformValue({ type: 'Midi', mode: 8, channel: 1,
+            name: b.name, id: b.id, min: 0.2, max: 1 }, 0), 0.2,
+        'pending bend must remain inert')
+        const staleHandler = a.onmidimessage
+        staleHandler({ data: new Uint8Array([0xb0, 74, 127]) })
+        a.state = 'disconnected'
+        access.inputs.delete(a.id)
+        assert(typeof access.onstatechange === 'function', 'lifecycle listener must exist before opens complete')
+        await access.onstatechange({ port: a })
+        assertEqual(a.onmidimessage, null, 'disconnect detaches handler immediately')
+        assertEqual(midi.getPortState({ id: a.id }), null, 'disconnect invalidates exact source immediately')
+        assertEqual(midi.getChannel(1).cc[74], 0, 'disconnect clears aggregate origin immediately')
+        staleHandler({ data: new Uint8Array([0xb0, 74, 127]) })
+        assertEqual(midi.getPortState({ id: a.id }), null, 'queued stale callback cannot resurrect input')
+        releaseOpen()
+        assertEqual(await enabling, true, 'remaining input can finish enabling')
+        assertEqual(midi.getPortState({ id: a.id }), null, 'final startup reconciliation preserves disconnect')
+        assertEqual(midi.getChannel(1).cc[74], 0, 'final startup has no stale signal')
+    } finally {
+        releaseOpen?.()
+        manager.disable()
+        await enabling
+        Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
+    }
+})
+
+await asyncTest('MIDI startup tracks hot-plug inputs and disable cleans objects removed from access', async () => {
+    let releaseOpen
+    let signalOpening
+    const opening = new Promise(resolve => { signalOpening = resolve })
+    const initial = { id: 'initial', name: 'Initial', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, open() {
+            signalOpening()
+            return new Promise(resolve => { releaseOpen = () => resolve(this) })
+        } }
+    const added = { id: 'added', name: 'Added', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, async open() { this.connection = 'open'; return this } }
+    const access = { inputs: new Map([[initial.id, initial]]), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { requestMIDIAccess: async () => access } })
+    const midi = new MidiState()
+    const manager = new MidiInputManager({ setMidiState: () => midi })
+    let enabling
+    try {
+        enabling = manager.enable()
+        await opening
+        access.inputs.set(added.id, added)
+        assert(typeof access.onstatechange === 'function', 'startup must observe hot-plug events')
+        await access.onstatechange({ port: added })
+        const staleHandler = added.onmidimessage
+        staleHandler({ data: new Uint8Array([0xd0, 127]) })
+        access.inputs.delete(added.id)
+        manager.disable()
+        assertEqual(added.onmidimessage, null, 'disable detaches known objects missing from access map')
+        assertEqual(midi.getPortState({ id: added.id }), null, 'disable disconnects removed object state')
+        staleHandler({ data: new Uint8Array([0xd0, 127]) })
+        assertEqual(midi.getChannel(1).pressure, 0, 'stale message after disable is ignored')
+        releaseOpen()
+        assertEqual(await enabling, false, 'disabled startup must not complete as enabled')
+    } finally {
+        releaseOpen?.()
+        manager.disable()
+        await enabling
+        Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
+    }
+})
+
+await asyncTest('MIDI reconnect using the same port object supersedes its pending open', async () => {
+    const completions = []
+    const input = { id: 'reused', name: 'Reused', type: 'input', state: 'connected', connection: 'closed',
+        onmidimessage: null, open() { return new Promise(resolve => { completions.push(() => resolve(this)) }) } }
+    const access = { inputs: new Map(), onstatechange: null }
+    const previousNavigator = globalThis.navigator
+    Object.defineProperty(globalThis, 'navigator', { configurable: true,
+        value: { requestMIDIAccess: async () => access } })
+    const midi = new MidiState()
+    const manager = new MidiInputManager({ setMidiState: () => midi })
+    const operations = []
+    try {
+        await manager.enable()
+        access.inputs.set(input.id, input)
+        operations.push(access.onstatechange({ port: input }))
+        input.state = 'disconnected'
+        access.inputs.delete(input.id)
+        await access.onstatechange({ port: input })
+        input.state = 'connected'
+        access.inputs.set(input.id, input)
+        operations.push(access.onstatechange({ port: input }))
+        assertEqual(completions.length, 2, 'reconnect must start a current operation even for the same object')
+        completions[1]()
+        await operations[1]
+        completions[0]()
+        await operations[0]
+        assert(typeof input.onmidimessage === 'function', 'current reconnect owns the live handler')
+        input.onmidimessage({ data: new Uint8Array([0xb0, 74, 90]) })
+        assertEqual(midi.getPortState({ id: input.id }).getChannel(1).cc[74], 90,
+            'stale open completion cannot detach the current reconnect')
+    } finally {
+        completions.forEach(resolve => resolve())
+        await Promise.all(operations)
+        manager.disable()
+        Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
     }
 })
 
@@ -630,6 +795,41 @@ test('AudioState.reset clears all values', () => {
     assertEqual(audio.high, 0, 'high should be 0')
     assertEqual(audio.vol, 0, 'vol should be 0')
     assertEqual(audio.raw, 0, 'raw signal should be centered at zero')
+})
+
+test('AudioState.resetAggregate clears legacy samples and smoothing without disturbing selected channels', () => {
+    const audio = new AudioState()
+    audio.registerDevice({ id: 'selected', name: 'Selected', channelCount: 1 })
+    audio.registerDefaultChannels(1)
+    const selected = audio.getDeviceChannelState({ id: 'selected', channel: 1 })
+    const defaultChannel = audio.getDefaultChannelState(1)
+    let sample = 128
+    const analyser = { frequencyBinCount: 128, getByteFrequencyData(data) { data.fill(sample) } }
+    audio.updateFromAnalyser(analyser)
+    selected.updateFromAnalyser(analyser)
+    audio.setRaw(0.8)
+    selected.setRaw(-0.25)
+    defaultChannel.setRaw(0.5)
+    audio.setSpectrum(new Uint8Array(128).fill(128))
+    audio.setWaveform(new Uint8Array(128).fill(255))
+    audio.resetAggregate()
+    for (const field of ['low', 'mid', 'high', 'vol', 'raw']) assertEqual(audio[field], 0, `${field} should clear`)
+    assertEqual(audio.rawReady, false, 'aggregate raw readiness clears')
+    assert(audio.fft.every(value => value === 0), 'aggregate fft clears')
+    assert(audio.spectrum.every(value => value === 0), 'aggregate spectrum clears')
+    assert(audio.waveform.every(value => value === 0.5), 'aggregate waveform returns to silence')
+    assertEqual(selected.raw, -0.25, 'named channel remains live')
+    assertEqual(defaultChannel.raw, 0.5, 'default channel remains live')
+    assertEqual(selected.rawReady, true, 'named readiness is preserved')
+    assertEqual(defaultChannel.rawReady, true, 'default readiness is preserved')
+    sample = 32
+    audio.updateFromAnalyser(analyser)
+    selected.updateFromAnalyser(analyser)
+    assertApprox(audio.low, 32 / 255, 1e-12, 'new aggregate source has no previous smoothing history')
+    assertApprox(selected.low, 80 / 255, 1e-12, 'selected smoothing history is preserved')
+    audio.reset()
+    assertEqual(selected.rawReady, false, 'full reset still clears named channels')
+    assertEqual(defaultChannel.rawReady, false, 'full reset still clears default channels')
 })
 
 test('AudioState stores bipolar raw signal without losing its sign', () => {
