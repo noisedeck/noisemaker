@@ -6,8 +6,6 @@ Features
 
    cubemaps
    pipeline-3d
-   parallax
-   mashup
    smrticles
    midi-audio
    renderer-output
